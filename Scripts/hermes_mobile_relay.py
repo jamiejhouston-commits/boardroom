@@ -18,6 +18,7 @@ import importlib.util
 import io
 import json
 import os
+import queue
 import secrets
 import socket
 import subprocess
@@ -476,11 +477,44 @@ class RelayHandler(BaseHTTPRequestHandler):
             self.write_sse({"type": "error", "message": str(error)})
             return
 
+        # Read hermes stdout on a background thread so the main loop can emit
+        # SSE keepalives during the cold-start / model "think" gap. Without
+        # this the connection sits dead-silent for 15-30s (longer if the model
+        # stalls) and the app's quiet-byte timeout fires — the #1 cause of the
+        # "it timed out" reports.
+        line_queue: queue.Queue = queue.Queue()
+
+        def pump() -> None:
+            try:
+                assert process.stdout is not None
+                for line in process.stdout:
+                    line_queue.put(line)
+            finally:
+                line_queue.put(None)   # EOF sentinel
+
+        reader = threading.Thread(target=pump, daemon=True)
+        reader.start()
+
         output_parts: list[str] = []
         suppress_metadata = False
+        started = time.monotonic()
+        keepalive_seconds = 8
+
         try:
-            assert process.stdout is not None
-            for line in process.stdout:
+            while True:
+                try:
+                    line = line_queue.get(timeout=keepalive_seconds)
+                except queue.Empty:
+                    # Silent gap — hold the connection open, enforce the cap.
+                    if time.monotonic() - started > self.timeout:
+                        process.kill()
+                        self.write_sse({"type": "error",
+                                        "message": "Hermes took too long to respond. Try again."})
+                        return
+                    self.write_keepalive()
+                    continue
+                if line is None:
+                    break   # process finished
                 output_parts.append(line)
                 if is_metadata_line(line):
                     suppress_metadata = True
@@ -490,6 +524,9 @@ class RelayHandler(BaseHTTPRequestHandler):
                 self.write_sse({"type": "delta", "text": line})
 
             returncode = process.wait(timeout=5)
+        except (BrokenPipeError, ConnectionResetError):
+            process.kill()   # the app hung up — don't leak the process
+            return
         except subprocess.TimeoutExpired:
             process.kill()
             self.write_sse({"type": "error", "message": "Hermes process did not exit cleanly."})
@@ -525,6 +562,13 @@ class RelayHandler(BaseHTTPRequestHandler):
         self.wfile.write(b"data: ")
         self.wfile.write(encoded)
         self.wfile.write(b"\n\n")
+        self.wfile.flush()
+
+    def write_keepalive(self) -> None:
+        # SSE comment line: keeps the socket warm during the model's think
+        # gap. The app skips any line without a "data: " prefix, so this is
+        # invisible to it — it only resets the connection's idle timer.
+        self.wfile.write(b": keepalive\n\n")
         self.wfile.flush()
 
     def is_authorized(self) -> bool:

@@ -806,7 +806,7 @@ final class MeetingConversation: ObservableObject {
 
         Task {
             do {
-                for try await event in HermesRelayClient(configuration: config).stream(payload, sessionKey: session) {
+                for try await event in HermesRelayClient(configuration: config).stream(payload, sessionKey: session, fast: true) {
                     switch event.type {
                     case .start: break
                     case .delta: appendTo(responseID, event.text ?? "")
