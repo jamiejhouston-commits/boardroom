@@ -256,3 +256,27 @@ def advance_stage(state: dict, init: dict, runner, artifacts_root: Path) -> None
         log_minute(init, "demo", "ceo", reply)
         init["brief"] = reply.strip()
         init["stage"] = "gate2"
+
+
+def find_initiative(state: dict, initiative_id: str) -> dict:
+    for init in state["initiatives"]:
+        if init["id"] == initiative_id:
+            return init
+    raise KeyError(initiative_id)
+
+
+def apply_gate(state: dict, initiative_id: str, decision: str, note: str = "") -> dict:
+    init = find_initiative(state, initiative_id)
+    if init["stage"] not in GATE_STAGES:
+        raise ValueError(f"initiative {initiative_id} is not awaiting a decision")
+    if decision not in ("approve", "kill", "revise"):
+        raise ValueError(f"unknown decision: {decision}")
+    init["note"] = note
+    at_gate1 = init["stage"] == "gate1"
+    if decision == "kill":
+        init["stage"] = "killed"
+    elif decision == "approve":
+        init["stage"] = "planning" if at_gate1 else "shipped"
+    else:  # revise
+        init["stage"] = "research" if at_gate1 else "execution"
+    return init

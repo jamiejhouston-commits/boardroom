@@ -176,5 +176,48 @@ class StageMachineTests(unittest.TestCase):
         self.assertIn("Demo Day", self.init["brief"])
 
 
+class GateTests(unittest.TestCase):
+    def setUp(self):
+        self.state = company.new_state()
+        self.init = company.new_initiative("A", "")
+        self.state["initiatives"] = [self.init]
+
+    def test_gate1_approve_moves_to_planning(self):
+        self.init["stage"] = "gate1"
+        company.apply_gate(self.state, self.init["id"], "approve", "go")
+        self.assertEqual(self.init["stage"], "planning")
+        self.assertEqual(self.init["note"], "go")
+
+    def test_gate1_kill(self):
+        self.init["stage"] = "gate1"
+        company.apply_gate(self.state, self.init["id"], "kill")
+        self.assertEqual(self.init["stage"], "killed")
+
+    def test_gate1_revise_returns_to_research(self):
+        self.init["stage"] = "gate1"
+        company.apply_gate(self.state, self.init["id"], "revise", "narrower scope")
+        self.assertEqual(self.init["stage"], "research")
+
+    def test_gate2_approve_ships(self):
+        self.init["stage"] = "gate2"
+        company.apply_gate(self.state, self.init["id"], "approve")
+        self.assertEqual(self.init["stage"], "shipped")
+
+    def test_gate2_revise_returns_to_execution(self):
+        self.init["stage"] = "gate2"
+        company.apply_gate(self.state, self.init["id"], "revise", "fix the report")
+        self.assertEqual(self.init["stage"], "execution")
+
+    def test_gate_rejects_wrong_stage_and_unknown_id(self):
+        self.init["stage"] = "research"
+        with self.assertRaises(ValueError):
+            company.apply_gate(self.state, self.init["id"], "approve")
+        with self.assertRaises(KeyError):
+            company.apply_gate(self.state, "nope", "approve")
+        self.init["stage"] = "gate1"
+        with self.assertRaises(ValueError):
+            company.apply_gate(self.state, self.init["id"], "maybe")
+
+
 if __name__ == "__main__":
     unittest.main()
