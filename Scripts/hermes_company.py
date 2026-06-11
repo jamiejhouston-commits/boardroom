@@ -106,3 +106,69 @@ def make_charged_runner(initiative: dict, budget: int, runner):
         initiative["calls_used"] += 1
         return runner(role, prompt)
     return charged
+
+
+ROLE_SOULS = {
+    "research": "You are the Head of Research of an autonomous AI product company. You scout markets with evidence, never hype.",
+    "cfo": "You are the CFO. You weigh cost, monetization, and opportunity cost. You are the board's skeptic.",
+    "cto": "You are the CTO. You judge technical feasibility, scope, and how fast a small team can ship.",
+    "marketing": "You are the Head of Marketing. You judge demand, distribution channels, and how the product gets users.",
+    "ceo": "You are the CEO. You chair the board, weigh dissent honestly, and decide. You report to the owner (the human Chairman).",
+    "builder": "You are the Lead Builder. You produce real deliverables — files, code, docs — not descriptions of them.",
+}
+
+SCOUT_JSON_SPEC = (
+    'Respond with STRICT JSON only, exactly this shape: '
+    '{"ideas": [{"title": "...", "pitch": "one sentence", "heat": 1, "fit": 1, '
+    '"effort": 1, "rationale": "..."}]} '
+    "— heat = market momentum 1-10, fit = match to our thesis 1-10, "
+    "effort = build cost 1-10 (lower is easier). Up to 3 ideas."
+)
+
+
+def role_prompt(role: str, body: str) -> str:
+    return f"{ROLE_SOULS[role]}\n\n{body}"
+
+
+def parse_ideas(text: str) -> list[dict]:
+    match = re.search(r"\{.*\}", text, re.S)
+    if not match:
+        return []
+    try:
+        data = json.loads(match.group(0))
+    except json.JSONDecodeError:
+        return []
+    ideas = data.get("ideas") if isinstance(data, dict) else None
+    if not isinstance(ideas, list):
+        return []
+    return [i for i in ideas if isinstance(i, dict) and i.get("title")]
+
+
+def idea_score(idea: dict) -> int:
+    def num(key):
+        value = idea.get(key, 0)
+        return value if isinstance(value, (int, float)) else 0
+    return num("heat") + num("fit") - num("effort")
+
+
+def run_scout(state: dict, runner) -> dict | None:
+    thesis = state.get("thesis") or "small, useful products that ship in days"
+    sources = state["config"].get("scout_sources", DEFAULT_CONFIG["scout_sources"])
+    body = (
+        f"Scan current market trends across: {sources}. "
+        f"The owner's standing investment thesis: {thesis}. "
+        f"Avoid re-pitching ideas similar to past initiatives: "
+        f"{[i['title'] for i in state['initiatives']][:20]}. "
+        f"Propose buildable product opportunities. {SCOUT_JSON_SPEC}"
+    )
+    ideas = parse_ideas(runner("research", role_prompt("research", body)))
+    if not ideas:
+        return None
+    best = max(ideas, key=idea_score)
+    initiative = new_initiative(
+        str(best["title"]),
+        str(best.get("pitch", "")),
+        score={k: best.get(k) for k in ("heat", "fit", "effort", "rationale")},
+    )
+    state["initiatives"].insert(0, initiative)
+    return initiative

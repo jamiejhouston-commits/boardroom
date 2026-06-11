@@ -77,5 +77,48 @@ class GuardrailTests(unittest.TestCase):
             runner("ceo", "again")
 
 
+SCOUT_REPLY = """Here's what I found.
+{"ideas": [
+  {"title": "Focus Timer", "pitch": "ADHD-friendly timer", "heat": 6, "fit": 8, "effort": 3, "rationale": "trending"},
+  {"title": "Trend Radar", "pitch": "daily trend digest", "heat": 9, "fit": 7, "effort": 4, "rationale": "hot"}
+]}
+Done."""
+
+
+class ScoutTests(unittest.TestCase):
+    def test_parse_ideas_extracts_json_from_noise(self):
+        ideas = company.parse_ideas(SCOUT_REPLY)
+        self.assertEqual(len(ideas), 2)
+        self.assertEqual(ideas[0]["title"], "Focus Timer")
+
+    def test_parse_ideas_garbage_returns_empty(self):
+        self.assertEqual(company.parse_ideas("no json here"), [])
+        self.assertEqual(company.parse_ideas('{"ideas": "not a list"}'), [])
+
+    def test_run_scout_creates_best_scoring_initiative(self):
+        state = company.new_state()
+        state["thesis"] = "consumer apps"
+        init = company.run_scout(state, lambda role, prompt: SCOUT_REPLY)
+        # Trend Radar: 9+7-4=12 beats Focus Timer: 6+8-3=11
+        self.assertIsNotNone(init)
+        self.assertEqual(init["title"], "Trend Radar")
+        self.assertEqual(init["stage"], "research")
+        self.assertEqual(len(state["initiatives"]), 1)
+
+    def test_run_scout_includes_thesis_in_prompt(self):
+        seen = {}
+        def runner(role, prompt):
+            seen["role"], seen["prompt"] = role, prompt
+            return SCOUT_REPLY
+        company.run_scout({"thesis": "no crypto", "config": dict(company.DEFAULT_CONFIG), "initiatives": [], "enabled": True, "last_tick": 0}, runner)
+        self.assertEqual(seen["role"], "research")
+        self.assertIn("no crypto", seen["prompt"])
+
+    def test_run_scout_unparseable_returns_none(self):
+        state = company.new_state()
+        self.assertIsNone(company.run_scout(state, lambda r, p: "imagine no json"))
+        self.assertEqual(state["initiatives"], [])
+
+
 if __name__ == "__main__":
     unittest.main()
