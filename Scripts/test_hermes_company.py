@@ -120,5 +120,61 @@ class ScoutTests(unittest.TestCase):
         self.assertEqual(state["initiatives"], [])
 
 
+class StageMachineTests(unittest.TestCase):
+    def setUp(self):
+        self.state = company.new_state()
+        self.init = company.new_initiative("Trend Radar", "daily digest")
+        self.state["initiatives"] = [self.init]
+        self.tmp = tempfile.TemporaryDirectory()
+        self.root = Path(self.tmp.name)
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def advance(self, runner=None):
+        company.advance_stage(self.state, self.init,
+                              runner or (lambda r, p: f"{r} says fine."),
+                              self.root)
+
+    def test_research_logs_memo_and_moves_to_boardroom(self):
+        self.advance()
+        self.assertEqual(self.init["stage"], "boardroom")
+        self.assertEqual(self.init["minutes"][0]["stage"], "research")
+
+    def test_boardroom_runs_three_voices_plus_ceo_brief(self):
+        self.init["stage"] = "boardroom"
+        roles = []
+        def runner(role, prompt):
+            roles.append(role)
+            return f"{role}: position."
+        self.advance(runner)
+        self.assertEqual(roles, ["cfo", "cto", "marketing", "ceo"])
+        self.assertEqual(self.init["stage"], "gate1")
+        self.assertIn("ceo", self.init["brief"])
+
+    def test_planning_moves_to_execution(self):
+        self.init["stage"] = "planning"
+        self.advance()
+        self.assertEqual(self.init["stage"], "execution")
+
+    def test_execution_collects_artifacts_and_moves_to_demo_ready(self):
+        self.init["stage"] = "execution"
+        outdir = self.root / self.init["id"]
+        def runner(role, prompt):
+            outdir.mkdir(parents=True, exist_ok=True)
+            (outdir / "report.md").write_text("done")
+            return "Created report.md"
+        self.advance(runner)
+        self.assertEqual(self.init["stage"], "demo_ready")
+        self.assertEqual(len(self.init["artifacts"]), 1)
+        self.assertTrue(self.init["artifacts"][0].endswith("report.md"))
+
+    def test_demo_ready_writes_invite_brief_and_moves_to_gate2(self):
+        self.init["stage"] = "demo_ready"
+        self.advance(lambda r, p: "Demo Day: we built Trend Radar.")
+        self.assertEqual(self.init["stage"], "gate2")
+        self.assertIn("Demo Day", self.init["brief"])
+
+
 if __name__ == "__main__":
     unittest.main()

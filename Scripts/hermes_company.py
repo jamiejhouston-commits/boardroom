@@ -172,3 +172,87 @@ def run_scout(state: dict, runner) -> dict | None:
     )
     state["initiatives"].insert(0, initiative)
     return initiative
+
+
+def log_minute(initiative: dict, stage: str, role: str, text: str) -> None:
+    initiative["minutes"].append({
+        "stage": stage,
+        "role": role,
+        "text": text.strip(),
+        "ts": datetime.now().isoformat(timespec="seconds"),
+    })
+
+
+def last_text(initiative: dict, stage: str) -> str:
+    for entry in reversed(initiative["minutes"]):
+        if entry["stage"] == stage:
+            return entry["text"]
+    return ""
+
+
+def advance_stage(state: dict, init: dict, runner, artifacts_root: Path) -> None:
+    """Advance one initiative by exactly one stage. Gates are no-ops here —
+    they advance only via apply_gate (the owner's decision)."""
+    stage = init["stage"]
+
+    if stage == "research":
+        reply = runner("research", role_prompt("research",
+            f"Initiative: {init['title']} — {init['pitch']}.\n"
+            "Produce a focused research memo: market, competitors, target user, "
+            "risks, and a recommended scope a tiny team ships in days. Be concrete."))
+        log_minute(init, "research", "research", reply)
+        init["stage"] = "boardroom"
+
+    elif stage == "boardroom":
+        transcript = ""
+        memo = last_text(init, "research")
+        for role in ("cfo", "cto", "marketing"):
+            reply = runner(role, role_prompt(role,
+                f"Boardroom review of: {init['title']} — {init['pitch']}.\n"
+                f"Research memo:\n{memo}\n\nDebate so far:\n{transcript}\n"
+                "Give your honest position in 3-5 sentences: support or oppose, and why. "
+                "Disagree openly when warranted."))
+            log_minute(init, "boardroom", role, reply)
+            transcript += f"\n{role.upper()}: {reply}"
+        verdict = runner("ceo", role_prompt("ceo",
+            f"Initiative: {init['title']}.\nBoard debate:\n{transcript}\n"
+            "Write a 5-line decision brief for the owner: WHAT we'd build, WHY now, "
+            "WHO works on it, EFFORT estimate, and any board dissent. "
+            "End with your recommendation: GREENLIGHT or PASS."))
+        log_minute(init, "boardroom", "ceo", verdict)
+        init["brief"] = verdict.strip()
+        init["stage"] = "gate1"
+
+    elif stage == "planning":
+        note = f" The owner added: {init['note']}." if init["note"] else ""
+        reply = runner("ceo", role_prompt("ceo",
+            f"The owner GREENLIT '{init['title']}'.{note}\n"
+            f"Research memo:\n{last_text(init, 'research')}\n"
+            "Write concrete work orders for the build team: numbered deliverables "
+            "with acceptance criteria. Only what ships in days."))
+        log_minute(init, "planning", "ceo", reply)
+        init["stage"] = "execution"
+
+    elif stage == "execution":
+        outdir = artifacts_root / init["id"]
+        outdir.mkdir(parents=True, exist_ok=True)
+        reply = runner("builder", role_prompt("builder",
+            f"Execute these work orders for '{init['title']}'. "
+            f"Save EVERY deliverable as a real file under {outdir} using your file tools.\n"
+            f"Work orders:\n{last_text(init, 'planning')}\n"
+            "When done, list each file you created with a one-line summary."))
+        log_minute(init, "execution", "builder", reply)
+        init["artifacts"] = sorted(
+            str(p) for p in outdir.rglob("*") if p.is_file())
+        init["stage"] = "demo_ready"
+
+    elif stage == "demo_ready":
+        files = "\n".join(init["artifacts"]) or "(no files recorded)"
+        reply = runner("ceo", role_prompt("ceo",
+            f"The team finished '{init['title']}'. Deliverables:\n{files}\n"
+            f"Builder's report:\n{last_text(init, 'execution')}\n"
+            "Write the Demo Day invitation for the owner: what was built, "
+            "3 highlights, and the ship/no-ship question. 6 lines max."))
+        log_minute(init, "demo", "ceo", reply)
+        init["brief"] = reply.strip()
+        init["stage"] = "gate2"
