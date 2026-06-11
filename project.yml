@@ -1,0 +1,68 @@
+name: HermesMobile
+options:
+  bundleIdPrefix: com.nousresearch
+  deploymentTarget:
+    iOS: "18.0"
+settings:
+  base:
+    DEVELOPMENT_TEAM: 5W63NRSP25
+    CODE_SIGN_STYLE: Automatic
+    SWIFT_VERSION: "6.0"
+    MARKETING_VERSION: "0.1.0"
+    CURRENT_PROJECT_VERSION: "1"
+schemes:
+  HermesMobile:
+    build:
+      targets:
+        HermesMobile: all
+    run:
+      config: Debug
+    archive:
+      config: Release
+
+targets:
+  HermesMobile:
+    type: application
+    platform: iOS
+    sources:
+      - HermesMobile/Sources/HermesMobile
+    info:
+      path: HermesMobile/Info.plist
+      properties:
+        CFBundleDisplayName: Hermes
+        LSApplicationCategoryType: public.app-category.productivity
+        NSSupportsLiveActivities: true
+        NSBonjourServices: [_hermes-relay._tcp]
+        UIBackgroundModes: [fetch]
+        BGTaskSchedulerPermittedIdentifiers: [com.nousresearch.HermesMobile.companyRefresh]
+        NSLocalNetworkUsageDescription: Connect to the Hermes Mobile relay running on your Mac.
+        NSCameraUsageDescription: Scan relay pairing codes and place your Hermes headquarters in augmented reality.
+        NSMicrophoneUsageDescription: Record voice notes to send to Hermes.
+        NSSpeechRecognitionUsageDescription: Transcribe voice notes before sending them to Hermes.
+        NSPhotoLibraryUsageDescription: Attach photos to your messages to Hermes agents.
+        NSCalendarsWriteOnlyAccessUsageDescription: Add your Hermes meetings to your calendar with a 15-minute alert.
+        NSCalendarsUsageDescription: Add your Hermes meetings to your calendar with a 15-minute alert.
+        NSAppTransportSecurity:
+          NSAllowsArbitraryLoads: true
+        UIApplicationSceneManifest:
+          UIApplicationSupportsMultipleScenes: false
+        UIApplicationSupportsIndirectInputEvents: true
+        UILaunchScreen: {}
+        UISupportedInterfaceOrientations: [UIInterfaceOrientationPortrait]
+        UISupportedInterfaceOrientations~ipad: [UIInterfaceOrientationPortrait, UIInterfaceOrientationLandscapeLeft, UIInterfaceOrientationLandscapeRight]
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.nousresearch.HermesMobile
+        ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
+        TARGETED_DEVICE_FAMILY: "1,2"
+  HermesMobileTests:
+    type: bundle.unit-test
+    platform: iOS
+    sources:
+      - HermesMobile/Tests/HermesMobileTests
+    dependencies:
+      - target: HermesMobile
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.nousresearch.HermesMobileTests
+        GENERATE_INFOPLIST_FILE: YES

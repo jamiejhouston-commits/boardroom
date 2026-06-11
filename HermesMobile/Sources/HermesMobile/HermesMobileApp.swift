@@ -1,7 +1,11 @@
+import BackgroundTasks
 import SwiftUI
 
 @main
 struct HermesMobileApp: App {
+    @Environment(\.scenePhase) private var scenePhase
+
+    private static let companyRefreshTaskID = "com.nousresearch.HermesMobile.companyRefresh"
     @StateObject private var store = AgentProfileStore()
     @StateObject private var runtime = HermesRuntimeController()
     @StateObject private var org = OrgStore()
@@ -23,7 +27,41 @@ struct HermesMobileApp: App {
                 .task {
                     store.load()
                     runtime.boot()
+                    Self.registerCompanyRefresh()
                 }
         }
+        .onChange(of: scenePhase) { _, phase in
+            if phase == .background {
+                Self.scheduleCompanyRefresh()
+            }
+        }
+    }
+
+    // MARK: Background gate alerts — "the board needs you" while the
+    // phone is in your pocket. iOS decides actual timing (discretionary).
+
+    private static var didRegisterCompanyRefresh = false
+
+    static func registerCompanyRefresh() {
+        guard !didRegisterCompanyRefresh else { return }
+        didRegisterCompanyRefresh = true
+        BGTaskScheduler.shared.register(forTaskWithIdentifier: companyRefreshTaskID, using: nil) { task in
+            scheduleCompanyRefresh()   // keep the chain alive
+            let refresh = Task {
+                let relay = HermesRuntimeController.persistedRelayConfiguration()
+                if relay.isConfigured,
+                   let state = try? await HermesRelayClient(configuration: relay).companyState() {
+                    CompanyStore.notifyNewGates(in: state)
+                }
+                task.setTaskCompleted(success: true)
+            }
+            task.expirationHandler = { refresh.cancel() }
+        }
+    }
+
+    static func scheduleCompanyRefresh() {
+        let request = BGAppRefreshTaskRequest(identifier: companyRefreshTaskID)
+        request.earliestBeginDate = Date(timeIntervalSinceNow: 15 * 60)
+        try? BGTaskScheduler.shared.submit(request)
     }
 }
