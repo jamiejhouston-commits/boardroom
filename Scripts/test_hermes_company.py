@@ -219,5 +219,72 @@ class GateTests(unittest.TestCase):
             company.apply_gate(self.state, self.init["id"], "maybe")
 
 
+NOON = time.mktime((2026, 6, 11, 12, 0, 0, 0, 0, -1))      # 12:00 local
+MIDNIGHT = time.mktime((2026, 6, 11, 23, 30, 0, 0, 0, -1))  # 23:30 local
+
+
+class TickTests(unittest.TestCase):
+    def setUp(self):
+        self.state = company.new_state()
+        self.state["enabled"] = True
+        self.tmp = tempfile.TemporaryDirectory()
+        self.root = Path(self.tmp.name)
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def tick(self, runner=None, now=NOON):
+        return company.tick(self.state, runner or (lambda r, p: SCOUT_REPLY),
+                            self.root, now=now)
+
+    def test_disabled_company_does_nothing(self):
+        self.state["enabled"] = False
+        self.assertEqual(self.tick(), [])
+
+    def test_quiet_hours_do_nothing(self):
+        self.assertEqual(self.tick(now=MIDNIGHT), [])
+        self.assertEqual(self.state["initiatives"], [])
+
+    def test_interval_not_elapsed_does_nothing(self):
+        self.state["last_tick"] = NOON - 60   # one minute ago
+        self.assertEqual(self.tick(), [])
+
+    def test_scouts_when_capacity_available(self):
+        events = self.tick()
+        self.assertEqual(len(self.state["initiatives"]), 1)
+        self.assertTrue(any("scouted" in e for e in events))
+
+    def test_no_scout_when_at_capacity_even_at_gate(self):
+        init = company.new_initiative("Busy", "")
+        init["stage"] = "gate1"
+        self.state["initiatives"] = [init]
+        self.tick()
+        self.assertEqual(len(self.state["initiatives"]), 1)
+
+    def test_advances_working_initiative_one_stage(self):
+        init = company.new_initiative("A", "")
+        self.state["initiatives"] = [init]
+        self.tick(runner=lambda r, p: "memo")
+        self.assertEqual(init["stage"], "boardroom")
+
+    def test_budget_exhaustion_kills_initiative(self):
+        init = company.new_initiative("A", "")
+        init["calls_used"] = 40
+        self.state["initiatives"] = [init]
+        self.tick(runner=lambda r, p: "memo")
+        self.assertEqual(init["stage"], "killed")
+        self.assertIn("budget", init["note"])
+
+    def test_runner_crash_stalls_initiative_not_heartbeat(self):
+        bad = company.new_initiative("Bad", "")
+        self.state["initiatives"] = [bad]
+        def runner(role, prompt):
+            raise RuntimeError("relay offline")
+        events = self.tick(runner=runner)
+        self.assertIn("stalled", bad["note"])
+        self.assertEqual(bad["stage"], "research")  # unchanged, retried next tick
+        self.assertTrue(events)
+
+
 if __name__ == "__main__":
     unittest.main()

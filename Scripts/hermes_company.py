@@ -280,3 +280,42 @@ def apply_gate(state: dict, initiative_id: str, decision: str, note: str = "") -
     else:  # revise
         init["stage"] = "research" if at_gate1 else "execution"
     return init
+
+
+def tick(state: dict, runner, artifacts_root: Path, now: float | None = None) -> list[str]:
+    """One heartbeat: advance every working initiative one stage, then scout
+    if there's capacity. Returns human-readable event strings."""
+    now = now if now is not None else time.time()
+    config = state["config"]
+    if not state["enabled"]:
+        return []
+    hour = datetime.fromtimestamp(now).hour
+    if is_quiet(hour, config["quiet_start"], config["quiet_end"]):
+        return []
+    if now - state["last_tick"] < config["interval_minutes"] * 60:
+        return []
+    state["last_tick"] = now
+
+    events: list[str] = []
+    for init in list(working(state)):
+        charged = make_charged_runner(init, config["budget_calls"], runner)
+        try:
+            advance_stage(state, init, charged, artifacts_root)
+            events.append(f"{init['id']} advanced to {init['stage']}")
+        except BudgetExceeded:
+            init["stage"] = "killed"
+            init["note"] = "token budget exhausted"
+            events.append(f"{init['id']} killed: budget exhausted")
+        except Exception as error:  # noqa: BLE001 — one bad turn must not stop the pulse
+            init["note"] = f"stalled: {error}"
+            events.append(f"{init['id']} stalled: {error}")
+
+    if len(active(state)) < config["max_active"]:
+        try:
+            scouted = run_scout(state, runner)
+        except Exception as error:  # noqa: BLE001
+            scouted = None
+            events.append(f"scout failed: {error}")
+        if scouted is not None:
+            events.append(f"scouted new initiative {scouted['id']}: {scouted['title']}")
+    return events
