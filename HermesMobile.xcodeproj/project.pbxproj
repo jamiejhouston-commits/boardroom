@@ -40,6 +40,7 @@
 		9CEF2A0132AE16F54F450EEE /* ARHeadquartersView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1B0C8A17AFBE7A3038C509F9 /* ARHeadquartersView.swift */; };
 		9E2D68FDC746B64C5644D42E /* CommandCenterView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 75A29F98C8E82D33D8DC9C70 /* CommandCenterView.swift */; };
 		9F522956F3381D187424D2BF /* CompanyFloorView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2CD7B886FA5A99CFC794902E /* CompanyFloorView.swift */; };
+		A5AFBD9126705E2BACA7B86C /* BoardroomView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4E5F8E9879A2FCF0521318C2 /* BoardroomView.swift */; };
 		A5C5496FD6230FCBE20EF269 /* HermesPairingPayloadTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 770EC7AC86F254092DDEA9BA /* HermesPairingPayloadTests.swift */; };
 		A92891D1AFD27A1DAB52690E /* MemosView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 86D41F6A51E60529D0DE79ED /* MemosView.swift */; };
 		ABE1B1AA7A9832FA834CC40C /* SharedComponents.swift in Sources */ = {isa = PBXBuildFile; fileRef = E6A6C79E72E4E55D11B9B877 /* SharedComponents.swift */; };
@@ -97,6 +98,7 @@
 		4623FA8A91FDD6D355D57CC1 /* MeetingRoomView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MeetingRoomView.swift; sourceTree = "<group>"; };
 		4AA37B3F36693958B8E01CDA /* ScheduleMeetingView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ScheduleMeetingView.swift; sourceTree = "<group>"; };
 		4CFD95E91706EC2DEAB8F2A9 /* RuntimeView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RuntimeView.swift; sourceTree = "<group>"; };
+		4E5F8E9879A2FCF0521318C2 /* BoardroomView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BoardroomView.swift; sourceTree = "<group>"; };
 		4E8948949B9BA44BC4376297 /* CompanyChatView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CompanyChatView.swift; sourceTree = "<group>"; };
 		56E875A6E4D0D9AAFD16F7BB /* HermesPairingPayload.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HermesPairingPayload.swift; sourceTree = "<group>"; };
 		619F5BA3CF521B48B2AB9883 /* SoulLibrary.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SoulLibrary.swift; sourceTree = "<group>"; };
@@ -149,6 +151,7 @@
 				1B0C8A17AFBE7A3038C509F9 /* ARHeadquartersView.swift */,
 				0C6980FD7D0211B3AE19AD3D /* AttendeePickerView.swift */,
 				807857BE22921684D97BFA7C /* AutomationView.swift */,
+				4E5F8E9879A2FCF0521318C2 /* BoardroomView.swift */,
 				F01B7E117BEE20AC80F8D22A /* BriefingView.swift */,
 				75A29F98C8E82D33D8DC9C70 /* CommandCenterView.swift */,
 				4E8948949B9BA44BC4376297 /* CompanyChatView.swift */,
@@ -367,6 +370,7 @@
 				73A0BDDFB00E5DA6DDDA3F13 /* AppRouter.swift in Sources */,
 				CD9C171070CDA0DCE6BAB3C1 /* AttendeePickerView.swift in Sources */,
 				15A7A88BF38554CF1F36C9D2 /* AutomationView.swift in Sources */,
+				A5AFBD9126705E2BACA7B86C /* BoardroomView.swift in Sources */,
 				664C2194399C762E2D583F7F /* BriefingCenter.swift in Sources */,
 				8B6D7ECC5032976A75F3C56E /* BriefingView.swift in Sources */,
 				9E2D68FDC746B64C5644D42E /* CommandCenterView.swift in Sources */,
