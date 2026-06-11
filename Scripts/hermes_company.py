@@ -77,3 +77,32 @@ class CompanyStore:
     def save(self, state: dict) -> None:
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self.path.write_text(json.dumps(state, indent=2))
+
+
+class BudgetExceeded(Exception):
+    pass
+
+
+def is_quiet(hour: int, start: int, end: int) -> bool:
+    if start == end:
+        return False
+    if start > end:  # overnight window, e.g. 22 → 7
+        return hour >= start or hour < end
+    return start <= hour < end
+
+
+def active(state: dict) -> list[dict]:
+    return [i for i in state["initiatives"] if i["stage"] not in TERMINAL_STAGES]
+
+
+def working(state: dict) -> list[dict]:
+    return [i for i in active(state) if i["stage"] not in GATE_STAGES]
+
+
+def make_charged_runner(initiative: dict, budget: int, runner):
+    def charged(role: str, prompt: str) -> str:
+        if initiative["calls_used"] >= budget:
+            raise BudgetExceeded(f"{initiative['id']} exhausted {budget} calls")
+        initiative["calls_used"] += 1
+        return runner(role, prompt)
+    return charged

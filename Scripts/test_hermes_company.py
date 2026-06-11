@@ -43,5 +43,39 @@ class StateStoreTests(unittest.TestCase):
         self.assertTrue(init["id"])
 
 
+class GuardrailTests(unittest.TestCase):
+    def test_quiet_hours_overnight_window(self):
+        self.assertTrue(company.is_quiet(23, 22, 7))
+        self.assertTrue(company.is_quiet(3, 22, 7))
+        self.assertFalse(company.is_quiet(12, 22, 7))
+
+    def test_quiet_hours_daytime_window(self):
+        self.assertTrue(company.is_quiet(14, 13, 16))
+        self.assertFalse(company.is_quiet(9, 13, 16))
+
+    def test_quiet_hours_disabled_when_equal(self):
+        self.assertFalse(company.is_quiet(5, 8, 8))
+
+    def test_active_and_working_partitions(self):
+        state = company.new_state()
+        a = company.new_initiative("A", "")            # research → working
+        b = company.new_initiative("B", "")
+        b["stage"] = "gate1"                            # active, not working
+        c = company.new_initiative("C", "")
+        c["stage"] = "killed"                           # terminal
+        state["initiatives"] = [a, b, c]
+        self.assertEqual([i["id"] for i in company.active(state)], [a["id"], b["id"]])
+        self.assertEqual([i["id"] for i in company.working(state)], [a["id"]])
+
+    def test_charged_runner_counts_and_raises_over_budget(self):
+        init = company.new_initiative("A", "")
+        init["calls_used"] = 39
+        runner = company.make_charged_runner(init, budget=40, runner=lambda r, p: "ok")
+        self.assertEqual(runner("ceo", "hi"), "ok")
+        self.assertEqual(init["calls_used"], 40)
+        with self.assertRaises(company.BudgetExceeded):
+            runner("ceo", "again")
+
+
 if __name__ == "__main__":
     unittest.main()
