@@ -194,6 +194,18 @@ struct BoardroomView: View {
                 if initiative.isAwaitingDecision {
                     gateButtons(initiative)
                 }
+
+                if let repoUrl = initiative.repoUrl, !repoUrl.isEmpty,
+                   let url = URL(string: repoUrl) {
+                    Link(destination: url) {
+                        Label("Shipped → private repo", systemImage: "shippingbox.fill")
+                            .font(.caption.weight(.bold))
+                            .frame(maxWidth: .infinity)
+                    }
+                    .buttonStyle(.bordered)
+                    .buttonBorderShape(.capsule)
+                    .tint(HermesTheme.emerald)
+                }
             }
             .padding(.vertical, 4)
         }

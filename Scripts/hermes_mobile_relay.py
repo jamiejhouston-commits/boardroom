@@ -297,6 +297,68 @@ def company_cli_runner(role: str, prompt: str) -> str:
     return clean_reply(result.stdout)
 
 
+def ship_commands(outdir: Path, slug: str) -> list[list[str]]:
+    """Commands that publish an initiative's deliverables as a PRIVATE repo
+    on the owner's GitHub account. Private by design — the owner reviews and
+    flips it public themselves if and when they choose."""
+    return [
+        ["git", "-C", str(outdir), "init", "-b", "main"],
+        ["git", "-C", str(outdir), "add", "-A"],
+        ["git", "-C", str(outdir),
+         "-c", "user.name=Boardroom", "-c", "user.email=boardroom@localhost",
+         "commit", "-m", f"Ship: {slug} — built by the Boardroom company", "--allow-empty"],
+        ["gh", "repo", "create", slug, "--private",
+         "--source", str(outdir), "--push"],
+    ]
+
+
+def ship_initiative(init: dict) -> str | None:
+    """Run the ship pipeline; returns the private repo URL or None."""
+    slug = company_module.initiative_dirname(init)
+    outdir = COMPANY_ARTIFACTS_ROOT / slug
+    if not outdir.is_dir():
+        return None
+    url = None
+    for command in ship_commands(outdir, slug):
+        result = subprocess.run(command, text=True, capture_output=True,
+                                timeout=120, check=False)
+        if command[0] == "gh":
+            output = (result.stdout or "") + (result.stderr or "")
+            match = re.search(r"https://github\.com/\S+", output)
+            if match:
+                url = match.group(0).rstrip("/").removesuffix(".git")
+            if result.returncode != 0 and "already exists" in output:
+                # Re-ship after a revise round: push to the existing repo.
+                subprocess.run(["git", "-C", str(outdir), "push", "-u", "origin", "main"],
+                               text=True, capture_output=True, timeout=120, check=False)
+    return url
+
+
+def ship_in_background(initiative_id: str) -> None:
+    """Ship without blocking the gate response; record the repo URL in state."""
+    def run() -> None:
+        store = company_module.CompanyStore(COMPANY_STATE_PATH)
+        with COMPANY_LOCK:
+            state = store.load()
+            try:
+                init = company_module.find_initiative(state, initiative_id)
+            except KeyError:
+                return
+        url = ship_initiative(init)   # slow — outside the lock
+        with COMPANY_LOCK:
+            state = store.load()
+            try:
+                init = company_module.find_initiative(state, initiative_id)
+            except KeyError:
+                return
+            init["repo_url"] = url or ""
+            if url:
+                init["note"] = f"Shipped to private repo: {url}"
+            store.save(state)
+        print(f"company - {initiative_id} shipped: {url or 'repo push failed'}", flush=True)
+    threading.Thread(target=run, daemon=True).start()
+
+
 def company_summary(state: dict) -> dict:
     """State for the app: everything except the bulky per-stage minutes."""
     slim = []
@@ -412,12 +474,16 @@ class RelayHandler(BaseHTTPRequestHandler):
                     elif self.path == "/company/halt":
                         state["enabled"] = False
                     else:  # /company/gate
-                        company_module.apply_gate(
+                        gated = company_module.apply_gate(
                             state,
                             str(body.get("id", "")),
                             str(body.get("decision", "")),
                             str(body.get("note", "")),
                         )
+                        if gated["stage"] == "shipped":
+                            # "Ship it" means SHIP: private GitHub repo,
+                            # owner's account, link lands back in the app.
+                            ship_in_background(gated["id"])
                 except KeyError:
                     self.send_json({"error": "initiative_not_found"}, status=404)
                     return

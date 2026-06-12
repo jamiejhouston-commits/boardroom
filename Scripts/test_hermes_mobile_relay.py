@@ -84,5 +84,19 @@ class CompanyRunnerTests(unittest.TestCase):
         self.assertNotIn("minutes", summary["initiatives"][0])
 
 
+class ShipTests(unittest.TestCase):
+    def test_ship_commands_create_private_repo_from_outdir(self):
+        commands = relay.ship_commands(Path("/tmp/proj-x"), "proj-x")
+        gh = commands[-1]
+        self.assertEqual(gh[:3], ["gh", "repo", "create"])
+        self.assertIn("--private", gh)
+        self.assertIn("--push", gh)
+        self.assertIn("/tmp/proj-x", gh)
+        # Every git command targets the deliverables dir, not the CWD.
+        for command in commands[:-1]:
+            self.assertEqual(command[:3][0], "git")
+            self.assertIn("/tmp/proj-x", command)
+
+
 if __name__ == "__main__":
     unittest.main()

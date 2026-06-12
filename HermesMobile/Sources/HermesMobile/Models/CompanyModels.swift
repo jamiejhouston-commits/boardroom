@@ -49,6 +49,8 @@ struct CompanyInitiative: Codable, Equatable, Identifiable {
     var brief: String
     var artifacts: [String]
     var note: String
+    /// Private GitHub repo the deliverables shipped to (set after gate-2 approve).
+    var repoUrl: String?
     /// Present only on the detail endpoint.
     var minutes: [CompanyMinute]?
 
