@@ -32,6 +32,33 @@ struct OrgAgent: Identifiable, Hashable, Codable {
     var soul: String = ""
 }
 
+extension OrgAgent {
+    /// The company-engine role this agent fills, if any. The autonomous
+    /// company runs these roles under `company-<role>` sessions on the relay.
+    var companyRole: String? {
+        if tier == .ceo { return "ceo" }
+        let s = "\(title) \(name) \(summary)".lowercased()
+        func has(_ words: [String]) -> Bool { words.contains { s.contains($0) } }
+        if has(["cfo", "financ", "account", "budget", "treasur"]) { return "cfo" }
+        if has(["cto", "engineer", "develop", "technical", "software", "build"]) { return "cto" }
+        if has(["market", "growth", "brand", "content", "seo", "social"]) { return "marketing" }
+        if has(["research", "analyst", "intelligence", "insight", "data"]) { return "research" }
+        return nil
+    }
+
+    /// (profile, session) for talking to this agent. Agents with a company
+    /// role share the EXACT session the autonomous company uses for that role
+    /// — so the CEO you chat with is the same brain that runs your company,
+    /// not a disconnected second one. ("main" normalizes to the default
+    /// profile on the relay, matching the company engine.)
+    var chatRouting: (profile: String, session: String) {
+        if let role = companyRole {
+            return ("main", "company-\(role)")
+        }
+        return (profileSlug, "hermes-mobile-org-\(id)")
+    }
+}
+
 /// The whole company: CEO → 8 department heads → their sub-agents.
 enum HermesOrg {
 

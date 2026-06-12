@@ -34,7 +34,8 @@ final class CompanyConversation: ObservableObject {
             return
         }
         var config = base
-        config.profile = target.profileSlug
+        let routing = target.chatRouting   // one brain per agent, shared with the company
+        config.profile = routing.profile
 
         let body = trimmed + attachments.payloadSuffix
         let persona = target.soul.isEmpty ? target.summary : target.soul
@@ -52,7 +53,7 @@ final class CompanyConversation: ObservableObject {
         reply.speaker = target.name
         reply.accentHex = target.accentHex
         messages.append(reply)
-        let session = "hermes-mobile-company-\(target.id)"
+        let session = routing.session
 
         Task {
             do {

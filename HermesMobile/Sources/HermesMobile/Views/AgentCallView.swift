@@ -230,17 +230,18 @@ private final class CallModel: ObservableObject {
         lastUserLine = transcript
 
         var config = relay
-        config.profile = agent.profileSlug
+        let routing = agent.chatRouting   // same brain as chat + the company
+        config.profile = routing.profile
         let persona = agent.soul.isEmpty ? agent.summary : agent.soul
         let payload = "You are \(agent.name) in a multi-agent company, ON A VOICE CALL with the owner. Your remit: \(persona)\n\nThe owner just said: \"\(transcript)\"\n\nReply as \(agent.name) in natural spoken style — 1–3 sentences, under 50 words, no markdown, no lists."
 
         var collected = ""
         var speechBuffer = ""
         do {
-            // Same session as the 1:1 chat → the call continues the relationship.
+            // Same session as 1:1 chat AND the autonomous company.
             // fast: true = single model turn on the relay (~half the latency).
             for try await event in HermesRelayClient(configuration: config)
-                .stream(payload, sessionKey: "hermes-mobile-org-\(agent.id)", fast: true) {
+                .stream(payload, sessionKey: routing.session, fast: true, skills: agent.skills) {
                 switch event.type {
                 case .start: break
                 case .delta:

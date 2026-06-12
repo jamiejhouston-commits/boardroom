@@ -58,22 +58,49 @@ final class AgentVoice: NSObject, AVSpeechSynthesizerDelegate, @unchecked Sendab
         let seed = id.unicodeScalars.reduce(0) { $0 + Int($1.value) }
         let utterance = AVSpeechUtterance(string: text)
 
-        // Best installed tier wins: premium → enhanced → whatever's there.
-        let english = AVSpeechSynthesisVoice.speechVoices()
-            .filter { $0.language.hasPrefix("en") }
-        let premium = english.filter { $0.quality == .premium }
-        let enhanced = english.filter { $0.quality == .enhanced }
-        let pool = (premium.isEmpty ? (enhanced.isEmpty ? english : enhanced) : premium)
-            .sorted { $0.identifier < $1.identifier }
-        if !pool.isEmpty {
-            utterance.voice = pool[seed % pool.count]
+        if let voice = bestVoice(seed: seed) {
+            utterance.voice = voice
         }
 
         // Subtle per-agent identity. The old 0.85–1.2 pitch warp made the
         // compact voices unintelligible — keep it close to natural.
-        utterance.pitchMultiplier = 0.96 + Float(seed % 5) / 50.0    // 0.96–1.04
-        utterance.rate = AVSpeechUtteranceDefaultSpeechRate * (0.98 + Float(seed % 3) / 50.0)
+        utterance.pitchMultiplier = 0.97 + Float(seed % 4) / 50.0    // 0.97–1.03
+        utterance.rate = AVSpeechUtteranceDefaultSpeechRate * (0.97 + Float(seed % 3) / 50.0)
         return utterance
+    }
+
+    /// Pick a distinct-but-intelligible voice, seeded per agent.
+    /// Excludes the legacy "Eloquence" + novelty synths (the robotic,
+    /// hard-to-understand ones), restricts to mainstream English locales,
+    /// and always prefers the best installed quality tier.
+    private static func bestVoice(seed: Int) -> AVSpeechSynthesisVoice? {
+        let mainstreamLocales: Set<String> = ["en-US", "en-GB", "en-AU", "en-IE"]
+        let usable = AVSpeechSynthesisVoice.speechVoices().filter { voice in
+            let id = voice.identifier.lowercased()
+            return mainstreamLocales.contains(voice.language)
+                && !id.contains("eloquence")   // legacy screen-reader synth → robotic
+                && !id.contains("novelty")      // joke voices (Bells, Bubbles, Wobble…)
+        }
+        guard !usable.isEmpty else {
+            // Fall back to the platform default rather than a random bad voice.
+            return AVSpeechSynthesisVoice(language: "en-US")
+        }
+        // Best tier present wins; Siri/premium voices sort to the front.
+        func rank(_ v: AVSpeechSynthesisVoice) -> Int {
+            let id = v.identifier.lowercased()
+            var score = 0
+            switch v.quality {
+            case .premium: score += 300
+            case .enhanced: score += 200
+            default: score += 100
+            }
+            if id.contains("siri") { score += 50 }   // Siri voices are the most natural
+            return score
+        }
+        let topScore = usable.map(rank).max() ?? 0
+        let pool = usable.filter { rank($0) == topScore }
+            .sorted { $0.identifier < $1.identifier }
+        return pool.isEmpty ? usable.first : pool[seed % pool.count]
     }
 
     nonisolated func speechSynthesizer(_ synthesizer: AVSpeechSynthesizer, didFinish utterance: AVSpeechUtterance) {

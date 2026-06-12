@@ -372,7 +372,8 @@ final class AgentConversation: ObservableObject {
         }
 
         var config = base
-        config.profile = agent.profileSlug
+        let routing = agent.chatRouting   // CEO/leads share the company's brain
+        config.profile = routing.profile
 
         let body = trimmed + attachments.payloadSuffix
         let persona = agent.soul.isEmpty ? agent.summary : agent.soul
@@ -387,7 +388,7 @@ final class AgentConversation: ObservableObject {
         isSending = true
         let responseID = UUID()
         messages.append(ChatMessage(id: responseID, author: .hermes, text: "", date: Date()))
-        let session = "hermes-mobile-org-\(agent.id)"
+        let session = routing.session
 
         Task {
             do {
