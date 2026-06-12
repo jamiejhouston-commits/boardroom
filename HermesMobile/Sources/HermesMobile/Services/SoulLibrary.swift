@@ -17,6 +17,83 @@ enum SoulLibrary {
         presets.first { $0.recommendedFor == agentID }
     }
 
+    /// A guaranteed, role-aligned soul for ANY agent: exact preset match →
+    /// keyword match → generated from the agent's own title and summary.
+    /// Every soul ends with the standard toolkit so capabilities are uniform.
+    static func solidSoul(for agent: OrgAgent) -> String {
+        if let exact = preset(for: agent.id) {
+            return exact.text + toolkitFooter
+        }
+        if let matched = bestKeywordPreset(for: agent) {
+            return matched.text + toolkitFooter
+        }
+        return """
+        # \(agent.name) — \(agent.title)
+
+        You are \(agent.name), the company's \(agent.title). Your remit: \(agent.summary)
+
+        - **Mindset**: decisive, evidence-first, allergic to vague answers. You own \
+        your domain end-to-end and speak as its expert, not a generalist.
+        - **In meetings**: take positions, disagree openly when warranted, commit \
+        to deliverables with dates.
+        - **Output standard**: concrete artifacts and specific recommendations — \
+        never "it depends" without a recommendation attached.
+        """ + toolkitFooter
+    }
+
+    /// Keyword routing for orgs with custom agent ids (e.g. Org Genesis).
+    private static func bestKeywordPreset(for agent: OrgAgent) -> SoulPreset? {
+        let haystack = "\(agent.title) \(agent.name) \(agent.summary)".lowercased()
+        let keywords: [(String, [String])] = [
+            ("gm", ["ceo", "chief executive", "general manager", "founder"]),
+            ("cfo", ["cfo", "chief financial", "finance director"]),
+            ("accounting", ["accounting", "accountant", "bookkeep", "payroll"]),
+            ("investor_relations", ["investor"]),
+            ("cto", ["cto", "chief technology", "chief technical"]),
+            ("builder", ["build", "develop", "engineer", "frontend", "backend", "software"]),
+            ("devops", ["devops", "infra", "deploy", "sre"]),
+            ("qa", ["qa", "quality", "test"]),
+            ("security", ["security", "infosec"]),
+            ("cpo", ["cpo", "chief product", "product"]),
+            ("research", ["research", "intelligence", "analyst", "insight"]),
+            ("data", ["data", "analytics", "metrics"]),
+            ("marketing", ["market", "growth", "brand", "content", "seo", "social"]),
+            ("customer_success", ["customer", "support", "success"]),
+            ("legal", ["legal", "lawyer", "counsel", "contract"]),
+            ("compliance", ["compliance", "regulat", "audit"]),
+            ("operations", ["operation", "coo", "logistics"]),
+            ("workflow_automation", ["automation", "workflow"]),
+            ("task_coordinator", ["coordinat", "scheduler", "dispatch"]),
+            ("strategy", ["strategy", "strategist", "planning"]),
+            ("recruitment", ["recruit", "talent", "hr", "people", "resources"]),
+            ("knowledge_officer", ["knowledge", "documentation", "librarian"]),
+            ("executive_assistant", ["assistant", "secretary", "chief of staff"]),
+            ("concierge", ["concierge", "front desk"]),
+            ("business_analyst", ["business analyst", "fp&a"]),
+            ("command_center", ["command", "mission control"]),
+        ]
+        var best: (id: String, score: Int)? = nil
+        for (presetID, words) in keywords {
+            let score = words.filter { haystack.contains($0) }.count
+            if score > 0 && score > (best?.score ?? 0) {
+                best = (presetID, score)
+            }
+        }
+        guard let best else { return nil }
+        return presets.first { $0.id == best.id || $0.recommendedFor == best.id }
+    }
+
+    /// Uniform capabilities block — same toolkit, role decides how it's used.
+    static let toolkitFooter = """
+
+
+    ## Toolkit
+    You run on Hermes Agent with real tools: web search and browsing, file \
+    creation, code execution, and persistent memory. Use them — research means \
+    cited evidence, building means actual files on disk, and decisions get \
+    recorded. Deliverables are artifacts, never just promises.
+    """
+
     static let presets: [SoulPreset] = [
         SoulPreset(
             id: "gm",

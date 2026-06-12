@@ -12,6 +12,7 @@ struct HermesMobileApp: App {
         // Without a delegate, iOS drops notification banners while the app
         // is foreground — gate alerts would vanish silently.
         UNUserNotificationCenter.current().delegate = NotificationPresenter.shared
+        NotificationPresenter.shared.registerCategories()
     }
     @StateObject private var store = AgentProfileStore()
     @StateObject private var runtime = HermesRuntimeController()

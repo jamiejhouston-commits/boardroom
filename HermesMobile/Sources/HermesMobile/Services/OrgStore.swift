@@ -26,6 +26,20 @@ final class OrgStore: ObservableObject {
             agents = HermesOrg.all
             persist()
         }
+        backfillSouls()
+    }
+
+    /// Every agent gets a solid, role-aligned soul — no empty souls, ever.
+    /// Runs on every load (idempotent: only fills blanks, never overwrites
+    /// custom souls), so new and Genesis-created agents are covered too.
+    private func backfillSouls() {
+        var changed = false
+        for i in agents.indices
+        where agents[i].soul.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            agents[i].soul = SoulLibrary.solidSoul(for: agents[i])
+            changed = true
+        }
+        if changed { persist() }
     }
 
     /// One-time additions for orgs saved before a seed agent existed.

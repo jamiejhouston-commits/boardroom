@@ -1,3 +1,4 @@
+import EventKit
 import Foundation
 import UserNotifications
 
@@ -91,12 +92,20 @@ final class CompanyStore: ObservableObject {
         for initiative in gates {
             let key = "\(initiative.id)-\(initiative.stage)"
             if let last = lastNotified[key], now - last < remindEvery { continue }
+            // Framed as a meeting invite from the CEO — with an
+            // add-to-calendar action button right on the notification.
             let content = UNMutableNotificationContent()
-            content.title = initiative.stage == "gate2"
-                ? "Demo Day — the team has something to show you"
-                : "The board needs your greenlight"
-            content.body = "\(initiative.title): \(initiative.pitch)"
+            if initiative.stage == "gate2" {
+                content.title = "📅 Demo Day — the team wants to present"
+                content.body = "\(initiative.title) is built. Approve to ship, or add Demo Day to your calendar."
+            } else {
+                content.title = "📅 The CEO requests a greenlight meeting"
+                content.body = "\(initiative.title): \(initiative.pitch)"
+            }
             content.sound = .default
+            content.categoryIdentifier = NotificationPresenter.gateCategoryID
+            content.userInfo = ["initiativeTitle": initiative.title,
+                                "stage": initiative.stage]
             UNUserNotificationCenter.current().add(
                 UNNotificationRequest(identifier: "gate-\(key)-\(Int(now))",
                                       content: content, trigger: nil))
@@ -112,14 +121,64 @@ final class CompanyStore: ObservableObject {
 }
 
 /// Shows notification banners while the app is foreground — without this
-/// delegate iOS suppresses them entirely when the app is open.
+/// delegate iOS suppresses them entirely when the app is open — and handles
+/// the "Add meeting to Calendar" action on gate invites.
 /// Stateless, hence @unchecked Sendable is sound.
 final class NotificationPresenter: NSObject, UNUserNotificationCenterDelegate, @unchecked Sendable {
     static let shared = NotificationPresenter()
+
+    static let gateCategoryID = "BOARDROOM_GATE"
+    static let addToCalendarActionID = "ADD_GATE_MEETING_TO_CALENDAR"
+
+    /// Call once at launch so gate notifications get the calendar button.
+    func registerCategories() {
+        let addToCalendar = UNNotificationAction(
+            identifier: Self.addToCalendarActionID,
+            title: "Add meeting to Calendar", options: [])
+        let gateCategory = UNNotificationCategory(
+            identifier: Self.gateCategoryID, actions: [addToCalendar],
+            intentIdentifiers: [], options: [])
+        UNUserNotificationCenter.current().setNotificationCategories([gateCategory])
+    }
 
     func userNotificationCenter(_ center: UNUserNotificationCenter,
                                 willPresent notification: UNNotification,
                                 withCompletionHandler completionHandler: @escaping (UNNotificationPresentationOptions) -> Void) {
         completionHandler([.banner, .list, .sound, .badge])
+    }
+
+    func userNotificationCenter(_ center: UNUserNotificationCenter,
+                                didReceive response: UNNotificationResponse) async {
+        let info = response.notification.request.content.userInfo
+        guard response.actionIdentifier == Self.addToCalendarActionID,
+              let title = info["initiativeTitle"] as? String else { return }
+        let isDemoDay = (info["stage"] as? String) == "gate2"
+        await withCheckedContinuation { (done: CheckedContinuation<Void, Never>) in
+            Self.addGateMeeting(title: title, isDemoDay: isDemoDay) { done.resume() }
+        }
+    }
+
+    /// Books "Boardroom — Greenlight review/Demo Day: <title>" at the next
+    /// top of the hour (≥30 min away), 30 min long, 15-min alert.
+    private static func addGateMeeting(title: String, isDemoDay: Bool,
+                                       completion: @escaping @Sendable () -> Void) {
+        let store = EKEventStore()
+        store.requestWriteOnlyAccessToEvents { granted, _ in
+            defer { completion() }
+            guard granted else { return }
+            let start = Calendar.current.nextDate(
+                after: Date().addingTimeInterval(30 * 60),
+                matching: DateComponents(minute: 0),
+                matchingPolicy: .nextTime) ?? Date().addingTimeInterval(3600)
+            let event = EKEvent(eventStore: store)
+            event.title = isDemoDay
+                ? "Boardroom — Demo Day: \(title)"
+                : "Boardroom — Greenlight review: \(title)"
+            event.startDate = start
+            event.endDate = start.addingTimeInterval(30 * 60)
+            event.calendar = store.defaultCalendarForNewEvents
+            event.addAlarm(EKAlarm(relativeOffset: -15 * 60))
+            try? store.save(event, span: .thisEvent)
+        }
     }
 }

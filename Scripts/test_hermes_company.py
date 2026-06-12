@@ -159,7 +159,7 @@ class StageMachineTests(unittest.TestCase):
 
     def test_execution_collects_artifacts_and_moves_to_demo_ready(self):
         self.init["stage"] = "execution"
-        outdir = self.root / self.init["id"]
+        outdir = self.root / company.initiative_dirname(self.init)
         def runner(role, prompt):
             outdir.mkdir(parents=True, exist_ok=True)
             (outdir / "report.md").write_text("done")

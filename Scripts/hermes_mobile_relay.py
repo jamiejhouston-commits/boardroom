@@ -59,7 +59,8 @@ def prewarm_hermes() -> None:
         print(f"Warm Hermes unavailable, using cold CLI: {error}", flush=True)
 
 COMPANY_STATE_PATH = Path.home() / ".hermes" / "mobile-company.json"
-COMPANY_ARTIFACTS_ROOT = Path.home() / ".hermes" / "company" / "initiatives"
+# Deliverables go somewhere the owner can SEE — Finder, not a dotfolder.
+COMPANY_ARTIFACTS_ROOT = Path.home() / "Documents" / "Boardroom"
 COMPANY_LOCK = threading.Lock()
 
 CONFIG_PATH = Path.home() / ".hermes" / "mobile-relay.json"

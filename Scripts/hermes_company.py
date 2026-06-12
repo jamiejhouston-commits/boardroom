@@ -174,6 +174,12 @@ def run_scout(state: dict, runner) -> dict | None:
     return initiative
 
 
+def initiative_dirname(init: dict) -> str:
+    """Human-readable deliverables folder: 'one-tap-brain-dump-cleaner-d7b3'."""
+    slug = re.sub(r"[^a-z0-9]+", "-", init["title"].lower()).strip("-")[:40] or "initiative"
+    return f"{slug}-{init['id'][:4]}"
+
+
 def log_minute(initiative: dict, stage: str, role: str, text: str) -> None:
     initiative["minutes"].append({
         "stage": stage,
@@ -234,7 +240,7 @@ def advance_stage(state: dict, init: dict, runner, artifacts_root: Path) -> None
         init["stage"] = "execution"
 
     elif stage == "execution":
-        outdir = artifacts_root / init["id"]
+        outdir = artifacts_root / initiative_dirname(init)
         outdir.mkdir(parents=True, exist_ok=True)
         reply = runner("builder", role_prompt("builder",
             f"Execute these work orders for '{init['title']}'. "
