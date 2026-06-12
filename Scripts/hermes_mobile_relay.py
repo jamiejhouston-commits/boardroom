@@ -37,6 +37,27 @@ company_module = importlib.util.module_from_spec(_COMPANY_SPEC)
 assert _COMPANY_SPEC.loader is not None
 _COMPANY_SPEC.loader.exec_module(company_module)
 
+_ACP_SPEC = importlib.util.spec_from_file_location(
+    "hermes_acp_client", Path(__file__).with_name("hermes_acp_client.py"))
+acp_module = importlib.util.module_from_spec(_ACP_SPEC)
+assert _ACP_SPEC.loader is not None
+_ACP_SPEC.loader.exec_module(acp_module)
+
+# One warm Hermes for all interactive chat — turns cost ~3s instead of the
+# 15-30s per-message cold start. Cold CLI remains the automatic fallback.
+WARM_CLIENT = acp_module.AcpClient()
+
+
+def prewarm_hermes() -> None:
+    """Pay the ~40s agent warm-up at relay start instead of on the user's
+    first message."""
+    try:
+        for _ in WARM_CLIENT.prompt("relay-prewarm", "Reply with exactly: OK"):
+            pass
+        print("Warm Hermes: READY (turns now ~3s)", flush=True)
+    except Exception as error:  # noqa: BLE001 — cold path still works
+        print(f"Warm Hermes unavailable, using cold CLI: {error}", flush=True)
+
 COMPANY_STATE_PATH = Path.home() / ".hermes" / "mobile-company.json"
 COMPANY_ARTIFACTS_ROOT = Path.home() / ".hermes" / "company" / "initiatives"
 COMPANY_LOCK = threading.Lock()
@@ -318,6 +339,7 @@ class RelayHandler(BaseHTTPRequestHandler):
                     "ok": True,
                     "service": "hermes-mobile-relay",
                     "profiles": discover_profiles(),
+                    "warm": WARM_CLIENT.warm(),
                 }
             )
             return
@@ -418,7 +440,7 @@ class RelayHandler(BaseHTTPRequestHandler):
         command = chat_command(message, profile, resume_session_id, fast)
 
         if self.path == "/chat/stream":
-            self.stream_chat(command, profile, mobile_session_key)
+            self.stream_chat(command, profile, mobile_session_key, message=message)
             return
 
         try:
@@ -457,13 +479,20 @@ class RelayHandler(BaseHTTPRequestHandler):
             }
         )
 
-    def stream_chat(self, command: list[str], profile: str, mobile_session_key: str) -> None:
+    def stream_chat(self, command: list[str], profile: str, mobile_session_key: str,
+                    message: str = "") -> None:
         self.send_response(200)
         self.send_header("Content-Type", "text/event-stream")
         self.send_header("Cache-Control", "no-cache")
         self.send_header("Connection", "keep-alive")
         self.end_headers()
         self.write_sse({"type": "start", "profile": profile, "session": mobile_session_key})
+
+        # Warm path first: ~3s/turn through the persistent agent. Any failure
+        # before completion falls through to the cold CLI below.
+        if message and WARM_CLIENT.warm():
+            if self.stream_chat_warm(profile, mobile_session_key, message):
+                return
 
         try:
             process = subprocess.Popen(
@@ -547,6 +576,7 @@ class RelayHandler(BaseHTTPRequestHandler):
         if session_id:
             self.config_store.save_session(profile, mobile_session_key, session_id)
 
+        self.close_connection = True   # stream is finished — release the socket
         self.write_sse(
             {
                 "type": "done",
@@ -556,6 +586,63 @@ class RelayHandler(BaseHTTPRequestHandler):
                 "mobile_session": mobile_session_key,
             }
         )
+
+    def stream_chat_warm(self, profile: str, mobile_session_key: str, message: str) -> bool:
+        """Stream one turn through the warm agent. Returns True when the turn
+        completed (done/error already sent); False = caller should cold-fallback.
+        Keepalives cover any silent gap, same as the cold path."""
+        chunk_queue: queue.Queue = queue.Queue()
+        failure: list[Exception] = []
+
+        def pump() -> None:
+            try:
+                for chunk in WARM_CLIENT.prompt(f"{profile}:{mobile_session_key}", message):
+                    chunk_queue.put(chunk)
+            except Exception as error:  # noqa: BLE001
+                failure.append(error)
+            finally:
+                chunk_queue.put(None)
+
+        reader = threading.Thread(target=pump, daemon=True)
+        reader.start()
+
+        collected: list[str] = []
+        started = time.monotonic()
+        try:
+            while True:
+                try:
+                    chunk = chunk_queue.get(timeout=8)
+                except queue.Empty:
+                    if time.monotonic() - started > self.timeout:
+                        self.write_sse({"type": "error",
+                                        "message": "Hermes took too long to respond. Try again."})
+                        return True
+                    self.write_keepalive()
+                    continue
+                if chunk is None:
+                    break
+                collected.append(chunk)
+                self.write_sse({"type": "delta", "text": chunk})
+        except (BrokenPipeError, ConnectionResetError):
+            return True   # app hung up; nothing more to send
+
+        if failure and not collected:
+            print(f"warm chat fell back to cold CLI: {failure[0]}", flush=True)
+            return False   # nothing streamed yet — cold path can still serve
+        if failure:
+            self.write_sse({"type": "error", "message": str(failure[0])})
+            return True
+
+        reply = "".join(collected).strip()
+        self.write_sse({
+            "type": "done",
+            "reply": reply,
+            "profile": profile,
+            "session": mobile_session_key,
+            "mobile_session": mobile_session_key,
+        })
+        self.close_connection = True   # stream is finished — release the socket
+        return True
 
     def write_sse(self, payload: dict[str, Any]) -> None:
         encoded = json.dumps(payload).encode("utf-8")
@@ -720,6 +807,10 @@ def main() -> None:
     heartbeat = threading.Thread(target=company_heartbeat_loop, daemon=True)
     heartbeat.start()
     print("Company heartbeat: running (60s check, tick interval from config)\n", flush=True)
+
+    warmup = threading.Thread(target=prewarm_hermes, daemon=True)
+    warmup.start()
+    print("Warm Hermes: warming up in background (~40s)…\n", flush=True)
 
     server = ThreadingHTTPServer((args.host, args.port), RelayHandler)
     try:
