@@ -1,11 +1,18 @@
 import BackgroundTasks
 import SwiftUI
+import UserNotifications
 
 @main
 struct HermesMobileApp: App {
     @Environment(\.scenePhase) private var scenePhase
 
     private static let companyRefreshTaskID = "com.jamiehouston.boardroom.companyRefresh"
+
+    init() {
+        // Without a delegate, iOS drops notification banners while the app
+        // is foreground — gate alerts would vanish silently.
+        UNUserNotificationCenter.current().delegate = NotificationPresenter.shared
+    }
     @StateObject private var store = AgentProfileStore()
     @StateObject private var runtime = HermesRuntimeController()
     @StateObject private var org = OrgStore()
