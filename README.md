@@ -38,7 +38,7 @@ Day for your ship/no-ship call.
 ## Quick start
 
 ```bash
-git clone <this-repo>
+git clone https://github.com/jamiejhouston-commits/boardroom.git
 cd boardroom
 ./Scripts/setup.sh        # starts the relay + opens the pairing QR
 ```
