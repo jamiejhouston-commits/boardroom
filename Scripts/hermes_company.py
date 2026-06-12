@@ -288,6 +288,34 @@ def apply_gate(state: dict, initiative_id: str, decision: str, note: str = "") -
     return init
 
 
+def merge_tick_results(current: dict, ticked: dict, before: dict) -> dict:
+    """Fold a long tick's changes into freshly-loaded state without stomping
+    decisions the owner made while the tick was running.
+
+    `before` is the deep snapshot taken when the tick started. Only
+    initiatives the tick actually CHANGED (vs `before`) overwrite the current
+    on-disk version; everything else (enabled/thesis/config, initiatives the
+    tick skipped, gate decisions made mid-tick) is kept from `current`."""
+    before_by_id = {i["id"]: i for i in before.get("initiatives", [])}
+    current_by_id = {i["id"]: i for i in current.get("initiatives", [])}
+
+    for ticked_init in ticked.get("initiatives", []):
+        init_id = ticked_init["id"]
+        snapshot = before_by_id.get(init_id)
+        if snapshot is None:
+            # Newly scouted during this tick — insert at the front.
+            if init_id not in current_by_id:
+                current["initiatives"].insert(0, ticked_init)
+                current_by_id[init_id] = ticked_init
+            continue
+        if ticked_init != snapshot and init_id in current_by_id:
+            index = next(i for i, x in enumerate(current["initiatives"]) if x["id"] == init_id)
+            current["initiatives"][index] = ticked_init
+
+    current["last_tick"] = max(current.get("last_tick", 0.0), ticked.get("last_tick", 0.0))
+    return current
+
+
 def tick(state: dict, runner, artifacts_root: Path, now: float | None = None) -> list[str]:
     """One heartbeat: advance every working initiative one stage, then scout
     if there's capacity. Returns human-readable event strings."""

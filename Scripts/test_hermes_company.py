@@ -286,5 +286,46 @@ class TickTests(unittest.TestCase):
         self.assertTrue(events)
 
 
+class MergeTickTests(unittest.TestCase):
+    def setUp(self):
+        self.before = company.new_state()
+        self.worked = company.new_initiative("Worked", "")
+        self.gated = company.new_initiative("Gated", "")
+        self.gated["stage"] = "gate1"
+        self.before["initiatives"] = [self.worked, self.gated]
+        self.before["enabled"] = True
+        # Deep copies simulating the tick working on its own snapshot.
+        import copy
+        self.ticked = copy.deepcopy(self.before)
+        self.current = copy.deepcopy(self.before)
+
+    def test_tick_changes_are_applied(self):
+        self.ticked["initiatives"][0]["stage"] = "boardroom"
+        self.ticked["last_tick"] = 100.0
+        merged = company.merge_tick_results(self.current, self.ticked, self.before)
+        self.assertEqual(merged["initiatives"][0]["stage"], "boardroom")
+        self.assertEqual(merged["last_tick"], 100.0)
+
+    def test_mid_tick_gate_decision_is_preserved(self):
+        # Owner approves the gated initiative WHILE the tick runs (tick
+        # didn't touch it) — the decision must survive the merge.
+        company.apply_gate(self.current, self.gated["id"], "approve")
+        merged = company.merge_tick_results(self.current, self.ticked, self.before)
+        gated_after = company.find_initiative(merged, self.gated["id"])
+        self.assertEqual(gated_after["stage"], "planning")
+
+    def test_mid_tick_halt_is_preserved(self):
+        self.current["enabled"] = False
+        merged = company.merge_tick_results(self.current, self.ticked, self.before)
+        self.assertFalse(merged["enabled"])
+
+    def test_newly_scouted_initiative_is_inserted(self):
+        fresh = company.new_initiative("Fresh", "")
+        self.ticked["initiatives"].insert(0, fresh)
+        merged = company.merge_tick_results(self.current, self.ticked, self.before)
+        self.assertEqual(merged["initiatives"][0]["id"], fresh["id"])
+        self.assertEqual(len(merged["initiatives"]), 3)
+
+
 if __name__ == "__main__":
     unittest.main()

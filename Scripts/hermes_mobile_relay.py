@@ -316,10 +316,16 @@ def company_heartbeat_loop() -> None:
     store = company_module.CompanyStore(COMPANY_STATE_PATH)
     while True:
         try:
+            # Agent turns take MINUTES — never hold the lock through them, or
+            # the app's /company reads (and gate decisions) block until done.
             with COMPANY_LOCK:
                 state = store.load()
-                events = company_module.tick(state, company_cli_runner, COMPANY_ARTIFACTS_ROOT)
-                store.save(state)
+            before = json.loads(json.dumps(state))   # deep snapshot for merge
+            events = company_module.tick(state, company_cli_runner, COMPANY_ARTIFACTS_ROOT)
+            if events or state["last_tick"] != before["last_tick"]:
+                with COMPANY_LOCK:
+                    current = store.load()
+                    store.save(company_module.merge_tick_results(current, state, before))
             for event in events:
                 print(f"company - {event}", flush=True)
         except Exception as error:  # noqa: BLE001 — the pulse must survive anything
