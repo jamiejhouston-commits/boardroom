@@ -102,7 +102,8 @@ final class BriefingCenter: ObservableObject {
 
     // MARK: Read aloud
 
-    func toggleSpeech(secretaryID: String) {
+    func toggleSpeech(secretaryID: String, voice voiceModel: String,
+                      relay: HermesRelayConfiguration) {
         if isSpeaking {
             voice.stop()
             isSpeaking = false
@@ -110,7 +111,8 @@ final class BriefingCenter: ObservableObject {
             isSpeaking = true
             let text = briefing
             Task { [weak self] in
-                await self?.voice.speak(text, seedFrom: secretaryID)
+                await self?.voice.speak(text, seedFrom: secretaryID,
+                                        voice: voiceModel, relay: relay)
                 self?.isSpeaking = false
             }
         }

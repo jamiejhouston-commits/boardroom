@@ -38,7 +38,9 @@ struct BriefingView: View {
 
                             HStack(spacing: 12) {
                                 Button {
-                                    briefings.toggleSpeech(secretaryID: secretaryID)
+                                    briefings.toggleSpeech(secretaryID: secretaryID,
+                                                           voice: org.agent(id: secretaryID)?.voiceModel ?? "en_US-amy-medium",
+                                                           relay: runtime.relayConfiguration)
                                 } label: {
                                     Label(briefings.isSpeaking ? "Stop" : "Read it to me",
                                           systemImage: briefings.isSpeaking ? "stop.fill" : "speaker.wave.2.fill")

@@ -236,7 +236,6 @@ private final class CallModel: ObservableObject {
         let payload = "You are \(agent.name) in a multi-agent company, ON A VOICE CALL with the owner. Your remit: \(persona)\n\nThe owner just said: \"\(transcript)\"\n\nReply as \(agent.name) in natural spoken style — 1–3 sentences, under 50 words, no markdown, no lists."
 
         var collected = ""
-        var speechBuffer = ""
         do {
             // Same session as 1:1 chat AND the autonomous company.
             // fast: true = single model turn on the relay (~half the latency).
@@ -244,19 +243,10 @@ private final class CallModel: ObservableObject {
                 .stream(payload, sessionKey: routing.session, fast: true, skills: agent.skills) {
                 switch event.type {
                 case .start: break
-                case .delta:
-                    let text = event.text ?? ""
-                    collected += text
-                    speechBuffer += text
-                    // Speak each completed sentence the moment it lands —
-                    // the agent starts talking while the rest still streams.
-                    if voiceOn, let sentence = Self.popCompleteSentence(&speechBuffer) {
-                        state = .speaking
-                        voice.enqueue(sentence, seedFrom: agent.id)
-                    }
+                case .delta: collected += event.text ?? ""
                 case .done:
                     if collected.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
-                       let reply = event.reply { collected = reply; speechBuffer = reply }
+                       let reply = event.reply { collected = reply }
                 case .error:
                     throw HermesRelayError.server(event.message ?? "Call failed.")
                 }
@@ -271,20 +261,12 @@ private final class CallModel: ObservableObject {
         let reply = collected.trimmingCharacters(in: .whitespacesAndNewlines)
         lastAgentLine = reply.isEmpty ? "…" : reply
 
+        // Speak the whole reply in the agent's own neural voice (relay TTS),
+        // falling back to the on-device voice if the relay can't render it.
         if voiceOn && !reply.isEmpty {
             state = .speaking
-            voice.enqueue(speechBuffer, seedFrom: agent.id)   // tail after last "."
-            await voice.waitUntilFinished()
+            await voice.speak(reply, seedFrom: agent.id, voice: agent.voiceModel, relay: config)
         }
         if state != .listening { state = .idle }
-    }
-
-    /// Cut everything up to the LAST sentence terminator out of `buffer`
-    /// and return it; leaves the unfinished tail in place.
-    private static func popCompleteSentence(_ buffer: inout String) -> String? {
-        guard let last = buffer.lastIndex(where: { ".!?\n".contains($0) }) else { return nil }
-        let sentence = String(buffer[...last]).trimmingCharacters(in: .whitespacesAndNewlines)
-        buffer = String(buffer[buffer.index(after: last)...])
-        return sentence.isEmpty ? nil : sentence
     }
 }

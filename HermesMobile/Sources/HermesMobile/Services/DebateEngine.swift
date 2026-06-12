@@ -84,7 +84,8 @@ final class DebateEngine: ObservableObject {
                     turns.append(turn)
 
                     if voicesOn {
-                        await voice.speak(text, seedFrom: agent.id)
+                        await voice.speak(text, seedFrom: agent.id,
+                                          voice: agent.voiceModel, relay: relay)
                     }
                 } catch {
                     turns.append(DebateTurn(agentID: agent.id, agentName: agent.name,

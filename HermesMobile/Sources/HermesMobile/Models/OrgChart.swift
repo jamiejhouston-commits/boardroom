@@ -57,6 +57,17 @@ extension OrgAgent {
         }
         return (profileSlug, "hermes-mobile-org-\(id)")
     }
+
+    /// The neural (Piper) voice this agent speaks with — distinct per agent so
+    /// they sound like different people. Must match a model installed on the
+    /// relay (it falls back safely if absent).
+    var voiceModel: String {
+        if tier == .ceo { return "en_US-ryan-medium" }   // steady, authoritative CEO
+        let pool = ["en_US-joe-medium", "en_GB-alan-medium", "en_US-amy-medium",
+                    "en_US-kathleen-low", "en_GB-jenny_dioco-medium", "en_US-lessac-medium"]
+        let seed = id.unicodeScalars.reduce(0) { $0 + Int($1.value) }
+        return pool[seed % pool.count]
+    }
 }
 
 /// The whole company: CEO → 8 department heads → their sub-agents.

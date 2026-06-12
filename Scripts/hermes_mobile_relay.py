@@ -22,6 +22,7 @@ import queue
 import secrets
 import socket
 import subprocess
+import tempfile
 import sys
 import re
 import threading
@@ -63,6 +64,49 @@ COMPANY_STATE_PATH = Path.home() / ".hermes" / "mobile-company.json"
 COMPANY_ARTIFACTS_ROOT = Path.home() / "Documents" / "Boardroom"
 COMPANY_LOCK = threading.Lock()
 _CONFIG_LOCK = threading.Lock()   # serializes RelayConfigStore writes
+
+# Free local neural TTS (Piper) — real human voices for the agents at $0 cost.
+PIPER_BIN = Path.home() / ".hermes" / "piper-venv" / "bin" / "piper"
+PIPER_VOICE_DIR = Path.home() / ".hermes" / "piper-voices"
+
+
+def piper_available() -> bool:
+    return PIPER_BIN.exists() and PIPER_VOICE_DIR.is_dir() and \
+        any(PIPER_VOICE_DIR.glob("*.onnx"))
+
+
+def available_voices() -> list[str]:
+    return sorted(p.stem for p in PIPER_VOICE_DIR.glob("*.onnx")) if PIPER_VOICE_DIR.is_dir() else []
+
+
+def synthesize_tts(text: str, voice: str) -> bytes | None:
+    """Render `text` to WAV bytes with the named Piper voice. None on failure
+    (the app then falls back to the on-device Apple voice)."""
+    if not piper_available() or not text.strip():
+        return None
+    # Validate against installed models — no path traversal from the voice name.
+    model = PIPER_VOICE_DIR / f"{Path(voice).name}.onnx"
+    if not model.exists():
+        installed = available_voices()
+        if not installed:
+            return None
+        model = PIPER_VOICE_DIR / f"{installed[0]}.onnx"
+    out = Path(tempfile.gettempdir()) / f"boardroom-tts-{secrets.token_hex(6)}.wav"
+    try:
+        result = subprocess.run(
+            [str(PIPER_BIN), "-m", str(model), "-f", str(out)],
+            input=text[:1200], text=True, capture_output=True, timeout=60, check=False)
+        if result.returncode != 0 or not out.exists():
+            return None
+        return out.read_bytes()
+    except Exception:  # noqa: BLE001 — fallback covers any failure
+        return None
+    finally:
+        try:
+            out.unlink(missing_ok=True)
+        except OSError:
+            pass
+
 
 CONFIG_PATH = Path.home() / ".hermes" / "mobile-relay.json"
 REEXEC_ENV = "HERMES_MOBILE_RELAY_REEXEC"
@@ -451,6 +495,8 @@ class RelayHandler(BaseHTTPRequestHandler):
                     "service": "hermes-mobile-relay",
                     "profiles": discover_profiles(),
                     "warm": WARM_CLIENT.warm(),
+                    "tts": piper_available(),
+                    "voices": available_voices(),
                 }
             )
             return
@@ -495,12 +541,28 @@ class RelayHandler(BaseHTTPRequestHandler):
         self.send_json({"error": "not_found"}, status=404)
 
     def do_POST(self) -> None:
-        if self.path not in {"/chat", "/chat/stream", "/company/start", "/company/halt", "/company/gate"}:
+        if self.path not in {"/chat", "/chat/stream", "/tts",
+                             "/company/start", "/company/halt", "/company/gate"}:
             self.send_json({"error": "not_found"}, status=404)
             return
 
         if not self.is_authorized():
             self.send_json({"error": "unauthorized"}, status=401)
+            return
+
+        if self.path == "/tts":
+            try:
+                body = self.read_json()
+                text = str(body.get("text", "")).strip()
+                voice = str(body.get("voice", "")).strip()
+            except Exception as error:
+                self.send_json({"error": f"invalid_json: {error}"}, status=400)
+                return
+            audio = synthesize_tts(text, voice)
+            if audio is None:
+                self.send_json({"error": "tts_unavailable"}, status=503)
+                return
+            self.send_bytes(audio, "audio/wav")
             return
 
         if self.path.startswith("/company/"):

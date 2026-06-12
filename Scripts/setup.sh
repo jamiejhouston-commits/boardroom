@@ -23,6 +23,21 @@ fi
 PY="$HOME/.hermes/hermes-agent/venv/bin/python"
 [ -x "$PY" ] || PY="$(command -v python3)"
 
+# 2b. Free neural voices (Piper) — optional but makes agents sound human.
+PIPER_VENV="$HOME/.hermes/piper-venv"
+if [ ! -x "$PIPER_VENV/bin/piper" ]; then
+  bold "Installing free neural voices (one-time, ~2 min)…"
+  mkdir -p "$HOME/.hermes/piper-voices"
+  ( "$PY" -m venv "$PIPER_VENV" 2>/dev/null && \
+    "$PIPER_VENV/bin/pip" install -q --timeout 120 piper-tts 2>/dev/null && \
+    cd "$HOME/.hermes/piper-voices" && \
+    "$PIPER_VENV/bin/python" -m piper.download_voices \
+      en_US-ryan-medium en_US-joe-medium en_GB-alan-medium en_US-amy-medium \
+      en_US-kathleen-low en_GB-jenny_dioco-medium en_US-lessac-medium 2>/dev/null ) \
+    && echo "  Neural voices installed." \
+    || echo "  (Voices skipped — agents will use the on-device voice. Re-run setup to retry.)"
+fi
+
 # 3. Restart the relay cleanly.
 pkill -f hermes_mobile_relay.py 2>/dev/null || true
 sleep 1
