@@ -25,6 +25,8 @@ struct OrgAgent: Identifiable, Hashable, Codable {
     var profileSlug: String
     var systemImage: String = "person.fill"
     var plugins: [String] = []
+    /// Hermes skills this agent loads (passed to `hermes chat -s ...`).
+    var skills: [String] = []
     var coordinates: [String] = []
     /// The agent's editable soul.md (persona / instructions).
     var soul: String = ""

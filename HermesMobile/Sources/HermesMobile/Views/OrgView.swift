@@ -194,9 +194,28 @@ struct OrgAgentDetailView: View {
                 Section("Team") { ForEach(team) { Label($0.name, systemImage: $0.systemImage) } }
             }
 
+            if !agent.skills.isEmpty {
+                Section {
+                    ForEach(agent.skills, id: \.self) {
+                        Label($0, systemImage: "wrench.and.screwdriver.fill")
+                            .foregroundStyle(HermesTheme.emerald)
+                    }
+                } header: {
+                    Text("Skills (\(agent.skills.count))")
+                } footer: {
+                    Text("These Hermes skills load whenever you chat or call \(agent.name).")
+                }
+            }
+
             if !agent.plugins.isEmpty {
-                Section("Plugins & skills") {
-                    ForEach(agent.plugins, id: \.self) { Label($0, systemImage: "puzzlepiece.extension.fill") }
+                Section {
+                    ForEach(agent.plugins, id: \.self) {
+                        Label($0, systemImage: "puzzlepiece.extension.fill")
+                    }
+                } header: {
+                    Text("Plugins (\(agent.plugins.count))")
+                } footer: {
+                    Text("Enable these on the Mac (hermes plugins enable) to activate.")
                 }
             }
 

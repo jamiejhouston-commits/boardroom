@@ -51,7 +51,9 @@ struct HermesRelayClient {
 
     /// `fast: true` asks the relay for a single model turn (no agent tool
     /// loop) — used by voice calls where latency matters more than tools.
-    func stream(_ message: String, sessionKey: String? = nil, fast: Bool = false) -> AsyncThrowingStream<RelayStreamEvent, Error> {
+    /// `skills` is a comma-joined loadout passed to `hermes chat -s`.
+    func stream(_ message: String, sessionKey: String? = nil, fast: Bool = false,
+                skills: [String] = []) -> AsyncThrowingStream<RelayStreamEvent, Error> {
         AsyncThrowingStream { continuation in
             Task {
                 do {
@@ -68,7 +70,8 @@ struct HermesRelayClient {
                             message: message,
                             profile: configuration.profile,
                             session: sessionKey ?? configuration.sessionName,
-                            fast: fast ? true : nil
+                            fast: fast ? true : nil,
+                            skills: skills.isEmpty ? nil : skills.joined(separator: ",")
                         )
                     )
 
@@ -188,6 +191,7 @@ private struct ChatRequest: Codable {
     var profile: String
     var session: String
     var fast: Bool? = nil
+    var skills: String? = nil
 }
 
 private struct ChatResponse: Codable {

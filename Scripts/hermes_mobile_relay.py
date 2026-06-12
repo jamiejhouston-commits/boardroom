@@ -250,7 +250,7 @@ def session_name_for(profile: str) -> str:
 
 
 def chat_command(message: str, profile: str, resume_session_id: str | None,
-                 fast: bool = False) -> list[str]:
+                 fast: bool = False, skills: str = "") -> list[str]:
     command = ["hermes"]
     if profile != "default":
         command.extend(["-p", profile])
@@ -264,6 +264,8 @@ def chat_command(message: str, profile: str, resume_session_id: str | None,
         # Voice calls: cap the agent loop so a turn can't wander into long
         # tool chains. 2 (not 1) — at 1 the CLI truncates with ⚠️ warnings.
         command.extend(["--max-turns", "2"])
+    if skills:
+        command.extend(["-s", skills])   # per-agent skill loadout
     if resume_session_id:
         command.extend(["--resume", resume_session_id])
     command.extend(["-q", message])
@@ -400,6 +402,16 @@ class RelayHandler(BaseHTTPRequestHandler):
     timeout = 240
     public_url = ""
     config_store = RelayConfigStore(CONFIG_PATH)
+    # Pairing pages hand out the bearer token, so they only answer from the
+    # Mac itself or during a short window after startup — the moment you're
+    # actually pairing. Restart the relay (or re-run setup.sh) to re-open.
+    started_at = time.monotonic()
+    pair_window_seconds = int(os.environ.get("HERMES_PAIR_WINDOW", "600"))
+
+    def pairing_allowed(self) -> bool:
+        if self.client_address[0] in ("127.0.0.1", "::1"):
+            return True
+        return time.monotonic() - RelayHandler.started_at < RelayHandler.pair_window_seconds
 
     def do_GET(self) -> None:
         if self.path == "/health":
@@ -411,6 +423,11 @@ class RelayHandler(BaseHTTPRequestHandler):
                     "warm": WARM_CLIENT.warm(),
                 }
             )
+            return
+        if self.path in {"/pair", "/pair.json", "/pair.png"} and not self.pairing_allowed():
+            self.send_json({"error": "pairing_window_closed",
+                            "fix": "Restart the relay (or run Scripts/setup.sh) and pair within 10 minutes, or open this page on the Mac itself."},
+                           status=403)
             return
         if self.path == "/pair.json":
             self.send_json(pairing_payload(self.public_url, self.token))
@@ -501,6 +518,7 @@ class RelayHandler(BaseHTTPRequestHandler):
             profile = normalize_profile(requested_profile)
             mobile_session_key = str(body.get("session", "")).strip() or session_name_for(profile)
             fast = bool(body.get("fast", False))
+            skills = str(body.get("skills", "")).strip()
         except Exception as error:
             self.send_json({"error": f"invalid_json: {error}"}, status=400)
             return
@@ -510,7 +528,7 @@ class RelayHandler(BaseHTTPRequestHandler):
             return
 
         resume_session_id = self.config_store.session_id(profile, mobile_session_key)
-        command = chat_command(message, profile, resume_session_id, fast)
+        command = chat_command(message, profile, resume_session_id, fast, skills)
 
         if self.path == "/chat/stream":
             self.stream_chat(command, profile, mobile_session_key, message=message)

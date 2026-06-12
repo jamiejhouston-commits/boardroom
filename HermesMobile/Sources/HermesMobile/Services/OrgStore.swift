@@ -34,10 +34,20 @@ final class OrgStore: ObservableObject {
     /// custom souls), so new and Genesis-created agents are covered too.
     private func backfillSouls() {
         var changed = false
-        for i in agents.indices
-        where agents[i].soul.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-            agents[i].soul = SoulLibrary.solidSoul(for: agents[i])
-            changed = true
+        for i in agents.indices {
+            if agents[i].soul.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                agents[i].soul = SoulLibrary.solidSoul(for: agents[i])
+                changed = true
+            }
+            // Equip with role-aligned skills + plugins if none set yet.
+            if agents[i].skills.isEmpty {
+                agents[i].skills = SkillLibrary.skills(for: agents[i])
+                changed = true
+            }
+            if agents[i].plugins.isEmpty {
+                let plugins = SkillLibrary.plugins(for: agents[i])
+                if !plugins.isEmpty { agents[i].plugins = plugins; changed = true }
+            }
         }
         if changed { persist() }
     }

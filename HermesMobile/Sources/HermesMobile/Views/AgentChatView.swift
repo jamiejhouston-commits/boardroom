@@ -391,7 +391,7 @@ final class AgentConversation: ObservableObject {
 
         Task {
             do {
-                for try await event in HermesRelayClient(configuration: config).stream(payload, sessionKey: session, fast: true) {
+                for try await event in HermesRelayClient(configuration: config).stream(payload, sessionKey: session, fast: true, skills: agent.skills) {
                     switch event.type {
                     case .start: break
                     case .delta: appendTo(responseID, event.text ?? "")
