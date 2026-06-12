@@ -11,16 +11,6 @@ Day for your ship/no-ship call.
 > 🎬 **Demo video coming here** — agents debating out loud, the phone buzzing
 > with "The board needs your greenlight," and Demo Day on the calendar.
 
-## Why Boardroom
-
-Most AI apps give you a chat box. Boardroom gives you an operating system for a
-local AI company: agents with roles, meetings, debate, greenlights, deadlines,
-and deliverables — controlled from the phone in your hand while the actual work
-runs on your Mac.
-
-It is built for builders who want autonomous agents without handing their whole
-workflow to a cloud dashboard.
-
 ## What it does
 
 - 🏛 **The Boardroom** — flip the company on, set your investment thesis
@@ -37,13 +27,6 @@ workflow to a cloud dashboard.
   memos sent to attendees, replies collected in threads.
 - 🤖 **A real org** — CEO, department heads, specialists; each with its own
   persona ("soul"), accent color, and 3D office.
-
-## Who it is for
-
-- Founders and builders experimenting with autonomous agent companies.
-- Hermes Agent users who want mobile control over local agents.
-- Local-first AI developers who care about privacy, ownership, and hackability.
-- Swift/iOS developers who want a real agentic app codebase to study or extend.
 
 ## Requirements
 
