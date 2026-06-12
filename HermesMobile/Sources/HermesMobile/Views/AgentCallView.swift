@@ -215,9 +215,11 @@ private final class CallModel: ObservableObject {
         recordingTask?.cancel()
         voice.stop()
         recorder.cancelRecording()
+        state = .idle   // never leave the call stuck on "thinking…"
     }
 
     private func completeTurn() async {
+        guard !Task.isCancelled else { state = .idle; return }
         guard let agent, let relay else { return }
         guard let transcript = await recorder.finishRecordingAndTranscribe(),
               !transcript.isEmpty else {

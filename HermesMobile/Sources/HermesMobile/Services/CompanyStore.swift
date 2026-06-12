@@ -18,7 +18,9 @@ final class CompanyStore: ObservableObject {
     }
 
     func refresh(relay: HermesRelayConfiguration) async {
-        guard relay.isConfigured else { return }
+        // !isLoading: the 60s ticker must not stack a second fetch on a slow
+        // relay (causes isLoading flicker + duplicate gate notifications).
+        guard relay.isConfigured, !isLoading else { return }
         isLoading = true
         defer { isLoading = false }
         do {
@@ -107,7 +109,7 @@ final class CompanyStore: ObservableObject {
             content.userInfo = ["initiativeTitle": initiative.title,
                                 "stage": initiative.stage]
             UNUserNotificationCenter.current().add(
-                UNNotificationRequest(identifier: "gate-\(key)-\(Int(now))",
+                UNNotificationRequest(identifier: "gate-\(key)",   // stable: replaces, never stacks
                                       content: content, trigger: nil))
             lastNotified[key] = now
         }

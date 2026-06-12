@@ -13,6 +13,9 @@ struct HermesMobileApp: App {
         // is foreground — gate alerts would vanish silently.
         UNUserNotificationCenter.current().delegate = NotificationPresenter.shared
         NotificationPresenter.shared.registerCategories()
+        // MUST register the BG task before launch ends — registering later
+        // (in .task) silently fails and background gate alerts never fire.
+        Self.registerCompanyRefresh()
     }
     @StateObject private var store = AgentProfileStore()
     @StateObject private var runtime = HermesRuntimeController()
@@ -35,7 +38,6 @@ struct HermesMobileApp: App {
                 .task {
                     store.load()
                     runtime.boot()
-                    Self.registerCompanyRefresh()
                 }
         }
         .onChange(of: scenePhase) { _, phase in

@@ -157,17 +157,42 @@ class StageMachineTests(unittest.TestCase):
         self.advance()
         self.assertEqual(self.init["stage"], "execution")
 
-    def test_execution_collects_artifacts_and_moves_to_demo_ready(self):
+    def test_execution_builds_reviews_and_moves_to_demo_ready(self):
         self.init["stage"] = "execution"
         outdir = self.root / company.initiative_dirname(self.init)
+        roles = []
         def runner(role, prompt):
+            roles.append(role)
+            if role == "qa":
+                return "Complete and polished.\nVERDICT: SHIP"
             outdir.mkdir(parents=True, exist_ok=True)
             (outdir / "report.md").write_text("done")
             return "Created report.md"
         self.advance(runner)
         self.assertEqual(self.init["stage"], "demo_ready")
+        self.assertIn("qa", roles)              # QA actually reviewed the build
         self.assertEqual(len(self.init["artifacts"]), 1)
-        self.assertTrue(self.init["artifacts"][0].endswith("report.md"))
+
+    def test_execution_loops_until_qa_passes(self):
+        self.init["stage"] = "execution"
+        outdir = self.root / company.initiative_dirname(self.init)
+        outdir.mkdir(parents=True, exist_ok=True)
+        (outdir / "f.txt").write_text("x")
+        qa_calls = {"n": 0}
+        def runner(role, prompt):
+            if role == "qa":
+                qa_calls["n"] += 1
+                return "VERDICT: SHIP" if qa_calls["n"] >= 2 else "VERDICT: REVISE\n1. fix it"
+            return "built"
+        self.advance(runner)
+        self.assertEqual(qa_calls["n"], 2)      # one REVISE round, then SHIP
+        self.assertEqual(self.init["review_rounds"], 2)
+        self.assertEqual(self.init["stage"], "demo_ready")
+
+    def test_review_passed_parsing(self):
+        self.assertTrue(company.review_passed("looks great\nVERDICT: SHIP"))
+        self.assertFalse(company.review_passed("VERDICT: REVISE\n1. x"))
+        self.assertFalse(company.review_passed("no verdict at all"))
 
     def test_demo_ready_writes_invite_brief_and_moves_to_gate2(self):
         self.init["stage"] = "demo_ready"
@@ -284,6 +309,15 @@ class TickTests(unittest.TestCase):
         self.assertIn("stalled", bad["note"])
         self.assertEqual(bad["stage"], "research")  # unchanged, retried next tick
         self.assertTrue(events)
+
+    def test_repeated_stalls_kill_initiative(self):
+        bad = company.new_initiative("Bad", "")
+        bad["stall_count"] = company.MAX_STALLS - 1
+        self.state["initiatives"] = [bad]
+        def runner(role, prompt):
+            raise RuntimeError("relay offline")
+        self.tick(runner=runner)
+        self.assertEqual(bad["stage"], "killed")   # no 20-hour silent retry loop
 
 
 class MergeTickTests(unittest.TestCase):

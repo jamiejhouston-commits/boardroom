@@ -10,11 +10,17 @@ injected runner(role, prompt) -> str so everything is testable offline.
 from __future__ import annotations
 
 import json
+import os
 import re
 import secrets
 import time
 from datetime import datetime
 from pathlib import Path
+
+# How many QA review→fix rounds the build team runs before Demo Day.
+MAX_REVIEW_ROUNDS = 3
+# How many times a stuck initiative retries a stage before it's killed.
+MAX_STALLS = 3
 
 DEFAULT_CONFIG = {
     "interval_minutes": 30,
@@ -75,8 +81,12 @@ class CompanyStore:
         return new_state()
 
     def save(self, state: dict) -> None:
+        # Atomic write: a crash mid-write must never corrupt company state
+        # (a half-written file decodes to empty and wipes every initiative).
         self.path.parent.mkdir(parents=True, exist_ok=True)
-        self.path.write_text(json.dumps(state, indent=2))
+        tmp = self.path.with_suffix(".tmp")
+        tmp.write_text(json.dumps(state, indent=2))
+        os.replace(tmp, self.path)
 
 
 class BudgetExceeded(Exception):
@@ -115,6 +125,7 @@ ROLE_SOULS = {
     "marketing": "You are the Head of Marketing. You judge demand, distribution channels, and how the product gets users.",
     "ceo": "You are the CEO. You chair the board, weigh dissent honestly, and decide. You report to the owner (the human Chairman).",
     "builder": "You are the Lead Builder. You produce real deliverables — files, code, docs — not descriptions of them.",
+    "qa": "You are the QA + Design lead. You are demanding and detail-obsessed. You judge work as a SHIPPABLE product, never a demo. You catch stubs, fake logic, placeholder text, and unpolished UI, and you do NOT pass anything that would embarrass the owner in front of users.",
 }
 
 SCOUT_JSON_SPEC = (
@@ -196,6 +207,14 @@ def last_text(initiative: dict, stage: str) -> str:
     return ""
 
 
+def review_passed(review: str) -> bool:
+    """QA ends with 'VERDICT: SHIP' or 'VERDICT: REVISE' — the later one wins."""
+    text = review.upper()
+    ship = text.rfind("VERDICT: SHIP")
+    revise = text.rfind("VERDICT: REVISE")
+    return ship != -1 and ship > revise
+
+
 def advance_stage(state: dict, init: dict, runner, artifacts_root: Path) -> None:
     """Advance one initiative by exactly one stage. Gates are no-ops here —
     they advance only via apply_gate (the owner's decision)."""
@@ -242,14 +261,55 @@ def advance_stage(state: dict, init: dict, runner, artifacts_root: Path) -> None
     elif stage == "execution":
         outdir = artifacts_root / initiative_dirname(init)
         outdir.mkdir(parents=True, exist_ok=True)
-        reply = runner("builder", role_prompt("builder",
-            f"Execute these work orders for '{init['title']}'. "
-            f"Save EVERY deliverable as a real file under {outdir} using your file tools.\n"
+
+        def collect_artifacts() -> None:
+            init["artifacts"] = sorted(
+                str(p) for p in outdir.rglob("*") if p.is_file())
+
+        # 1. Build it — demand a finished product, not a skeleton.
+        build = runner("builder", role_prompt("builder",
+            f"Build '{init['title']}' as a COMPLETE, POLISHED, working product — "
+            f"NOT a skeleton or stub. Every screen real, every flow wired end to "
+            f"end, the core feature actually implemented (not faked), no "
+            f"placeholder/TODO logic, and it should look finished. "
+            f"Save every file under {outdir} using your file tools.\n"
             f"Work orders:\n{last_text(init, 'planning')}\n"
-            "When done, list each file you created with a one-line summary."))
-        log_minute(init, "execution", "builder", reply)
-        init["artifacts"] = sorted(
-            str(p) for p in outdir.rglob("*") if p.is_file())
+            "List each file you created with a one-line summary."))
+        log_minute(init, "execution", "builder", build)
+        collect_artifacts()
+
+        # 2. QA review → fix loop. The team keeps working until QA signs off
+        #    or the rounds/budget run out — no more one-shot dumps.
+        rounds = 0
+        try:
+            for _ in range(MAX_REVIEW_ROUNDS):
+                files = "\n".join(init["artifacts"]) or "(no files)"
+                review = runner("qa", role_prompt("qa",
+                    f"Review '{init['title']}' as a product the owner will show "
+                    f"people — be harsh. READ every file under {outdir}.\n"
+                    f"Files:\n{files}\n\n"
+                    "Check: does it work end to end? Is the core feature really "
+                    "implemented or faked/stubbed? Is the UI polished or a bare "
+                    "skeleton? Any TODOs, placeholders, dead buttons? Would the "
+                    "owner be embarrassed to show this?\n"
+                    "End with exactly one line: 'VERDICT: SHIP' if it is genuinely "
+                    "good enough to show, or 'VERDICT: REVISE' then a numbered list "
+                    "of the specific changes required."))
+                log_minute(init, "review", "qa", review)
+                rounds += 1
+                if review_passed(review):
+                    break
+                fix = runner("builder", role_prompt("builder",
+                    f"QA reviewed '{init['title']}' and requires changes before it "
+                    f"can ship. Address EVERY point by editing the real files under "
+                    f"{outdir}. Don't argue — do the work.\n\nQA review:\n{review}"))
+                log_minute(init, "execution", "builder", fix)
+                collect_artifacts()
+        except BudgetExceeded:
+            pass   # ship what exists rather than vanish
+
+        init["review_rounds"] = rounds
+        collect_artifacts()
         init["stage"] = "demo_ready"
 
     elif stage == "demo_ready":
@@ -335,14 +395,21 @@ def tick(state: dict, runner, artifacts_root: Path, now: float | None = None) ->
         charged = make_charged_runner(init, config["budget_calls"], runner)
         try:
             advance_stage(state, init, charged, artifacts_root)
+            init["stall_count"] = 0   # progress resets the stall counter
             events.append(f"{init['id']} advanced to {init['stage']}")
         except BudgetExceeded:
             init["stage"] = "killed"
             init["note"] = "token budget exhausted"
             events.append(f"{init['id']} killed: budget exhausted")
         except Exception as error:  # noqa: BLE001 — one bad turn must not stop the pulse
-            init["note"] = f"stalled: {error}"
-            events.append(f"{init['id']} stalled: {error}")
+            init["stall_count"] = init.get("stall_count", 0) + 1
+            if init["stall_count"] >= MAX_STALLS:
+                init["stage"] = "killed"
+                init["note"] = f"killed after {MAX_STALLS} failed attempts: {error}"
+                events.append(f"{init['id']} killed: {error}")
+            else:
+                init["note"] = f"stalled ({init['stall_count']}/{MAX_STALLS}): {error}"
+                events.append(f"{init['id']} stalled: {error}")
 
     if len(active(state)) < config["max_active"]:
         try:

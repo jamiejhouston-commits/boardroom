@@ -319,6 +319,7 @@ struct InitiativeDetailView: View {
     let initiativeID: String
 
     @State private var detail: CompanyInitiative?
+    @State private var loadError: String?
 
     var body: some View {
         List {
@@ -369,6 +370,16 @@ struct InitiativeDetailView: View {
                         }
                     }
                 }
+            } else if let loadError {
+                Section {
+                    VStack(alignment: .leading, spacing: 10) {
+                        Label(loadError, systemImage: "wifi.exclamationmark")
+                            .font(.caption)
+                            .foregroundStyle(.orange)
+                        Button("Retry") { Task { await load() } }
+                            .buttonStyle(.bordered)
+                    }
+                }
             } else {
                 Section {
                     HStack(spacing: 8) {
@@ -382,9 +393,16 @@ struct InitiativeDetailView: View {
         }
         .navigationTitle("Initiative")
         .navigationBarTitleDisplayMode(.inline)
-        .task {
-            detail = await company.initiativeDetail(id: initiativeID,
-                                                    relay: runtime.relayConfiguration)
+        .task { await load() }
+    }
+
+    private func load() async {
+        loadError = nil
+        if let fresh = await company.initiativeDetail(id: initiativeID,
+                                                      relay: runtime.relayConfiguration) {
+            detail = fresh
+        } else if detail == nil {
+            loadError = "Couldn't load this initiative — check your relay connection."
         }
     }
 }

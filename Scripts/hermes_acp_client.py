@@ -18,9 +18,11 @@ back to the cold CLI and a fresh warm process is started for the turn after.
 from __future__ import annotations
 
 import json
+import select
 import subprocess
 import threading
 import time
+from pathlib import Path
 from typing import Callable, Iterator
 
 
@@ -105,7 +107,10 @@ class AcpClient:
         session_id = self._sessions.get(conversation_key)
         if session_id:
             return session_id
-        request_id = self._send("session/new", {"cwd": "/tmp", "mcpServers": []})
+        # Home, not /tmp: files the warm agent writes must land somewhere the
+        # owner can actually find them (and macOS won't purge).
+        request_id = self._send("session/new",
+                                {"cwd": str(Path.home()), "mcpServers": []})
         result = {}
         for _ in self._pump_until_response(request_id, capture_result=result):
             pass
@@ -139,12 +144,31 @@ class AcpClient:
         """Read messages until the response for request_id arrives. Yields
         agent text chunks; auto-allows permission requests."""
         deadline = time.monotonic() + self._turn_timeout
+        stdout = self._process.stdout
         while True:
             if time.monotonic() > deadline:
                 self._mark_dead()
                 raise WarmUnavailable("turn timed out")
+            # select() so a hung agent (output stalls without closing the pipe)
+            # can't block readline() forever — that would orphan the lock and
+            # wedge every future chat. Poll in 1s slices and re-check the deadline.
             try:
-                line = self._process.stdout.readline()
+                ready, _, _ = select.select([stdout], [], [], 1.0)
+                readable = bool(ready)
+            except (TypeError, ValueError):
+                # stdout has no real file descriptor (test double) — skip the
+                # readability poll and let the bounded readline below handle it.
+                readable = True
+            except OSError as error:
+                self._mark_dead()
+                raise WarmUnavailable(f"select failed: {error}")
+            if not readable:
+                if self._process is None or self._process.poll() is not None:
+                    self._mark_dead()
+                    raise WarmUnavailable("warm hermes process exited")
+                continue
+            try:
+                line = stdout.readline()
             except (OSError, AttributeError) as error:
                 self._mark_dead()
                 raise WarmUnavailable(f"read failed: {error}")

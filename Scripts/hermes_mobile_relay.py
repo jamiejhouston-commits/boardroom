@@ -62,6 +62,7 @@ COMPANY_STATE_PATH = Path.home() / ".hermes" / "mobile-company.json"
 # Deliverables go somewhere the owner can SEE — Finder, not a dotfolder.
 COMPANY_ARTIFACTS_ROOT = Path.home() / "Documents" / "Boardroom"
 COMPANY_LOCK = threading.Lock()
+_CONFIG_LOCK = threading.Lock()   # serializes RelayConfigStore writes
 
 CONFIG_PATH = Path.home() / ".hermes" / "mobile-relay.json"
 REEXEC_ENV = "HERMES_MOBILE_RELAY_REEXEC"
@@ -151,9 +152,14 @@ class RelayConfigStore:
         return {}
 
     def save(self, data: dict[str, Any]) -> None:
+        # Atomic + serialized: ThreadingHTTPServer + the heartbeat can save
+        # concurrently; a torn write would lose the token and all session ids.
         self.path.parent.mkdir(parents=True, exist_ok=True)
-        self.path.write_text(json.dumps(data, indent=2))
-        self.path.chmod(0o600)
+        with _CONFIG_LOCK:
+            tmp = self.path.with_suffix(".tmp")
+            tmp.write_text(json.dumps(data, indent=2))
+            tmp.chmod(0o600)
+            os.replace(tmp, self.path)
 
     @staticmethod
     def session_key(profile: str, mobile_session_key: str) -> str:
@@ -315,49 +321,73 @@ def ship_commands(outdir: Path, slug: str) -> list[list[str]]:
 
 
 def ship_initiative(init: dict) -> str | None:
-    """Run the ship pipeline; returns the private repo URL or None."""
+    """Run the ship pipeline; returns the private repo URL or None.
+    Raises with a readable message if git/gh fail, so the caller can surface
+    it instead of handing the owner a link to an empty repo."""
     slug = company_module.initiative_dirname(init)
     outdir = COMPANY_ARTIFACTS_ROOT / slug
-    if not outdir.is_dir():
-        return None
+    if not outdir.is_dir() or not any(outdir.rglob("*")):
+        raise RuntimeError("nothing to ship — no deliverables on disk")
     url = None
     for command in ship_commands(outdir, slug):
         result = subprocess.run(command, text=True, capture_output=True,
                                 timeout=120, check=False)
+        output = (result.stdout or "") + (result.stderr or "")
         if command[0] == "gh":
-            output = (result.stdout or "") + (result.stderr or "")
             match = re.search(r"https://github\.com/\S+", output)
             if match:
                 url = match.group(0).rstrip("/").removesuffix(".git")
-            if result.returncode != 0 and "already exists" in output:
-                # Re-ship after a revise round: push to the existing repo.
-                subprocess.run(["git", "-C", str(outdir), "push", "-u", "origin", "main"],
-                               text=True, capture_output=True, timeout=120, check=False)
+            if result.returncode != 0:
+                if "already exists" in output:
+                    # Re-ship after a revise round: push to the existing repo.
+                    push = subprocess.run(
+                        ["git", "-C", str(outdir), "push", "origin", "main"],
+                        text=True, capture_output=True, timeout=120, check=False)
+                    if push.returncode != 0:
+                        raise RuntimeError(f"push to existing repo failed: {(push.stderr or '')[-300:]}")
+                elif url is None:
+                    raise RuntimeError(f"gh repo create failed: {output[-300:]}")
+        elif result.returncode != 0:
+            # git init/add/commit failed — abort before creating an empty remote.
+            raise RuntimeError(f"{' '.join(command[:3])} failed: {output[-300:]}")
     return url
 
 
 def ship_in_background(initiative_id: str) -> None:
-    """Ship without blocking the gate response; record the repo URL in state."""
-    def run() -> None:
-        store = company_module.CompanyStore(COMPANY_STATE_PATH)
+    """Ship without blocking the gate response; record the repo URL in state.
+    Any failure (gh/git missing, push conflict, empty outdir) is recorded as
+    a visible note instead of the thread dying silently."""
+    def record(note: str, url: str | None) -> None:
         with COMPANY_LOCK:
-            state = store.load()
-            try:
-                init = company_module.find_initiative(state, initiative_id)
-            except KeyError:
-                return
-        url = ship_initiative(init)   # slow — outside the lock
-        with COMPANY_LOCK:
-            state = store.load()
+            state = company_module.CompanyStore(COMPANY_STATE_PATH).load()
             try:
                 init = company_module.find_initiative(state, initiative_id)
             except KeyError:
                 return
             init["repo_url"] = url or ""
+            init["note"] = note
+            company_module.CompanyStore(COMPANY_STATE_PATH).save(state)
+
+    def run() -> None:
+        try:
+            store = company_module.CompanyStore(COMPANY_STATE_PATH)
+            with COMPANY_LOCK:
+                state = store.load()
+                try:
+                    init = company_module.find_initiative(state, initiative_id)
+                except KeyError:
+                    return
+            url = ship_initiative(init)   # slow — outside the lock
             if url:
-                init["note"] = f"Shipped to private repo: {url}"
-            store.save(state)
-        print(f"company - {initiative_id} shipped: {url or 'repo push failed'}", flush=True)
+                record(f"Shipped to private repo: {url}", url)
+                print(f"company - {initiative_id} shipped: {url}", flush=True)
+            else:
+                record("Ship failed: no repo URL returned (is the gh CLI authed?).", None)
+                print(f"company - {initiative_id} ship FAILED: no url", flush=True)
+        except Exception as error:  # noqa: BLE001 — never let the ship thread die silently
+            record(f"Ship failed: {error}", None)
+            print(f"company - {initiative_id} ship FAILED: {error}", flush=True)
+
     threading.Thread(target=run, daemon=True).start()
 
 
@@ -474,11 +504,12 @@ class RelayHandler(BaseHTTPRequestHandler):
             return
 
         if self.path.startswith("/company/"):
+            # /company/halt needs no body — never let an empty POST block the
+            # kill switch. start/gate parse a body but tolerate an empty one.
             try:
                 body = self.read_json()
-            except Exception as error:
-                self.send_json({"error": f"invalid_json: {error}"}, status=400)
-                return
+            except Exception:
+                body = {}
             store = company_module.CompanyStore(COMPANY_STATE_PATH)
             with COMPANY_LOCK:
                 state = store.load()
