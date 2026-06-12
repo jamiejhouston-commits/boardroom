@@ -2,7 +2,7 @@ import Foundation
 import Security
 
 enum KeychainStore {
-    private static let service = "com.nousresearch.HermesMobile"
+    private static let service = "com.jamiehouston.boardroom"
 
     static func save(_ value: String, account: String) {
         let data = Data(value.utf8)

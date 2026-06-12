@@ -1,6 +1,6 @@
 name: HermesMobile
 options:
-  bundleIdPrefix: com.nousresearch
+  bundleIdPrefix: com.jamiehouston
   deploymentTarget:
     iOS: "18.0"
 settings:
@@ -29,12 +29,12 @@ targets:
     info:
       path: HermesMobile/Info.plist
       properties:
-        CFBundleDisplayName: Hermes
+        CFBundleDisplayName: Boardroom
         LSApplicationCategoryType: public.app-category.productivity
         NSSupportsLiveActivities: true
         NSBonjourServices: [_hermes-relay._tcp]
         UIBackgroundModes: [fetch]
-        BGTaskSchedulerPermittedIdentifiers: [com.nousresearch.HermesMobile.companyRefresh]
+        BGTaskSchedulerPermittedIdentifiers: [com.jamiehouston.boardroom.companyRefresh]
         NSLocalNetworkUsageDescription: Connect to the Hermes Mobile relay running on your Mac.
         NSCameraUsageDescription: Scan relay pairing codes and place your Hermes headquarters in augmented reality.
         NSMicrophoneUsageDescription: Record voice notes to send to Hermes.
@@ -52,7 +52,7 @@ targets:
         UISupportedInterfaceOrientations~ipad: [UIInterfaceOrientationPortrait, UIInterfaceOrientationLandscapeLeft, UIInterfaceOrientationLandscapeRight]
     settings:
       base:
-        PRODUCT_BUNDLE_IDENTIFIER: com.nousresearch.HermesMobile
+        PRODUCT_BUNDLE_IDENTIFIER: com.jamiehouston.boardroom
         ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
         TARGETED_DEVICE_FAMILY: "1,2"
   HermesMobileTests:
@@ -64,5 +64,5 @@ targets:
       - target: HermesMobile
     settings:
       base:
-        PRODUCT_BUNDLE_IDENTIFIER: com.nousresearch.HermesMobileTests
+        PRODUCT_BUNDLE_IDENTIFIER: com.jamiehouston.boardroom.tests
         GENERATE_INFOPLIST_FILE: YES

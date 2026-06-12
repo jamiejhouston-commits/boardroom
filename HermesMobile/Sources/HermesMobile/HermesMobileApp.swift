@@ -5,7 +5,7 @@ import SwiftUI
 struct HermesMobileApp: App {
     @Environment(\.scenePhase) private var scenePhase
 
-    private static let companyRefreshTaskID = "com.nousresearch.HermesMobile.companyRefresh"
+    private static let companyRefreshTaskID = "com.jamiehouston.boardroom.companyRefresh"
     @StateObject private var store = AgentProfileStore()
     @StateObject private var runtime = HermesRuntimeController()
     @StateObject private var org = OrgStore()
