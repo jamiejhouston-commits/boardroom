@@ -132,9 +132,11 @@ private struct OrgAgentRow: View {
 
 struct OrgAgentDetailView: View {
     @EnvironmentObject private var org: OrgStore
+    @Environment(\.dismiss) private var dismiss
     private let initialAgent: OrgAgent
     @State private var showingEdit = false
     @State private var showingCall = false
+    @State private var showingFireConfirm = false
 
     init(agent: OrgAgent) { initialAgent = agent }
 
@@ -231,10 +233,27 @@ struct OrgAgentDetailView: View {
             Section("Hermes profile") {
                 Label(agent.profileSlug, systemImage: "cpu.fill")
             }
+
+            Section {
+                Button(role: .destructive) { showingFireConfirm = true } label: {
+                    Label("Fire \(agent.name)", systemImage: "person.fill.xmark")
+                }
+            } footer: {
+                Text("Removes this agent from your company. Create a replacement any time with ＋ in Agents.")
+            }
         }
         .navigationTitle(agent.name)
         .navigationBarTitleDisplayMode(.inline)
         .sheet(isPresented: $showingEdit) { AgentEditorView(agent: agent) }
         .fullScreenCover(isPresented: $showingCall) { AgentCallView(agent: agent) }
+        .confirmationDialog("Fire \(agent.name)?", isPresented: $showingFireConfirm, titleVisibility: .visible) {
+            Button("Fire \(agent.name)", role: .destructive) {
+                org.delete(agent)
+                dismiss()
+            }
+            Button("Cancel", role: .cancel) {}
+        } message: {
+            Text("They'll be removed from the company. Their direct reports move under the CEO.")
+        }
     }
 }

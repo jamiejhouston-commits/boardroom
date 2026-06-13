@@ -323,7 +323,9 @@ def chat_command(message: str, profile: str, resume_session_id: str | None,
 
 
 def company_chat_command(message: str, role: str, resume_session_id: str | None) -> list[str]:
-    command = ["hermes", "chat", "-Q", "--source", "mobile"]
+    # `nice`: the autonomous company runs at LOW CPU priority so its long
+    # builds can never starve the owner's live chat/voice. macOS honors this.
+    command = ["nice", "-n", "15", "hermes", "chat", "-Q", "--source", "mobile"]
     if resume_session_id:
         command.extend(["--resume", resume_session_id])
     command.extend(["-q", message])

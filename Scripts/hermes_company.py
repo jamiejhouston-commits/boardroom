@@ -253,8 +253,12 @@ def advance_stage(state: dict, init: dict, runner, artifacts_root: Path) -> None
         reply = runner("ceo", role_prompt("ceo",
             f"The owner GREENLIT '{init['title']}'.{note}\n"
             f"Research memo:\n{last_text(init, 'research')}\n"
-            "Write concrete work orders for the build team: numbered deliverables "
-            "with acceptance criteria. Only what ships in days."))
+            "Write a RUTHLESSLY SMALL work order — the single core slice that "
+            "proves the idea and nothing else. Hard limits: ONE main screen/flow, "
+            "3–6 files MAX. NO widgets, StoreKit, landing page, App Store assets, "
+            "tests, or 'nice to haves'. The build team gets ONE pass, so scope it "
+            "so a focused engineer finishes it well in that pass. List the few "
+            "files to create and the one thing each must do."))
         log_minute(init, "planning", "ceo", reply)
         init["stage"] = "execution"
 
@@ -266,14 +270,16 @@ def advance_stage(state: dict, init: dict, runner, artifacts_root: Path) -> None
             init["artifacts"] = sorted(
                 str(p) for p in outdir.rglob("*") if p.is_file())
 
-        # 1. Build it — demand a finished product, not a skeleton.
+        # 1. Build it — a SMALL, complete, polished core. Finishing one slice
+        #    well beats a half-done 12-feature app that times out.
         build = runner("builder", role_prompt("builder",
-            f"Build '{init['title']}' as a COMPLETE, POLISHED, working product — "
-            f"NOT a skeleton or stub. Every screen real, every flow wired end to "
-            f"end, the core feature actually implemented (not faked), no "
-            f"placeholder/TODO logic, and it should look finished. "
+            f"Build the CORE SLICE of '{init['title']}' — small but genuinely "
+            f"COMPLETE and polished: the one main flow fully wired and working, "
+            f"no stubs, no placeholder/TODO logic, looks finished. Do NOT attempt "
+            f"the whole product — just the core slice in the work order, done well. "
+            f"Keep it to a handful of files so you finish in this pass. "
             f"Save every file under {outdir} using your file tools.\n"
-            f"Work orders:\n{last_text(init, 'planning')}\n"
+            f"Work order:\n{last_text(init, 'planning')}\n"
             "List each file you created with a one-line summary."))
         log_minute(init, "execution", "builder", build)
         collect_artifacts()
@@ -285,16 +291,18 @@ def advance_stage(state: dict, init: dict, runner, artifacts_root: Path) -> None
             for _ in range(MAX_REVIEW_ROUNDS):
                 files = "\n".join(init["artifacts"]) or "(no files)"
                 review = runner("qa", role_prompt("qa",
-                    f"Review '{init['title']}' as a product the owner will show "
-                    f"people — be harsh. READ every file under {outdir}.\n"
+                    f"Review the CORE SLICE of '{init['title']}'. READ every file "
+                    f"under {outdir}.\n"
                     f"Files:\n{files}\n\n"
-                    "Check: does it work end to end? Is the core feature really "
-                    "implemented or faked/stubbed? Is the UI polished or a bare "
-                    "skeleton? Any TODOs, placeholders, dead buttons? Would the "
-                    "owner be embarrassed to show this?\n"
-                    "End with exactly one line: 'VERDICT: SHIP' if it is genuinely "
-                    "good enough to show, or 'VERDICT: REVISE' then a numbered list "
-                    "of the specific changes required."))
+                    "Judge ONLY the scoped core slice — do NOT demand features that "
+                    "were intentionally cut (widgets, payments, landing pages, "
+                    "tests, extra screens). For the slice that IS here: does it work "
+                    "end to end? Is it real, not faked/stubbed? Is the UI clean, not "
+                    "a bare skeleton? Any TODOs, placeholders, or dead buttons IN "
+                    "THE CORE?\n"
+                    "End with exactly one line: 'VERDICT: SHIP' if the core slice is "
+                    "genuinely solid, or 'VERDICT: REVISE' then a SHORT numbered list "
+                    "(max 4) of fixes to the core only."))
                 log_minute(init, "review", "qa", review)
                 rounds += 1
                 if review_passed(review):

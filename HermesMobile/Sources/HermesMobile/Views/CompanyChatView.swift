@@ -39,12 +39,15 @@ final class CompanyConversation: ObservableObject {
 
         let body = trimmed + attachments.payloadSuffix
         let persona = target.soul.isEmpty ? target.summary : target.soul
+        let rank = target.tier == .ceo
+            ? "You are the CEO — the final authority in this company; every department head and their team reports to you."
+            : "You report to the GM/CEO and defer to their direction. Stay strictly in your own lane — do not speak for other departments or over the GM."
         let payload: String
         if introSent.contains(target.id) {
             payload = body
         } else {
             introSent.insert(target.id)
-            payload = "You are the \(target.name) in a multi-agent company. Your remit: \(persona) Answer in that role.\n\n\(body)"
+            payload = "You are the \(target.name) in a multi-agent company. \(rank) Your remit: \(persona) Answer in that role.\n\n\(body)"
         }
 
         isSending = true
@@ -75,23 +78,65 @@ final class CompanyConversation: ObservableObject {
         }
     }
 
-    /// Pick the department head the message addresses; default to the CEO (who routes).
-    /// Pick the agent the message addresses; default to the CEO (who routes). Works for any custom org.
+    /// Pick the agent explicitly addressed at the start of the message; default to the CEO/GM.
+    /// Important: do not substring-match short IDs like "ar" inside words such as "are" or
+    /// "addressed". That was letting AR answer messages addressed to the GM.
     static func resolveTarget(_ text: String, org: [OrgAgent]) -> OrgAgent? {
         guard !org.isEmpty else { return nil }
-        let lower = text.lowercased()
-        for agent in org where agent.tier != .ceo {
-            if routingKeys(agent).contains(where: { lower.contains($0) }) {
+        let fallback = org.first { $0.tier == .ceo } ?? org.first
+        let normalized = normalizedAddressText(text)
+        let tokens = normalized.split(separator: " ").map(String.init)
+        guard !tokens.isEmpty else { return fallback }
+
+        // Chain of command: if the owner opens with the GM/CEO, that is the addressee even
+        // when another department is mentioned later in the sentence.
+        if let ceo = fallback, isAddressed(ceo, tokens: tokens) {
+            return ceo
+        }
+
+        for agent in org where agent.id != fallback?.id {
+            if isAddressed(agent, tokens: tokens) {
                 return agent
             }
         }
-        return org.first { $0.tier == .ceo } ?? org.first
+        return fallback
     }
 
-    /// Address-keywords derived from an agent's name + role label (so custom agents route too).
+    private static func normalizedAddressText(_ text: String) -> String {
+        text.lowercased()
+            .replacingOccurrences(of: "[^a-z0-9]+", with: " ", options: .regularExpression)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    private static func isAddressed(_ agent: OrgAgent, tokens: [String]) -> Bool {
+        let keys = routingKeys(agent)
+        let opening = tokens.prefix(4).joined(separator: " ")
+        return keys.contains { key in
+            if key.count <= 2 {
+                return tokens.first == key || opening.hasPrefix("hey \(key)") || opening.hasPrefix("ok \(key)")
+            }
+            return opening == key || opening.hasPrefix("\(key) ") || opening.hasPrefix("hey \(key) ") || opening.hasPrefix("ok \(key) ")
+        }
+    }
+
+    /// Address-keywords derived from an agent's id, name, and role label.
+    /// Multi-word names are kept as exact opening phrases; short IDs only match standalone tokens.
     static func routingKeys(_ agent: OrgAgent) -> [String] {
         var keys = Set<String>()
-        keys.insert(agent.id.lowercased())
+        let normalizedID = normalizedAddressText(agent.id.replacingOccurrences(of: "_", with: " "))
+        if !normalizedID.isEmpty { keys.insert(normalizedID) }
+        let idToken = agent.id.lowercased()
+        if idToken.count <= 3 { keys.insert(idToken) }
+
+        let normalizedName = normalizedAddressText(agent.name)
+        if !normalizedName.isEmpty { keys.insert(normalizedName) }
+        if normalizedName.hasSuffix(" agent") {
+            keys.insert(String(normalizedName.dropLast(" agent".count)))
+        }
+        if agent.tier == .ceo {
+            keys.formUnion(["gm", "general manager", "ceo", "boss"])
+        }
+
         let words = (agent.name + " " + agent.title).lowercased()
             .split { !$0.isLetter && !$0.isNumber }
             .map(String.init)

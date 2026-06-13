@@ -760,13 +760,22 @@ private enum MeetingSceneBuilder {
 final class MeetingConversation: ObservableObject {
     @Published private(set) var messages: [ChatMessage] = []
     @Published private(set) var isSending = false
-    let attendees: [OrgAgent]
+    @Published private(set) var attendees: [OrgAgent]
     private var introSent = Set<String>()
 
     init(attendees: [OrgAgent]) {
         self.attendees = attendees
         let names = attendees.map(\.name).joined(separator: ", ")
         messages = [ChatMessage(author: .system, text: "In the room: \(names). Address one by name, or just speak and the most senior here will answer.", date: Date())]
+    }
+
+    /// Remove an agent from the meeting — they stop answering and a note is filed.
+    func kick(_ agent: OrgAgent) {
+        guard attendees.contains(where: { $0.id == agent.id }) else { return }
+        attendees.removeAll { $0.id == agent.id }
+        introSent.remove(agent.id)
+        messages.append(ChatMessage(author: .system,
+            text: "\(agent.name) was removed from the meeting.", date: Date()))
     }
 
     func send(_ text: String, attachments: [ChatAttachment] = [], relay base: HermesRelayConfiguration) {
@@ -845,7 +854,6 @@ final class MeetingConversation: ObservableObject {
 // MARK: - Conference Room screen
 
 struct MeetingRoomView: View {
-    let attendees: [OrgAgent]
     @EnvironmentObject private var runtime: HermesRuntimeController
     @StateObject private var convo: MeetingConversation
     @State private var draft = ""
@@ -855,8 +863,10 @@ struct MeetingRoomView: View {
 
     private let ticker = Timer.publish(every: 1, on: .main, in: .common).autoconnect()
 
+    /// Live roster — the conversation owns it so kicking updates the room too.
+    private var attendees: [OrgAgent] { convo.attendees }
+
     init(attendees: [OrgAgent]) {
-        self.attendees = attendees
         _convo = StateObject(wrappedValue: MeetingConversation(attendees: attendees))
     }
 
@@ -873,7 +883,18 @@ struct MeetingRoomView: View {
                     HStack {
                         pill { Circle().fill(.green).frame(width: 7, height: 7); Text("Meeting in Progress") }
                         Spacer()
-                        pill { Image(systemName: "person.2.fill").font(.caption2); Text("\(attendees.count) Participants") }
+                        Menu {
+                            Text("Tap an agent to remove them")
+                            ForEach(attendees) { agent in
+                                Button(role: .destructive) {
+                                    convo.kick(agent)
+                                } label: {
+                                    Label("Remove \(agent.name)", systemImage: "person.fill.xmark")
+                                }
+                            }
+                        } label: {
+                            pill { Image(systemName: "person.2.fill").font(.caption2); Text("\(attendees.count) Participants") }
+                        }
                     }
                     Spacer()
                     if !focused {
