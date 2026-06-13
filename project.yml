@@ -3,11 +3,13 @@ options:
   bundleIdPrefix: com.jamiehouston
   deploymentTarget:
     iOS: "18.0"
+# Team ID comes from Signing.xcconfig → Signing.local.xcconfig (gitignored),
+# so it's never committed. Forkers set their team in Xcode → Signing.
+configFiles:
+  Debug: Signing.xcconfig
+  Release: Signing.xcconfig
 settings:
   base:
-    # Set your own team in Xcode → Signing & Capabilities (kept out of the
-    # public repo). For local builds you can also export DEVELOPMENT_TEAM.
-    DEVELOPMENT_TEAM: ""
     CODE_SIGN_STYLE: Automatic
     SWIFT_VERSION: "6.0"
     MARKETING_VERSION: "0.1.0"
