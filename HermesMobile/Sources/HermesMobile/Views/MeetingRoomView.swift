@@ -23,9 +23,18 @@ struct MeetingRoomSceneView: UIViewRepresentable {
 
     func updateUIView(_ uiView: SCNView, context: Context) {
         let ids = attendees.map(\.id)
-        guard ids != context.coordinator.ids else { return }
-        uiView.scene = MeetingSceneBuilder.scene(attendees: attendees)
-        context.coordinator.attach(to: uiView, ids: ids)
+        let old = context.coordinator.ids
+        guard ids != old else { return }
+        // Pure removal (a kick): walk the removed agents out the door instead
+        // of rebuilding — keeps everyone else seated.
+        let removed = old.filter { !ids.contains($0) }
+        if !removed.isEmpty, ids.allSatisfy(old.contains) {
+            context.coordinator.ids = ids
+            context.coordinator.walkOut(removed)
+        } else {
+            uiView.scene = MeetingSceneBuilder.scene(attendees: attendees)
+            context.coordinator.attach(to: uiView, ids: ids)
+        }
     }
 
     /// Tracks attendees and lights up the speaking agent's seat console
@@ -67,6 +76,32 @@ struct MeetingRoomSceneView: UIViewRepresentable {
             }
         }
 
+        /// Stand up, turn to the door, walk out, and leave the meeting.
+        func walkOut(_ removedIDs: [String]) {
+            guard let root = view?.scene?.rootNode else { return }
+            let door = MeetingSceneBuilder.doorPosition
+            for id in removedIDs {
+                guard let robot = root.childNode(withName: "robot-\(id)", recursively: false) else { continue }
+                let target = SCNVector3(door.x, robot.position.y, door.z + 0.2)
+                let faceDoor = atan2(target.x - robot.position.x, target.z - robot.position.z)
+                let stand = SCNAction.moveBy(x: 0, y: 0.06, z: 0, duration: 0.3)
+                let turn = SCNAction.rotateTo(x: 0, y: CGFloat(faceDoor), z: 0,
+                                              duration: 0.4, usesShortestUnitArc: true)
+                let walk = SCNAction.move(to: target, duration: 2.2)
+                walk.timingMode = .easeInEaseOut
+                let leave = SCNAction.group([.fadeOut(duration: 0.5),
+                                             .scale(to: 0.35, duration: 0.5)])
+                robot.runAction(.sequence([stand, turn, walk, leave, .removeFromParentNode()]))
+                // Dim their seat console + stop any speaking pulse.
+                root.childNode(withName: "console-\(id)", recursively: false)?
+                    .geometry?.firstMaterial?.emission.intensity = 0.1
+                if let dot = root.childNode(withName: "dot-\(id)", recursively: false) {
+                    dot.removeAllActions()
+                    dot.runAction(.fadeOut(duration: 0.5))
+                }
+            }
+        }
+
         deinit { NotificationCenter.default.removeObserver(self) }
     }
 }
@@ -93,10 +128,31 @@ private enum MeetingSceneBuilder {
         addCeiling(to: scene)
         addBackWall(to: scene)
         addSideWindows(to: scene)
+        addDoor(to: scene)
         addTable(to: scene)
         addSeating(attendees, to: scene)
         addPlants(to: scene)
         return scene
+    }
+
+    /// Where kicked agents walk out.
+    static let doorPosition = SCNVector3(3.4, 0, -2.4)
+
+    /// A lit doorway on the back-right wall — the exit kicked agents head for.
+    private static func addDoor(to scene: SCNScene) {
+        let frame = SCNNode(geometry: SCNBox(width: 0.95, height: 2.05, length: 0.08, chamferRadius: 0.02))
+        frame.position = SCNVector3(doorPosition.x, 1.02, -2.55)
+        frame.geometry?.firstMaterial = pbr(diffuse: UIColor(white: 0.08, alpha: 1),
+                                            emission: .black, metalness: 0.6, roughness: 0.4)
+        scene.rootNode.addChildNode(frame)
+        let glowPanel = SCNNode(geometry: SCNPlane(width: 0.78, height: 1.9))
+        glowPanel.position = SCNVector3(doorPosition.x, 1.02, -2.5)
+        let gm = SCNMaterial()
+        gm.diffuse.contents = teal.withAlphaComponent(0.22)
+        gm.emission.contents = teal.withAlphaComponent(0.22)
+        gm.lightingModel = .constant
+        glowPanel.geometry?.firstMaterial = gm
+        scene.rootNode.addChildNode(glowPanel)
     }
 
     // MARK: Camera — elevated, looking down at the table like the render
@@ -399,6 +455,14 @@ private enum MeetingSceneBuilder {
                 dot.geometry?.firstMaterial = glow(accent)
                 dot.name = "dot-\(attendees[i].id)"                      // debate pulse
                 scene.rootNode.addChildNode(dot)
+
+                // The agent, seated in their chair, facing the table.
+                let robot = AgentRobot.node(for: attendees[i], color: accent)
+                robot.scale = SCNVector3(0.5, 0.5, 0.5)
+                robot.position = SCNVector3(2.18 * sin(a), 0.26, 2.18 * cos(a))
+                robot.eulerAngles.y = a + .pi
+                robot.name = "robot-\(attendees[i].id)"
+                scene.rootNode.addChildNode(robot)
             }
         }
     }
