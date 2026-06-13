@@ -43,9 +43,17 @@ cd boardroom
 ./Scripts/setup.sh        # starts the relay + opens the pairing QR
 ```
 
-Then build the app onto your iPhone (open `HermesMobile.xcodeproj`, ⌘R), open
-**Gateway → Scan Pairing Code**, and scan the QR. That's it — say hello to
-your CEO, or go straight to **Home → Boardroom** and switch the company on.
+Then build the app onto your iPhone:
+
+```bash
+xcodegen generate          # builds HermesMobile.xcodeproj from project.yml
+open HermesMobile.xcodeproj
+```
+
+In Xcode, select the app target → **Signing & Capabilities** → choose **your**
+Apple developer team (the repo ships with none), then ⌘R to your phone. Open
+**Gateway → Scan Pairing Code**, scan the QR, and say hello to your CEO — or
+go to **Home → Boardroom** and switch the company on.
 
 ## How it works
 

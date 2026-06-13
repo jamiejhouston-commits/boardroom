@@ -5,7 +5,9 @@ options:
     iOS: "18.0"
 settings:
   base:
-    DEVELOPMENT_TEAM: 5W63NRSP25
+    # Set your own team in Xcode → Signing & Capabilities (kept out of the
+    # public repo). For local builds you can also export DEVELOPMENT_TEAM.
+    DEVELOPMENT_TEAM: ""
     CODE_SIGN_STYLE: Automatic
     SWIFT_VERSION: "6.0"
     MARKETING_VERSION: "0.1.0"
