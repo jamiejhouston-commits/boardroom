@@ -110,6 +110,10 @@ struct HermesRelayClient {
         try await companyGET(path: "company/initiative/\(id)")
     }
 
+    func companyMeetingDetail(id: String) async throws -> CompanyMeeting {
+        try await companyGET(path: "company/meeting/\(id)")
+    }
+
     func companyStart(thesis: String) async throws -> CompanyState {
         try await companyPOST(path: "company/start", body: ["thesis": thesis])
     }

@@ -1,4 +1,19 @@
 import SwiftUI
+import UIKit
+
+extension View {
+    /// Keep the screen on while this view is visible — calls and meetings
+    /// must not get cut off by auto-lock.
+    func keepScreenAwake() -> some View { modifier(KeepAwakeModifier()) }
+}
+
+private struct KeepAwakeModifier: ViewModifier {
+    func body(content: Content) -> some View {
+        content
+            .onAppear { UIApplication.shared.isIdleTimerDisabled = true }
+            .onDisappear { UIApplication.shared.isIdleTimerDisabled = false }
+    }
+}
 
 struct ScreenHeader: View {
     var title: String

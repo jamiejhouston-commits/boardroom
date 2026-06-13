@@ -9,9 +9,30 @@ struct CompanyState: Codable, Equatable {
     var lastTick: Double
     var config: CompanyConfig
     var initiatives: [CompanyInitiative]
+    var meetings: [CompanyMeeting]?
 
     static let empty = CompanyState(enabled: false, thesis: "", lastTick: 0,
-                                    config: CompanyConfig(), initiatives: [])
+                                    config: CompanyConfig(), initiatives: [], meetings: nil)
+}
+
+struct CompanyMeeting: Codable, Equatable, Identifiable {
+    var id: String
+    var topic: String
+    var status: String                 // "live" or "done"
+    var attendees: [String]
+    var started: String
+    var turnCount: Int?                 // present in the list summary
+    var turns: [CompanyMeetingTurn]?    // present only in the detail endpoint
+
+    var isLive: Bool { status == "live" }
+}
+
+struct CompanyMeetingTurn: Codable, Equatable, Identifiable {
+    var role: String
+    var text: String
+    var ts: String
+
+    var id: String { "\(role)-\(ts)-\(text.prefix(12))" }
 }
 
 struct CompanyConfig: Codable, Equatable {

@@ -948,6 +948,7 @@ struct MeetingRoomView: View {
                 draft = ""
             }
         }
+        .keepScreenAwake()
         .navigationTitle("Conference Room")
         .navigationBarTitleDisplayMode(.inline)
         .toolbar {

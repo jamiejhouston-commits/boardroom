@@ -17,6 +17,13 @@ final class CompanyStore: ObservableObject {
         state.initiatives.filter(\.isAwaitingDecision)
     }
 
+    var meetings: [CompanyMeeting] { state.meetings ?? [] }
+    var liveMeeting: CompanyMeeting? { meetings.first(where: \.isLive) }
+
+    func meetingDetail(id: String, relay: HermesRelayConfiguration) async -> CompanyMeeting? {
+        try? await HermesRelayClient(configuration: relay).companyMeetingDetail(id: id)
+    }
+
     func refresh(relay: HermesRelayConfiguration) async {
         // !isLoading: the 60s ticker must not stack a second fetch on a slow
         // relay (causes isLoading flicker + duplicate gate notifications).
@@ -66,8 +73,26 @@ final class CompanyStore: ObservableObject {
     }
 
     private func apply(_ fresh: CompanyState) {
+        let hadLive = liveMeeting?.id
         state = fresh
         Self.notifyNewGates(in: fresh)
+        // Ping when a brand-new meeting goes live so the owner can drop in.
+        if let live = fresh.meetings?.first(where: \.isLive), live.id != hadLive {
+            Self.notifyLiveMeeting(live)
+        }
+    }
+
+    nonisolated static func notifyLiveMeeting(_ meeting: CompanyMeeting) {
+        let center = UNUserNotificationCenter.current()
+        center.requestAuthorization(options: [.alert, .sound]) { granted, _ in
+            guard granted else { return }
+            let content = UNMutableNotificationContent()
+            content.title = "🟢 Your team is meeting now"
+            content.body = meeting.topic + " — tap to listen in."
+            content.sound = .default
+            center.add(UNNotificationRequest(identifier: "meeting-\(meeting.id)",
+                                             content: content, trigger: nil))
+        }
     }
 
     // MARK: New-gate notifications (shared with background refresh)

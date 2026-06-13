@@ -2,12 +2,15 @@ import SwiftUI
 
 struct MeetingsView: View {
     @EnvironmentObject private var org: OrgStore
+    @EnvironmentObject private var company: CompanyStore
+    @EnvironmentObject private var runtime: HermesRuntimeController
     @State private var showPicker = false
     @State private var showSchedule = false
     @State private var active: [OrgAgent] = []
     @State private var elapsed = 32 * 60 + 47
 
     private let ticker = Timer.publish(every: 1, on: .main, in: .common).autoconnect()
+    private let companyTicker = Timer.publish(every: 15, on: .main, in: .common).autoconnect()
 
     private var roomAttendees: [OrgAgent] {
         if !active.isEmpty {
@@ -52,6 +55,10 @@ struct MeetingsView: View {
                         .padding(.horizontal, 64)
                         .padding(.top, 24)
 
+                    autonomousMeetingBanner
+                        .padding(.horizontal, 24)
+                        .padding(.top, 16)
+
                     Spacer()
 
                     NavigationLink {
@@ -72,6 +79,54 @@ struct MeetingsView: View {
             }
             .sheet(isPresented: $showSchedule) { ScheduleMeetingView() }
             .onReceive(ticker) { _ in elapsed += 1 }
+            .onReceive(companyTicker) { _ in
+                Task { await company.refresh(relay: runtime.relayConfiguration) }
+            }
+            .task { await company.refresh(relay: runtime.relayConfiguration) }
+        }
+    }
+
+    // The org's own meetings — live now (tap to listen in) or recent.
+    @ViewBuilder
+    private var autonomousMeetingBanner: some View {
+        if let live = company.liveMeeting {
+            NavigationLink {
+                MeetingTranscriptView(meetingID: live.id, topic: live.topic)
+            } label: {
+                HStack(spacing: 12) {
+                    Circle().fill(.green).frame(width: 9, height: 9).shadow(color: .green, radius: 6)
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text("Your team is meeting now")
+                            .font(.subheadline.weight(.bold)).foregroundStyle(.white)
+                        Text(live.topic).font(.caption).foregroundStyle(.white.opacity(0.7)).lineLimit(1)
+                    }
+                    Spacer()
+                    Text("Listen in").font(.caption.weight(.bold)).foregroundStyle(.green)
+                    Image(systemName: "chevron.right").font(.caption).foregroundStyle(.white.opacity(0.6))
+                }
+                .padding(14)
+                .background(.black.opacity(0.55), in: RoundedRectangle(cornerRadius: 14))
+                .overlay(RoundedRectangle(cornerRadius: 14).stroke(.green.opacity(0.4), lineWidth: 1))
+            }
+            .buttonStyle(.plain)
+        } else if let recent = company.meetings.first {
+            NavigationLink {
+                MeetingTranscriptView(meetingID: recent.id, topic: recent.topic)
+            } label: {
+                HStack(spacing: 12) {
+                    Image(systemName: "person.2.wave.2.fill").foregroundStyle(.cyan)
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text("Last team meeting").font(.caption).foregroundStyle(.white.opacity(0.6))
+                        Text(recent.topic).font(.subheadline.weight(.semibold)).foregroundStyle(.white).lineLimit(1)
+                    }
+                    Spacer()
+                    Image(systemName: "chevron.right").font(.caption).foregroundStyle(.white.opacity(0.6))
+                }
+                .padding(14)
+                .background(.black.opacity(0.5), in: RoundedRectangle(cornerRadius: 14))
+                .overlay(RoundedRectangle(cornerRadius: 14).stroke(.white.opacity(0.1), lineWidth: 1))
+            }
+            .buttonStyle(.plain)
         }
     }
 
@@ -229,5 +284,78 @@ struct MeetingsView: View {
         )
         .shadow(color: .black.opacity(0.45), radius: 18, y: 10)
         .shadow(color: .cyan.opacity(0.12), radius: 10)
+    }
+}
+
+// MARK: - Autonomous meeting transcript (listen in)
+
+struct MeetingTranscriptView: View {
+    @EnvironmentObject private var company: CompanyStore
+    @EnvironmentObject private var org: OrgStore
+    @EnvironmentObject private var runtime: HermesRuntimeController
+    let meetingID: String
+    let topic: String
+
+    @State private var meeting: CompanyMeeting?
+    @State private var speaking = false
+    private let voice = AgentVoice()
+    private let refresh = Timer.publish(every: 6, on: .main, in: .common).autoconnect()
+
+    var body: some View {
+        List {
+            Section {
+                ForEach(meeting?.turns ?? []) { turn in
+                    VStack(alignment: .leading, spacing: 4) {
+                        Text(turn.role.uppercased())
+                            .font(.caption.weight(.bold))
+                            .foregroundStyle(HermesTheme.emerald)
+                        Text(turn.text).font(.subheadline).fixedSize(horizontal: false, vertical: true)
+                    }
+                    .padding(.vertical, 2)
+                }
+                if (meeting?.turns ?? []).isEmpty {
+                    HStack(spacing: 8) {
+                        ProgressView().controlSize(.small)
+                        Text("The meeting is starting…").font(.caption).foregroundStyle(.secondary)
+                    }
+                }
+            } header: {
+                HStack {
+                    Text(meeting?.isLive == true ? "🟢 In session" : "Minutes")
+                    Spacer()
+                    if !(meeting?.turns ?? []).isEmpty {
+                        Button(speaking ? "Stop" : "Read aloud") { toggleSpeak() }
+                            .font(.caption.weight(.semibold))
+                    }
+                }
+            }
+        }
+        .navigationTitle(topic)
+        .navigationBarTitleDisplayMode(.inline)
+        .keepScreenAwake()
+        .task { await load() }
+        .onReceive(refresh) { _ in
+            if meeting?.isLive != false { Task { await load() } }   // keep live ones updating
+        }
+        .onDisappear { voice.stop() }
+    }
+
+    private func load() async {
+        meeting = await company.meetingDetail(id: meetingID, relay: runtime.relayConfiguration)
+    }
+
+    private func toggleSpeak() {
+        if speaking { voice.stop(); speaking = false; return }
+        guard let turns = meeting?.turns, !turns.isEmpty else { return }
+        speaking = true
+        Task {
+            for turn in turns {
+                if !speaking { break }
+                let model = org.agents.first { $0.companyRole == turn.role }?.voiceModel ?? "en_US-ryan-medium"
+                await voice.speak(turn.text, seedFrom: turn.role, voice: model,
+                                  relay: runtime.relayConfiguration)
+            }
+            speaking = false
+        }
     }
 }

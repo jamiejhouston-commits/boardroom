@@ -449,19 +449,82 @@ def ship_in_background(initiative_id: str) -> None:
     threading.Thread(target=run, daemon=True).start()
 
 
+def run_autonomous_meeting() -> None:
+    """The org holds an internal standup on its own. Each turn is saved as it
+    lands so the owner can open the Meeting Room and watch it happen live."""
+    store = company_module.CompanyStore(COMPANY_STATE_PATH)
+    with COMPANY_LOCK:
+        state = store.load()
+        if not company_module.should_convene_meeting(state, time.time()):
+            return
+        topic, roles = company_module.meeting_plan(state)
+        meeting = company_module.new_meeting(topic, roles)
+        state.setdefault("meetings", []).insert(0, meeting)
+        state["meetings"] = state["meetings"][:20]   # keep the last 20
+        state["last_meeting"] = time.time()
+        store.save(state)
+    meeting_id = meeting["id"]
+    print(f"company - meeting started: {topic}", flush=True)
+
+    def append_turn(role: str, text: str) -> None:
+        with COMPANY_LOCK:
+            s = store.load()
+            for m in s.get("meetings", []):
+                if m["id"] == meeting_id:
+                    m["turns"].append({"role": role, "text": text.strip(),
+                                       "ts": time.strftime("%H:%M")})
+                    break
+            store.save(s)
+
+    transcript = ""
+    try:
+        for role in roles:
+            prompt = company_module.meeting_turn_prompt(meeting, role, transcript, state)
+            text = company_cli_runner(role, prompt).strip() or "(no comment)"
+            append_turn(role, text)
+            transcript += f"\n{role.upper()}: {text}"
+    except Exception as error:  # noqa: BLE001 — a bad turn shouldn't wedge the meeting
+        print(f"company - meeting turn failed: {error}", flush=True)
+    # Mark done.
+    with COMPANY_LOCK:
+        s = store.load()
+        for m in s.get("meetings", []):
+            if m["id"] == meeting_id:
+                m["status"] = "done"
+                break
+        store.save(s)
+    print(f"company - meeting concluded: {topic}", flush=True)
+
+
 def company_summary(state: dict) -> dict:
-    """State for the app: everything except the bulky per-stage minutes."""
+    """State for the app: everything except the bulky transcripts/minutes."""
     slim = []
     for init in state["initiatives"]:
         item = {k: v for k, v in init.items() if k != "minutes"}
         slim.append(item)
+    # Meetings without full turn text — just enough for the list + live badge.
+    meetings = []
+    for m in state.get("meetings", []):
+        meetings.append({
+            "id": m["id"], "topic": m["topic"], "status": m["status"],
+            "attendees": m["attendees"], "started": m["started"],
+            "turn_count": len(m.get("turns", [])),
+        })
     return {
         "enabled": state["enabled"],
         "thesis": state["thesis"],
         "config": state["config"],
         "last_tick": state["last_tick"],
         "initiatives": slim,
+        "meetings": meetings,
     }
+
+
+def find_meeting(state: dict, meeting_id: str) -> dict | None:
+    for m in state.get("meetings", []):
+        if m["id"] == meeting_id:
+            return m
+    return None
 
 
 def company_heartbeat_loop() -> None:
@@ -480,6 +543,8 @@ def company_heartbeat_loop() -> None:
                     store.save(company_module.merge_tick_results(current, state, before))
             for event in events:
                 print(f"company - {event}", flush=True)
+            # The org also meets among itself on a cadence — visible/live in the app.
+            run_autonomous_meeting()
         except Exception as error:  # noqa: BLE001 — the pulse must survive anything
             print(f"company - heartbeat error: {error}", flush=True)
         time.sleep(60)
@@ -551,6 +616,19 @@ class RelayHandler(BaseHTTPRequestHandler):
                     self.send_json(company_module.find_initiative(store.load(), initiative_id))
                 except KeyError:
                     self.send_json({"error": "not_found"}, status=404)
+            return
+        if self.path.startswith("/company/meeting/"):
+            if not self.is_authorized():
+                self.send_json({"error": "unauthorized"}, status=401)
+                return
+            meeting_id = self.path.rsplit("/", 1)[-1]
+            store = company_module.CompanyStore(COMPANY_STATE_PATH)
+            with COMPANY_LOCK:
+                meeting = find_meeting(store.load(), meeting_id)
+            if meeting is None:
+                self.send_json({"error": "not_found"}, status=404)
+            else:
+                self.send_json(meeting)
             return
         self.send_json({"error": "not_found"}, status=404)
 

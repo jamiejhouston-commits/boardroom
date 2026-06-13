@@ -25,6 +25,7 @@ struct DebateView: View {
                     live
                 }
             }
+            .keepScreenAwake()
             .navigationTitle("Boardroom Debate")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {

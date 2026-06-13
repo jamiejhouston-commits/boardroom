@@ -97,6 +97,7 @@ struct AgentCallView: View {
             }
         }
         .statusBarHidden()
+        .keepScreenAwake()
         .onAppear {
             call.connect(agent: agent, relay: runtime.relayConfiguration)
             RobotCommand.send(.wave, to: agent.id)   // it greets you

@@ -29,6 +29,7 @@ DEFAULT_CONFIG = {
     "max_active": 1,
     "budget_calls": 40,
     "scout_sources": "Hacker News, Product Hunt, GitHub trending, App Store charts, Reddit",
+    "meeting_gap_minutes": 90,   # how often the org holds an internal standup
 }
 
 GATE_STAGES = ("gate1", "gate2")
@@ -42,7 +43,56 @@ def new_state() -> dict:
         "config": dict(DEFAULT_CONFIG),
         "initiatives": [],
         "last_tick": 0.0,
+        "meetings": [],        # autonomous internal meetings the owner can listen in on
+        "last_meeting": 0.0,
     }
+
+
+def new_meeting(topic: str, attendees: list[str]) -> dict:
+    return {
+        "id": secrets.token_hex(4),
+        "topic": topic,
+        "attendees": attendees,            # role keys (ceo, cfo, …)
+        "status": "live",                  # live → done
+        "turns": [],                       # [{"role":..., "text":..., "ts":...}]
+        "started": datetime.now().isoformat(timespec="seconds"),
+    }
+
+
+def should_convene_meeting(state: dict, now: float) -> bool:
+    """Time for the org to hold an internal standup? Gated by enable, quiet
+    hours, the meeting cadence, and not stacking on a live meeting."""
+    if not state.get("enabled"):
+        return False
+    config = state["config"]
+    hour = datetime.fromtimestamp(now).hour
+    if is_quiet(hour, config["quiet_start"], config["quiet_end"]):
+        return False
+    if any(m.get("status") == "live" for m in state.get("meetings", [])):
+        return False
+    gap = config.get("meeting_gap_minutes", 90) * 60
+    return now - state.get("last_meeting", 0.0) >= gap
+
+
+def meeting_plan(state: dict) -> tuple[str, list[str]]:
+    """Topic + attendee roles for the next autonomous meeting, from current state."""
+    active = [i for i in state["initiatives"] if i["stage"] not in TERMINAL_STAGES]
+    if active:
+        return f"Status check: {active[0]['title']}", ["ceo", "cfo", "cto", "marketing"]
+    return "Company standup — what should we pursue next?", ["ceo", "research", "marketing"]
+
+
+def meeting_turn_prompt(meeting: dict, role: str, transcript: str, state: dict) -> str:
+    active = [i["title"] for i in state["initiatives"] if i["stage"] not in TERMINAL_STAGES]
+    context = f"Active initiatives: {', '.join(active) if active else 'none right now'}."
+    body = (
+        f"You are in a LIVE internal company meeting. Topic: \"{meeting['topic']}\". {context}\n"
+        f"Discussion so far:\n{transcript or '(you are opening the meeting)'}\n\n"
+        f"Give your contribution as the {role.upper()} in 2–3 sentences — raise a real "
+        f"point, concern, risk, or proposal from your seat. Build on what others said. "
+        f"Natural spoken style, no markdown, no lists."
+    )
+    return role_prompt(role, body)
 
 
 def new_initiative(title: str, pitch: str, score: dict | None = None) -> dict:
