@@ -50,14 +50,26 @@ WARM_CLIENT = acp_module.AcpClient()
 
 
 def prewarm_hermes() -> None:
-    """Pay the ~40s agent warm-up at relay start instead of on the user's
-    first message."""
+    """Pay the agent warm-up at relay start, not on the owner's first message.
+    Pre-warms the leadership sessions the app talks to (default:company-<role>)
+    so even the FIRST chat with the CEO/CFO/etc. answers in ~3s, not ~18s."""
+    # Process warm-up first.
     try:
         for _ in WARM_CLIENT.prompt("relay-prewarm", "Reply with exactly: OK"):
             pass
         print("Warm Hermes: READY (turns now ~3s)", flush=True)
     except Exception as error:  # noqa: BLE001 — cold path still works
         print(f"Warm Hermes unavailable, using cold CLI: {error}", flush=True)
+        return
+    # Then warm each leadership conversation key the app uses (chatRouting →
+    # profile "main" → normalized "default", session "company-<role>").
+    for role in ("ceo", "cfo", "cto", "marketing", "research"):
+        try:
+            for _ in WARM_CLIENT.prompt(f"default:company-{role}", "Acknowledge with: ready"):
+                pass
+        except Exception:  # noqa: BLE001 — best-effort; first real chat warms it otherwise
+            break
+    print("Warm Hermes: leadership sessions pre-warmed (first chat ~3s)", flush=True)
 
 COMPANY_STATE_PATH = Path.home() / ".hermes" / "mobile-company.json"
 # Deliverables go somewhere the owner can SEE — Finder, not a dotfolder.
