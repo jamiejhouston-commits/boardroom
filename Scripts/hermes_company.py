@@ -182,6 +182,25 @@ def make_charged_runner(initiative: dict, budget: int, runner):
     return charged
 
 
+# Real tools the builder can shell out to (installed on the Mac). The builder
+# is Hermes with full file/code/shell access — same as a coding agent.
+BUILDER_TOOLKIT = (
+    "You are a senior full-stack engineer with FULL developer tools on this "
+    "machine — shell, git, gh (GitHub), node/npm, xcodebuild — and you USE them "
+    "for real, not just describe work. Capabilities:\n"
+    "• Backend: scaffold and deploy with the Firebase CLI (`firebase`) — Auth, "
+    "Firestore, Cloud Functions, Hosting — and wire it into the app.\n"
+    "• Payments: integrate RevenueCat — add the SDK to the iOS app, build the "
+    "paywall/entitlement logic, and configure products via the RevenueCat API "
+    "when a key is available.\n"
+    "• Release: prepare the app for TestFlight/App Store (fastlane, App Store "
+    "Connect) when signing/credentials are configured.\n"
+    "Write the code AND run the commands. If a step needs the owner to log in "
+    "(`firebase login`), add an API key (RevenueCat, App Store Connect), or make "
+    "a decision, STATE IT PLAINLY in your summary — never fake a result you "
+    "couldn't actually produce."
+)
+
 ROLE_SOULS = {
     "research": "You are the Head of Research of an autonomous AI product company. You scout markets with evidence, never hype.",
     "cfo": "You are the CFO. You weigh cost, monetization, and opportunity cost. You are the board's skeptic.",
@@ -348,16 +367,20 @@ def advance_stage(state: dict, init: dict, runner, artifacts_root: Path) -> None
         if existing:
             # Iteration: extend the project already on disk, don't rebuild it.
             build = runner("builder", role_prompt("builder",
+                f"{BUILDER_TOOLKIT}\n\n"
                 f"EXTEND the existing project at {outdir} — do NOT rebuild it. "
                 f"Read what's already there, then make ONLY the additions in the "
-                f"work order, wired in properly and working (no stubs/TODOs).\n"
+                f"work order, wired in properly and working (no stubs/TODOs). "
+                f"Backend, payments, and release work all belong here when asked.\n"
                 f"Existing files:\n{chr(10).join(existing[:40])}\n\n"
                 f"Work order:\n{last_text(init, 'planning')}\n"
-                "List each file you added or changed with a one-line summary."))
+                "List each file you added or changed with a one-line summary, and "
+                "flag anything that needs an owner login or key."))
         else:
             # First build — a SMALL, complete, polished core beats a half-done
             # 12-feature app that times out.
             build = runner("builder", role_prompt("builder",
+                f"{BUILDER_TOOLKIT}\n\n"
                 f"Build the CORE SLICE of '{init['title']}' — small but genuinely "
                 f"COMPLETE and polished: the one main flow fully wired and working, "
                 f"no stubs, no placeholder/TODO logic, looks finished. Do NOT attempt "

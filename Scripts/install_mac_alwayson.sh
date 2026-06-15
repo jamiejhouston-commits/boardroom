@@ -18,7 +18,8 @@ LOG="$HOME/Library/Logs/boardroom-relay.log"
 # launchd runs with a stripped PATH, so the relay can't find `hermes`, `nice`,
 # `git`, or `gh`. Carry a real PATH that includes wherever hermes actually is.
 HERMES_DIR="$(dirname "$(command -v hermes 2>/dev/null || echo /usr/local/bin/hermes)")"
-SERVICE_PATH="$HERMES_DIR:$HOME/.local/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
+# Include npm global bin so the builder agent can run firebase, vercel, etc.
+SERVICE_PATH="$HERMES_DIR:$HOME/.local/bin:$HOME/.npm-global/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
 
 bold() { printf '\033[1m%s\033[0m\n' "$*"; }
 
