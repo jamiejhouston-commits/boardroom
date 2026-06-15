@@ -842,7 +842,7 @@ final class MeetingConversation: ObservableObject {
             text: "\(agent.name) was removed from the meeting.", date: Date()))
     }
 
-    func send(_ text: String, attachments: [ChatAttachment] = [], relay base: HermesRelayConfiguration) {
+    func send(_ text: String, attachments: [ChatAttachment] = [], relay base: HermesRelayConfiguration, context: String = "") {
         var trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
         if trimmed.isEmpty && !attachments.isEmpty { trimmed = "Please review the attached." }
         guard !trimmed.isEmpty, !isSending, !attendees.isEmpty else { return }
@@ -861,12 +861,13 @@ final class MeetingConversation: ObservableObject {
 
         let body = trimmed + attachments.payloadSuffix
         let persona = target.soul.isEmpty ? target.summary : target.soul
+        let ctx = context.isEmpty ? "" : context + "\n\n"
         let payload: String
         if introSent.contains(target.id) {
-            payload = body
+            payload = ctx + body
         } else {
             introSent.insert(target.id)
-            payload = "You are the \(target.name) in a company meeting. Your remit: \(persona) Answer in that role.\n\n\(body)"
+            payload = ctx + "You are the \(target.name) in a company meeting. Your remit: \(persona) Answer in that role.\n\n\(body)"
         }
 
         isSending = true
@@ -919,6 +920,9 @@ final class MeetingConversation: ObservableObject {
 
 struct MeetingRoomView: View {
     @EnvironmentObject private var runtime: HermesRuntimeController
+    @EnvironmentObject private var org: OrgStore
+    @EnvironmentObject private var hub: MeetingHub
+    @EnvironmentObject private var company: CompanyStore
     @StateObject private var convo: MeetingConversation
     @State private var draft = ""
     @State private var elapsed = 0
@@ -1008,7 +1012,8 @@ struct MeetingRoomView: View {
             }
 
             ChatComposer(draft: $draft, focused: $focused, disabled: convo.isSending, placeholder: "Speak to the room") { attachments in
-                convo.send(draft, attachments: attachments, relay: runtime.relayConfiguration)
+                convo.send(draft, attachments: attachments, relay: runtime.relayConfiguration,
+                           context: CompanyContext.brief(org: org, hub: hub, company: company))
                 draft = ""
             }
         }

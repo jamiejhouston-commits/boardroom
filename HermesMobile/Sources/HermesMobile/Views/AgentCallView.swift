@@ -6,6 +6,9 @@ import SwiftUI
 struct AgentCallView: View {
     let agent: OrgAgent
     @EnvironmentObject private var runtime: HermesRuntimeController
+    @EnvironmentObject private var org: OrgStore
+    @EnvironmentObject private var hub: MeetingHub
+    @EnvironmentObject private var company: CompanyStore
     @Environment(\.dismiss) private var dismiss
     @StateObject private var call = CallModel()
     @State private var elapsed = 0
@@ -99,7 +102,8 @@ struct AgentCallView: View {
         .statusBarHidden()
         .keepScreenAwake()
         .onAppear {
-            call.connect(agent: agent, relay: runtime.relayConfiguration)
+            call.connect(agent: agent, relay: runtime.relayConfiguration,
+                         context: CompanyContext.brief(org: org, hub: hub, company: company))
             RobotCommand.send(.wave, to: agent.id)   // it greets you
         }
         .onDisappear { call.hangUp() }
@@ -181,10 +185,12 @@ private final class CallModel: ObservableObject {
     private var relay: HermesRelayConfiguration?
     private var turnTask: Task<Void, Never>?
     private var recordingTask: Task<Void, Never>?
+    private var context = ""
 
-    func connect(agent: OrgAgent, relay: HermesRelayConfiguration) {
+    func connect(agent: OrgAgent, relay: HermesRelayConfiguration, context: String = "") {
         self.agent = agent
         self.relay = relay
+        self.context = context
         if !relay.isConfigured {
             state = .error("Connect your relay first (Settings → Mac Relay).")
         }
@@ -234,7 +240,8 @@ private final class CallModel: ObservableObject {
         let routing = agent.chatRouting   // same brain as chat + the company
         config.profile = routing.profile
         let persona = agent.soul.isEmpty ? agent.summary : agent.soul
-        let payload = "You are \(agent.name) in a multi-agent company, ON A VOICE CALL with the owner. Your remit: \(persona)\n\nThe owner just said: \"\(transcript)\"\n\nReply as \(agent.name) in natural spoken style — 1–3 sentences, under 50 words, no markdown, no lists."
+        let ctx = context.isEmpty ? "" : context + "\n\n"
+        let payload = ctx + "You are \(agent.name) in a multi-agent company, ON A VOICE CALL with the owner. Your remit: \(persona)\n\nThe owner just said: \"\(transcript)\"\n\nReply as \(agent.name) in natural spoken style — 1–3 sentences, under 50 words, no markdown, no lists."
 
         var collected = ""
         do {

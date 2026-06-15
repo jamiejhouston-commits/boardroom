@@ -9,6 +9,7 @@ struct ScheduleMeetingView: View {
     @EnvironmentObject private var runtime: HermesRuntimeController
     @Environment(\.dismiss) private var dismiss
 
+    var prefillTopic: String = ""
     @State private var topic = ""
     @State private var date = Calendar.current.date(byAdding: .hour, value: 1, to: Date()) ?? Date()
     @State private var selected: Set<String> = []
@@ -89,6 +90,7 @@ struct ScheduleMeetingView: View {
             } message: {
                 Text(resultMessage ?? "")
             }
+            .onAppear { if topic.isEmpty { topic = prefillTopic } }
         }
     }
 

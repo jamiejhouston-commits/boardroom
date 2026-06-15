@@ -320,6 +320,35 @@ class TickTests(unittest.TestCase):
         self.assertEqual(bad["stage"], "killed")   # no 20-hour silent retry loop
 
 
+class IterationTests(unittest.TestCase):
+    def test_reopen_reenters_planning_with_instruction(self):
+        state = company.new_state()
+        init = company.new_initiative("Brain Dump", "")
+        init["stage"] = "shipped"
+        state["initiatives"] = [init]
+        company.reopen_for_iteration(state, init["id"], "add a backend with user accounts")
+        self.assertEqual(init["stage"], "planning")
+        self.assertEqual(init["iteration"], 1)
+        self.assertEqual(init["note"], "add a backend with user accounts")
+        self.assertEqual(init["review_rounds"], 0)
+
+    def test_iteration_planning_prompt_is_extension(self):
+        state = company.new_state()
+        init = company.new_initiative("Brain Dump", "")
+        init["stage"] = "planning"; init["iteration"] = 2; init["note"] = "add RevenueCat"
+        state["initiatives"] = [init]
+        seen = {}
+        def runner(role, prompt):
+            seen["prompt"] = prompt
+            return "plan"
+        import tempfile, pathlib
+        with tempfile.TemporaryDirectory() as tmp:
+            company.advance_stage(state, init, runner, pathlib.Path(tmp))
+        self.assertIn("iteration 2", seen["prompt"])
+        self.assertIn("add RevenueCat", seen["prompt"])
+        self.assertEqual(init["stage"], "execution")
+
+
 class MergeTickTests(unittest.TestCase):
     def setUp(self):
         self.before = company.new_state()

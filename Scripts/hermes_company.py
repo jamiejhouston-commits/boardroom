@@ -108,7 +108,21 @@ def new_initiative(title: str, pitch: str, score: dict | None = None) -> dict:
         "minutes": [],    # [{"stage":..., "role":..., "text":..., "ts":...}]
         "artifacts": [],  # file paths produced during execution
         "note": "",
+        "iteration": 0,   # bumped each time the owner asks for more work
     }
+
+
+def reopen_for_iteration(state: dict, initiative_id: str, instruction: str) -> dict:
+    """Owner wants MORE work on a finished project — reopen it so the same
+    team continues on the SAME codebase (add features, backend, etc.).
+    Re-enters planning with the new instruction; re-ships to the same repo."""
+    init = find_initiative(state, initiative_id)
+    init["iteration"] = init.get("iteration", 0) + 1
+    init["note"] = instruction
+    init["review_rounds"] = 0
+    init["brief"] = ""
+    init["stage"] = "planning"   # heartbeat picks it up and continues the project
+    return init
 
 
 class CompanyStore:
@@ -299,16 +313,26 @@ def advance_stage(state: dict, init: dict, runner, artifacts_root: Path) -> None
         init["stage"] = "gate1"
 
     elif stage == "planning":
-        note = f" The owner added: {init['note']}." if init["note"] else ""
-        reply = runner("ceo", role_prompt("ceo",
-            f"The owner GREENLIT '{init['title']}'.{note}\n"
-            f"Research memo:\n{last_text(init, 'research')}\n"
-            "Write a RUTHLESSLY SMALL work order — the single core slice that "
-            "proves the idea and nothing else. Hard limits: ONE main screen/flow, "
-            "3–6 files MAX. NO widgets, StoreKit, landing page, App Store assets, "
-            "tests, or 'nice to haves'. The build team gets ONE pass, so scope it "
-            "so a focused engineer finishes it well in that pass. List the few "
-            "files to create and the one thing each must do."))
+        if init.get("iteration", 0) > 0:
+            # Continuation: the owner wants MORE on an existing shipped project.
+            reply = runner("ceo", role_prompt("ceo",
+                f"'{init['title']}' is already built and shipped. This is "
+                f"iteration {init['iteration']}. The owner now wants:\n"
+                f"\"{init['note']}\"\n\n"
+                "Write a SMALL work order for THIS addition only — extend the "
+                "existing code, don't rebuild. List exactly which files to add or "
+                "change and what each change does. Keep it to one focused pass."))
+        else:
+            note = f" The owner added: {init['note']}." if init["note"] else ""
+            reply = runner("ceo", role_prompt("ceo",
+                f"The owner GREENLIT '{init['title']}'.{note}\n"
+                f"Research memo:\n{last_text(init, 'research')}\n"
+                "Write a RUTHLESSLY SMALL work order — the single core slice that "
+                "proves the idea and nothing else. Hard limits: ONE main screen/flow, "
+                "3–6 files MAX. NO widgets, StoreKit, landing page, App Store assets, "
+                "tests, or 'nice to haves'. The build team gets ONE pass, so scope it "
+                "so a focused engineer finishes it well in that pass. List the few "
+                "files to create and the one thing each must do."))
         log_minute(init, "planning", "ceo", reply)
         init["stage"] = "execution"
 
@@ -320,17 +344,28 @@ def advance_stage(state: dict, init: dict, runner, artifacts_root: Path) -> None
             init["artifacts"] = sorted(
                 str(p) for p in outdir.rglob("*") if p.is_file())
 
-        # 1. Build it — a SMALL, complete, polished core. Finishing one slice
-        #    well beats a half-done 12-feature app that times out.
-        build = runner("builder", role_prompt("builder",
-            f"Build the CORE SLICE of '{init['title']}' — small but genuinely "
-            f"COMPLETE and polished: the one main flow fully wired and working, "
-            f"no stubs, no placeholder/TODO logic, looks finished. Do NOT attempt "
-            f"the whole product — just the core slice in the work order, done well. "
-            f"Keep it to a handful of files so you finish in this pass. "
-            f"Save every file under {outdir} using your file tools.\n"
-            f"Work order:\n{last_text(init, 'planning')}\n"
-            "List each file you created with a one-line summary."))
+        existing = sorted(str(p) for p in outdir.rglob("*") if p.is_file())
+        if existing:
+            # Iteration: extend the project already on disk, don't rebuild it.
+            build = runner("builder", role_prompt("builder",
+                f"EXTEND the existing project at {outdir} — do NOT rebuild it. "
+                f"Read what's already there, then make ONLY the additions in the "
+                f"work order, wired in properly and working (no stubs/TODOs).\n"
+                f"Existing files:\n{chr(10).join(existing[:40])}\n\n"
+                f"Work order:\n{last_text(init, 'planning')}\n"
+                "List each file you added or changed with a one-line summary."))
+        else:
+            # First build — a SMALL, complete, polished core beats a half-done
+            # 12-feature app that times out.
+            build = runner("builder", role_prompt("builder",
+                f"Build the CORE SLICE of '{init['title']}' — small but genuinely "
+                f"COMPLETE and polished: the one main flow fully wired and working, "
+                f"no stubs, no placeholder/TODO logic, looks finished. Do NOT attempt "
+                f"the whole product — just the core slice in the work order, done well. "
+                f"Keep it to a handful of files so you finish in this pass. "
+                f"Save every file under {outdir} using your file tools.\n"
+                f"Work order:\n{last_text(init, 'planning')}\n"
+                "List each file you created with a one-line summary."))
         log_minute(init, "execution", "builder", build)
         collect_artifacts()
 

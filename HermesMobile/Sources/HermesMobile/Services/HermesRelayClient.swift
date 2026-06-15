@@ -127,6 +127,12 @@ struct HermesRelayClient {
                               body: ["id": id, "decision": decision.rawValue, "note": note])
     }
 
+    /// Reopen a finished initiative for more work — same team, same codebase.
+    func companyIterate(id: String, instruction: String) async throws -> CompanyState {
+        try await companyPOST(path: "company/iterate",
+                              body: ["id": id, "instruction": instruction])
+    }
+
     private func companyGET<T: Decodable>(path: String) async throws -> T {
         guard let baseURL = configuration.baseURL else {
             throw HermesRelayError.invalidURL

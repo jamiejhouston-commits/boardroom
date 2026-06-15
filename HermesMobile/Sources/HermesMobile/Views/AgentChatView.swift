@@ -353,7 +353,7 @@ final class AgentConversation: ObservableObject {
                                 date: Date())]
     }
 
-    func send(_ text: String, attachments: [ChatAttachment] = [], relay base: HermesRelayConfiguration) {
+    func send(_ text: String, attachments: [ChatAttachment] = [], relay base: HermesRelayConfiguration, context: String = "") {
         var trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
         if trimmed.isEmpty && !attachments.isEmpty { trimmed = "Please review the attached." }
         guard !trimmed.isEmpty, !isSending else { return }
@@ -377,12 +377,15 @@ final class AgentConversation: ObservableObject {
 
         let body = trimmed + attachments.payloadSuffix
         let persona = agent.soul.isEmpty ? agent.summary : agent.soul
+        // Shared company knowledge prepended every turn so the agent always
+        // knows the org, your memos, scheduled meetings, and active work.
+        let ctx = context.isEmpty ? "" : context + "\n\n"
         let payload: String
         if introSent {
-            payload = body
+            payload = ctx + body
         } else {
             introSent = true
-            payload = "You are the \(agent.name) in a multi-agent company. Your remit: \(persona) Answer in that role.\n\n\(body)"
+            payload = ctx + "You are the \(agent.name) in a multi-agent company. Your remit: \(persona) Answer in that role.\n\n\(body)"
         }
 
         isSending = true
@@ -422,6 +425,9 @@ final class AgentConversation: ObservableObject {
 
 struct AgentChatView: View {
     @EnvironmentObject private var runtime: HermesRuntimeController
+    @EnvironmentObject private var org: OrgStore
+    @EnvironmentObject private var hub: MeetingHub
+    @EnvironmentObject private var company: CompanyStore
     @StateObject private var convo: AgentConversation
     @State private var draft = ""
     @FocusState private var focused: Bool
@@ -469,7 +475,8 @@ struct AgentChatView: View {
             ChatComposer(draft: $draft, focused: $focused, disabled: convo.isSending,
                          placeholder: "Message \(convo.agent.name)",
                          accent: Color(hex: convo.agent.accentHex)) { attachments in
-                convo.send(draft, attachments: attachments, relay: runtime.relayConfiguration)
+                convo.send(draft, attachments: attachments, relay: runtime.relayConfiguration,
+                           context: CompanyContext.brief(org: org, hub: hub, company: company))
                 draft = ""
             }
         }

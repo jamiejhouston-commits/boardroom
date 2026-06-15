@@ -634,7 +634,8 @@ class RelayHandler(BaseHTTPRequestHandler):
 
     def do_POST(self) -> None:
         if self.path not in {"/chat", "/chat/stream", "/tts",
-                             "/company/start", "/company/halt", "/company/gate"}:
+                             "/company/start", "/company/halt", "/company/gate",
+                             "/company/iterate"}:
             self.send_json({"error": "not_found"}, status=404)
             return
 
@@ -675,6 +676,15 @@ class RelayHandler(BaseHTTPRequestHandler):
                         state["last_tick"] = 0.0   # first tick fires within a minute
                     elif self.path == "/company/halt":
                         state["enabled"] = False
+                    elif self.path == "/company/iterate":
+                        # Owner wants MORE work on a finished project — the same
+                        # team continues on the same codebase (features, backend,
+                        # RevenueCat, App Store prep…). The loop reopens.
+                        company_module.reopen_for_iteration(
+                            state,
+                            str(body.get("id", "")),
+                            str(body.get("instruction", "")),
+                        )
                     else:  # /company/gate
                         gated = company_module.apply_gate(
                             state,

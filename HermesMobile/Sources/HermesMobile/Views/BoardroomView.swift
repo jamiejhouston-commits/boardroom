@@ -316,10 +316,15 @@ struct BoardroomView: View {
 struct InitiativeDetailView: View {
     @EnvironmentObject private var company: CompanyStore
     @EnvironmentObject private var runtime: HermesRuntimeController
+    @EnvironmentObject private var org: OrgStore
     let initiativeID: String
 
     @State private var detail: CompanyInitiative?
     @State private var loadError: String?
+    @State private var showSchedule = false
+    @State private var showMemo = false
+    @State private var showIterate = false
+    @State private var iterateText = ""
 
     var body: some View {
         List {
@@ -370,6 +375,25 @@ struct InitiativeDetailView: View {
                         }
                     }
                 }
+
+                Section {
+                    Button {
+                        showIterate = true
+                    } label: {
+                        Label("Request more work (next iteration)", systemImage: "arrow.triangle.2.circlepath")
+                            .font(.subheadline.weight(.semibold))
+                    }
+                    Button { showSchedule = true } label: {
+                        Label("Schedule a meeting about this", systemImage: "calendar.badge.plus")
+                    }
+                    Button { showMemo = true } label: {
+                        Label("Memo the GM about next steps", systemImage: "envelope")
+                    }
+                } header: {
+                    Text("Act on this project")
+                } footer: {
+                    Text("\"More work\" keeps the same team on the same codebase — add features, build the backend, set up payments, prep for the App Store. The loop reopens until you're done.")
+                }
             } else if let loadError {
                 Section {
                     VStack(alignment: .leading, spacing: 10) {
@@ -394,6 +418,29 @@ struct InitiativeDetailView: View {
         .navigationTitle("Initiative")
         .navigationBarTitleDisplayMode(.inline)
         .task { await load() }
+        .sheet(isPresented: $showSchedule) {
+            ScheduleMeetingView(prefillTopic: "Feedback: \(detail?.title ?? "")")
+        }
+        .sheet(isPresented: $showMemo) {
+            ComposeMemoView(prefillSubject: "Next steps: \(detail?.title ?? "")",
+                            prefillRecipientID: org.ceo?.id)
+        }
+        .alert("Request more work", isPresented: $showIterate) {
+            TextField("e.g. add a backend and user accounts", text: $iterateText)
+            Button("Send to the team") {
+                let instruction = iterateText.trimmingCharacters(in: .whitespacesAndNewlines)
+                iterateText = ""
+                guard !instruction.isEmpty else { return }
+                Task {
+                    await company.iterate(id: initiativeID, instruction: instruction,
+                                          relay: runtime.relayConfiguration)
+                    await load()
+                }
+            }
+            Button("Cancel", role: .cancel) { iterateText = "" }
+        } message: {
+            Text("The same team continues on the same codebase — features, backend, payments (RevenueCat), App Store prep. They'll bring it back to you at Demo Day.")
+        }
     }
 
     private func load() async {

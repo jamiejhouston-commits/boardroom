@@ -16,7 +16,7 @@ final class CompanyConversation: ObservableObject {
         )]
     }
 
-    func send(_ text: String, attachments: [ChatAttachment] = [], relay base: HermesRelayConfiguration, org: [OrgAgent]) {
+    func send(_ text: String, attachments: [ChatAttachment] = [], relay base: HermesRelayConfiguration, org: [OrgAgent], context: String = "") {
         var trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
         if trimmed.isEmpty && !attachments.isEmpty { trimmed = "Please review the attached." }
         guard !trimmed.isEmpty, !isSending else { return }
@@ -42,12 +42,13 @@ final class CompanyConversation: ObservableObject {
         let rank = target.tier == .ceo
             ? "You are the CEO — the final authority in this company; every department head and their team reports to you."
             : "You report to the GM/CEO and defer to their direction. Stay strictly in your own lane — do not speak for other departments or over the GM."
+        let ctx = context.isEmpty ? "" : context + "\n\n"
         let payload: String
         if introSent.contains(target.id) {
-            payload = body
+            payload = ctx + body
         } else {
             introSent.insert(target.id)
-            payload = "You are the \(target.name) in a multi-agent company. \(rank) Your remit: \(persona) Answer in that role.\n\n\(body)"
+            payload = ctx + "You are the \(target.name) in a multi-agent company. \(rank) Your remit: \(persona) Answer in that role.\n\n\(body)"
         }
 
         isSending = true
@@ -159,6 +160,8 @@ final class CompanyConversation: ObservableObject {
 struct CompanyChatView: View {
     @EnvironmentObject private var runtime: HermesRuntimeController
     @EnvironmentObject private var org: OrgStore
+    @EnvironmentObject private var hub: MeetingHub
+    @EnvironmentObject private var company: CompanyStore
     @StateObject private var convo = CompanyConversation()
     @State private var draft = ""
     @FocusState private var focused: Bool
@@ -196,7 +199,8 @@ struct CompanyChatView: View {
 
                 ChatComposer(draft: $draft, focused: $focused, disabled: convo.isSending,
                              placeholder: "Message the company — try “CFO, …”") { attachments in
-                    convo.send(draft, attachments: attachments, relay: runtime.relayConfiguration, org: org.leadership)
+                    convo.send(draft, attachments: attachments, relay: runtime.relayConfiguration, org: org.leadership,
+                               context: CompanyContext.brief(org: org, hub: hub, company: company))
                     draft = ""
                 }
             }

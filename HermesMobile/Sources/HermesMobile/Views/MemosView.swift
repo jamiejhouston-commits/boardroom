@@ -130,6 +130,8 @@ struct ComposeMemoView: View {
     @EnvironmentObject private var runtime: HermesRuntimeController
     @Environment(\.dismiss) private var dismiss
 
+    var prefillSubject: String = ""
+    var prefillRecipientID: String? = nil
     @State private var subject = ""
     @State private var body_ = ""
     @State private var selected: Set<String> = []
@@ -190,6 +192,10 @@ struct ComposeMemoView: View {
                     }
                     .disabled(!canSend)
                 }
+            }
+            .onAppear {
+                if subject.isEmpty { subject = prefillSubject }
+                if let id = prefillRecipientID, selected.isEmpty { selected.insert(id) }
             }
         }
     }

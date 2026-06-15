@@ -72,6 +72,18 @@ final class CompanyStore: ObservableObject {
         try? await HermesRelayClient(configuration: relay).companyInitiativeDetail(id: id)
     }
 
+    /// Tell the team to keep working on a finished project — next iteration.
+    func iterate(id: String, instruction: String, relay: HermesRelayConfiguration) async {
+        do {
+            let fresh = try await HermesRelayClient(configuration: relay)
+                .companyIterate(id: id, instruction: instruction)
+            apply(fresh)
+            errorMessage = nil
+        } catch {
+            errorMessage = error.localizedDescription
+        }
+    }
+
     private func apply(_ fresh: CompanyState) {
         let hadLive = liveMeeting?.id
         state = fresh
