@@ -15,6 +15,11 @@ PY="$HOME/.hermes/hermes-agent/venv/bin/python"
 PLIST="$HOME/Library/LaunchAgents/com.boardroom.relay.plist"
 LOG="$HOME/Library/Logs/boardroom-relay.log"
 
+# launchd runs with a stripped PATH, so the relay can't find `hermes`, `nice`,
+# `git`, or `gh`. Carry a real PATH that includes wherever hermes actually is.
+HERMES_DIR="$(dirname "$(command -v hermes 2>/dev/null || echo /usr/local/bin/hermes)")"
+SERVICE_PATH="$HERMES_DIR:$HOME/.local/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
+
 bold() { printf '\033[1m%s\033[0m\n' "$*"; }
 
 mkdir -p "$HOME/Library/LaunchAgents" "$(dirname "$LOG")"
@@ -44,6 +49,13 @@ cat > "$PLIST" <<PLISTEOF
     </array>
     <key>WorkingDirectory</key>
     <string>$REPO_DIR</string>
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>PATH</key>
+        <string>$SERVICE_PATH</string>
+        <key>HOME</key>
+        <string>$HOME</string>
+    </dict>
     <key>RunAtLoad</key>
     <true/>
     <key>KeepAlive</key>
