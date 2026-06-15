@@ -496,6 +496,46 @@ def run_autonomous_meeting() -> None:
     print(f"company - meeting concluded: {topic}", flush=True)
 
 
+def run_owner_meeting_response(meeting_id: str, owner_text: str) -> None:
+    """Owner spoke into a meeting — append their turn, then the attendees
+    respond to it (saved live), then mark done. Runs in the background."""
+    store = company_module.CompanyStore(COMPANY_STATE_PATH)
+    with COMPANY_LOCK:
+        state = store.load()
+        meeting = company_module.add_owner_turn(state, meeting_id, owner_text)
+        if meeting is None:
+            return
+        roles = list(meeting.get("attendees", []))
+        store.save(state)
+
+    def append_turn(role: str, text: str) -> None:
+        with COMPANY_LOCK:
+            s = store.load()
+            for m in s.get("meetings", []):
+                if m["id"] == meeting_id:
+                    m["turns"].append({"role": role, "text": text.strip(),
+                                       "ts": time.strftime("%H:%M")})
+                    break
+            store.save(s)
+
+    transcript = "\n".join(f"{t['role'].upper()}: {t['text']}" for t in meeting["turns"])
+    try:
+        for role in roles:
+            prompt = company_module.owner_response_prompt(meeting, role, owner_text, transcript, state)
+            text = company_cli_runner(role, prompt).strip() or "(no comment)"
+            append_turn(role, text)
+            transcript += f"\n{role.upper()}: {text}"
+    except Exception as error:  # noqa: BLE001
+        print(f"company - owner-meeting turn failed: {error}", flush=True)
+    with COMPANY_LOCK:
+        s = store.load()
+        for m in s.get("meetings", []):
+            if m["id"] == meeting_id:
+                m["status"] = "done"
+                break
+        store.save(s)
+
+
 def company_summary(state: dict) -> dict:
     """State for the app: everything except the bulky transcripts/minutes."""
     slim = []
@@ -633,14 +673,30 @@ class RelayHandler(BaseHTTPRequestHandler):
         self.send_json({"error": "not_found"}, status=404)
 
     def do_POST(self) -> None:
+        is_meeting_say = self.path.startswith("/company/meeting/") and self.path.endswith("/say")
         if self.path not in {"/chat", "/chat/stream", "/tts",
                              "/company/start", "/company/halt", "/company/gate",
-                             "/company/iterate"}:
+                             "/company/iterate"} and not is_meeting_say:
             self.send_json({"error": "not_found"}, status=404)
             return
 
         if not self.is_authorized():
             self.send_json({"error": "unauthorized"}, status=401)
+            return
+
+        if is_meeting_say:
+            meeting_id = self.path.split("/")[3]
+            try:
+                text = str(self.read_json().get("text", "")).strip()
+            except Exception as error:
+                self.send_json({"error": f"invalid_json: {error}"}, status=400)
+                return
+            if not text:
+                self.send_json({"error": "text_required"}, status=400)
+                return
+            threading.Thread(target=run_owner_meeting_response,
+                             args=(meeting_id, text), daemon=True).start()
+            self.send_json({"ok": True})
             return
 
         if self.path == "/tts":

@@ -298,6 +298,9 @@ struct MeetingTranscriptView: View {
 
     @State private var meeting: CompanyMeeting?
     @State private var speaking = false
+    @State private var draft = ""
+    @State private var sending = false
+    @FocusState private var focused: Bool
     private let voice = AgentVoice()
     private let refresh = Timer.publish(every: 6, on: .main, in: .common).autoconnect()
 
@@ -305,15 +308,21 @@ struct MeetingTranscriptView: View {
         List {
             Section {
                 ForEach(meeting?.turns ?? []) { turn in
+                    let isOwner = turn.role == "owner"
                     VStack(alignment: .leading, spacing: 4) {
-                        Text(turn.role.uppercased())
+                        Text(isOwner ? "YOU" : turn.role.uppercased())
                             .font(.caption.weight(.bold))
-                            .foregroundStyle(HermesTheme.emerald)
+                            .foregroundStyle(isOwner ? HermesTheme.gold : HermesTheme.emerald)
                         Text(turn.text).font(.subheadline).fixedSize(horizontal: false, vertical: true)
                     }
                     .padding(.vertical, 2)
                 }
-                if (meeting?.turns ?? []).isEmpty {
+                if sending {
+                    HStack(spacing: 8) {
+                        ProgressView().controlSize(.small)
+                        Text("The room is responding to you…").font(.caption).foregroundStyle(.secondary)
+                    }
+                } else if (meeting?.turns ?? []).isEmpty {
                     HStack(spacing: 8) {
                         ProgressView().controlSize(.small)
                         Text("The meeting is starting…").font(.caption).foregroundStyle(.secondary)
@@ -333,11 +342,48 @@ struct MeetingTranscriptView: View {
         .navigationTitle(topic)
         .navigationBarTitleDisplayMode(.inline)
         .keepScreenAwake()
+        // Speak into the meeting — the team responds to your steer.
+        .safeAreaInset(edge: .bottom) {
+            HStack(spacing: 8) {
+                TextField("Weigh in — the team will respond…", text: $draft, axis: .vertical)
+                    .lineLimit(1...4)
+                    .focused($focused)
+                    .padding(.horizontal, 14).padding(.vertical, 9)
+                    .background(HermesTheme.surface, in: RoundedRectangle(cornerRadius: 18, style: .continuous))
+                    .overlay(RoundedRectangle(cornerRadius: 18, style: .continuous).strokeBorder(HermesTheme.hairline, lineWidth: 1))
+                Button(action: sayIntoMeeting) {
+                    Image(systemName: "arrow.up.circle.fill").font(.title)
+                        .foregroundStyle(canSend ? HermesTheme.emerald : HermesTheme.textSecondary.opacity(0.4))
+                }
+                .disabled(!canSend)
+            }
+            .padding(.horizontal, 12).padding(.vertical, 8)
+            .background(.bar)
+        }
         .task { await load() }
         .onReceive(refresh) { _ in
-            if meeting?.isLive != false { Task { await load() } }   // keep live ones updating
+            if meeting?.isLive != false || sending { Task { await load() } }
         }
         .onDisappear { voice.stop() }
+    }
+
+    private var canSend: Bool {
+        !draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && !sending
+    }
+
+    private func sayIntoMeeting() {
+        let text = draft.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !text.isEmpty else { return }
+        draft = ""; focused = false; sending = true
+        Task {
+            await company.meetingSay(id: meetingID, text: text, relay: runtime.relayConfiguration)
+            // Poll until the team's responses land (or ~90s).
+            for _ in 0..<15 {
+                try? await Task.sleep(for: .seconds(6))
+                await load()
+            }
+            sending = false
+        }
     }
 
     private func load() async {

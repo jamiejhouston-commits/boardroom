@@ -112,3 +112,7 @@ struct CompanyInitiative: Codable, Equatable, Identifiable {
 enum CompanyDecision: String {
     case approve, kill, revise
 }
+
+struct CompanyAck: Codable, Equatable {
+    var ok: Bool?
+}

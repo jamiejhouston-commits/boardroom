@@ -82,6 +82,31 @@ def meeting_plan(state: dict) -> tuple[str, list[str]]:
     return "Company standup — what should we pursue next?", ["ceo", "research", "marketing"]
 
 
+def add_owner_turn(state: dict, meeting_id: str, text: str) -> dict | None:
+    """The owner speaks into a meeting — appended as a turn the agents will
+    address. Reopens the meeting (live) so they respond."""
+    for meeting in state.get("meetings", []):
+        if meeting["id"] == meeting_id:
+            meeting["turns"].append({"role": "owner", "text": text.strip(),
+                                     "ts": datetime.now().strftime("%H:%M")})
+            meeting["status"] = "live"
+            return meeting
+    return None
+
+
+def owner_response_prompt(meeting: dict, role: str, owner_text: str,
+                          transcript: str, state: dict) -> str:
+    body = (
+        f"You are in a live internal meeting on \"{meeting['topic']}\".\n"
+        f"Discussion so far:\n{transcript}\n\n"
+        f"The OWNER (the Chairman) just stepped in and said: \"{owner_text}\"\n\n"
+        f"Respond directly to the owner's input as the {role.upper()} in 2–3 "
+        f"sentences — take their steer seriously, adjust your position, and say "
+        f"concretely what you'll do about it. Natural spoken style, no markdown."
+    )
+    return role_prompt(role, body)
+
+
 def meeting_turn_prompt(meeting: dict, role: str, transcript: str, state: dict) -> str:
     active = [i["title"] for i in state["initiatives"] if i["stage"] not in TERMINAL_STAGES]
     context = f"Active initiatives: {', '.join(active) if active else 'none right now'}."

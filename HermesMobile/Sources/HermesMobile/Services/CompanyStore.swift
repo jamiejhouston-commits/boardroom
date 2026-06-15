@@ -24,6 +24,11 @@ final class CompanyStore: ObservableObject {
         try? await HermesRelayClient(configuration: relay).companyMeetingDetail(id: id)
     }
 
+    /// Speak into a meeting — the agents respond to your input.
+    func meetingSay(id: String, text: String, relay: HermesRelayConfiguration) async {
+        try? await HermesRelayClient(configuration: relay).companyMeetingSay(id: id, text: text)
+    }
+
     func refresh(relay: HermesRelayConfiguration) async {
         // !isLoading: the 60s ticker must not stack a second fetch on a slow
         // relay (causes isLoading flicker + duplicate gate notifications).

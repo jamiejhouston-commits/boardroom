@@ -114,6 +114,12 @@ struct HermesRelayClient {
         try await companyGET(path: "company/meeting/\(id)")
     }
 
+    /// Owner speaks into a live/recent meeting; agents respond to it.
+    func companyMeetingSay(id: String, text: String) async throws {
+        let _: CompanyAck = try await companyPOST(path: "company/meeting/\(id)/say",
+                                                  body: ["text": text])
+    }
+
     func companyStart(thesis: String) async throws -> CompanyState {
         try await companyPOST(path: "company/start", body: ["thesis": thesis])
     }
