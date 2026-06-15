@@ -8,8 +8,10 @@
 # root SSH key access from this Mac; port 8787 open.
 set -euo pipefail
 
-VPS="${VPS:-root@187.77.95.215}"
-HOST_IP="${HOST_IP:-187.77.95.215}"
+# Your VPS target. Set it via the VPS env var, or a gitignored Scripts/.vps.local
+# file containing e.g.  root@1.2.3.4  (keeps your server IP out of the repo).
+VPS="${VPS:-$(cat "$(dirname "$0")/.vps.local" 2>/dev/null || echo root@YOUR_VPS_IP)}"
+HOST_IP="${HOST_IP:-${VPS#*@}}"
 REPO_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 REMOTE_DIR="/root/boardroom"
 

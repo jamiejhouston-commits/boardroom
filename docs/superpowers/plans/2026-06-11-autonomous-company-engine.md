@@ -75,7 +75,7 @@ if __name__ == "__main__":
 
 - [ ] **Step 2: Run tests to verify they fail**
 
-Run: `cd "/Users/chosenvessel/Documents/hermes ios" && python3 -m unittest Scripts.test_hermes_company -v 2>&1 | tail -5`
+Run: `cd "/path/to/boardroom" && python3 -m unittest Scripts.test_hermes_company -v 2>&1 | tail -5`
 (If module-path import fails, run as: `python3 Scripts/test_hermes_company.py -v`)
 Expected: FAIL / error — `hermes_company.py` does not exist.
 
@@ -165,13 +165,13 @@ class CompanyStore:
 
 - [ ] **Step 4: Run tests to verify they pass**
 
-Run: `cd "/Users/chosenvessel/Documents/hermes ios" && python3 Scripts/test_hermes_company.py -v 2>&1 | tail -5`
+Run: `cd "/path/to/boardroom" && python3 Scripts/test_hermes_company.py -v 2>&1 | tail -5`
 Expected: `OK`, 4 tests passed.
 
 - [ ] **Step 5: Commit**
 
 ```bash
-cd "/Users/chosenvessel/Documents/hermes ios"
+cd "/path/to/boardroom"
 git add Scripts/hermes_company.py Scripts/test_hermes_company.py docs/superpowers/plans/2026-06-11-autonomous-company-engine.md
 git commit -m "feat(company): state store and initiative model"
 ```
@@ -1036,7 +1036,7 @@ git commit -m "feat(company): relay endpoints, role sessions, and heartbeat thre
 
 ```bash
 pkill -f hermes_mobile_relay.py; sleep 1
-cd "/Users/chosenvessel/Documents/hermes ios" && nohup /Users/chosenvessel/.hermes/hermes-agent/venv/bin/python -u Scripts/hermes_mobile_relay.py >> ~/Library/Logs/hermes-mobile-relay.log 2>&1 & disown
+cd "/path/to/boardroom" && nohup python3 -u Scripts/hermes_mobile_relay.py >> ~/Library/Logs/hermes-mobile-relay.log 2>&1 & disown
 sleep 2; curl -s -m 5 http://127.0.0.1:8787/health
 ```
 
