@@ -139,6 +139,65 @@ struct HermesRelayClient {
                               body: ["id": id, "instruction": instruction])
     }
 
+    /// Owner pitches an idea (e.g. a voice memo) — seeded as an initiative.
+    func companyDirective(text: String) async throws -> CompanyState {
+        try await companyPOST(path: "company/directive", body: ["text": text])
+    }
+
+    /// Set the investment thesis without toggling the company on/off.
+    func companySetThesis(_ thesis: String) async throws -> CompanyState {
+        try await companyPOST(path: "company/thesis", body: ["thesis": thesis])
+    }
+
+    /// Ask the company a question — returns the created ask (poll its detail).
+    func companyAsk(question: String) async throws -> CompanyAsk {
+        try await companyPOST(path: "company/ask", body: ["question": question])
+    }
+
+    func companyAskDetail(id: String) async throws -> CompanyAsk {
+        try await companyGET(path: "company/ask/\(id)")
+    }
+
+    // MARK: Schedules (the Cron)
+
+    func companyAddSchedule(title: String, kind: String, text: String, cadence: String,
+                            atHour: Int, atMinute: Int, weekday: Int) async throws -> CompanyState {
+        try await companyPOSTJSON(path: "company/schedules", json: [
+            "title": title, "kind": kind, "text": text, "cadence": cadence,
+            "at_hour": atHour, "at_minute": atMinute, "weekday": weekday] as [String: Any])
+    }
+
+    func companyDeleteSchedule(id: String) async throws -> CompanyState {
+        try await companyPOSTJSON(path: "company/schedule/delete", json: ["id": id] as [String: Any])
+    }
+
+    func companyToggleSchedule(id: String, enabled: Bool) async throws -> CompanyState {
+        try await companyPOSTJSON(path: "company/schedule/toggle",
+                                  json: ["id": id, "enabled": enabled] as [String: Any])
+    }
+
+    // MARK: Kanban task backlog
+
+    /// Hand the team a list of tasks (one per line) for the Kanban board.
+    func companyAddTasks(_ texts: [String]) async throws -> CompanyState {
+        try await companyPOSTJSON(path: "company/tasks", json: ["tasks": texts] as [String: Any])
+    }
+
+    /// Flip the "Kanban List" toggle — on = work the owner's list, off = own ideas.
+    func companyTaskMode(on: Bool) async throws -> CompanyState {
+        try await companyPOSTJSON(path: "company/tasks/mode", json: ["on": on] as [String: Any])
+    }
+
+    /// Clear the finished column.
+    func companyClearDoneTasks() async throws -> CompanyState {
+        try await companyPOSTJSON(path: "company/tasks/clear", json: [String: Any]())
+    }
+
+    /// Remove one task from the board.
+    func companyDeleteTask(id: String) async throws -> CompanyState {
+        try await companyPOSTJSON(path: "company/task/delete", json: ["id": id] as [String: Any])
+    }
+
     private func companyGET<T: Decodable>(path: String) async throws -> T {
         guard let baseURL = configuration.baseURL else {
             throw HermesRelayError.invalidURL
@@ -159,6 +218,22 @@ struct HermesRelayClient {
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         request.setValue("Bearer \(configuration.token)", forHTTPHeaderField: "Authorization")
         request.httpBody = try JSONEncoder().encode(body)
+        let (data, response) = try await session.data(for: request)
+        try validate(response: response, data: data)
+        return try Self.companyDecoder.decode(T.self, from: data)
+    }
+
+    /// Like companyPOST but carries real JSON types (arrays, bools) — needed for
+    /// task lists and the on/off toggle, which a [String: String] body can't express.
+    private func companyPOSTJSON<T: Decodable>(path: String, json: [String: Any]) async throws -> T {
+        guard let baseURL = configuration.baseURL else {
+            throw HermesRelayError.invalidURL
+        }
+        var request = URLRequest(url: baseURL.appending(path: path))
+        request.httpMethod = "POST"
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.setValue("Bearer \(configuration.token)", forHTTPHeaderField: "Authorization")
+        request.httpBody = try JSONSerialization.data(withJSONObject: json)
         let (data, response) = try await session.data(for: request)
         try validate(response: response, data: data)
         return try Self.companyDecoder.decode(T.self, from: data)

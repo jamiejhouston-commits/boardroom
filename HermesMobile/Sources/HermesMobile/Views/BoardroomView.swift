@@ -14,11 +14,17 @@ struct BoardroomView: View {
     @State private var reviseTarget: CompanyInitiative?
     @State private var reviseNote = ""
 
+    @StateObject private var pitchRecorder = VoiceNoteRecorder()
+    @State private var typedPitch = ""
+    @State private var pitchConfirmation: String?
+
     private let ticker = Timer.publish(every: 60, on: .main, in: .common).autoconnect()
 
     var body: some View {
         List {
             controlSection
+
+            pitchSection
 
             if let error = company.errorMessage {
                 Section {
@@ -118,6 +124,68 @@ struct BoardroomView: View {
             }
             .tint(HermesTheme.emerald)
 
+            Toggle(isOn: Binding(
+                get: { company.taskMode },
+                set: { on in
+                    Task { await company.setTaskMode(on, relay: runtime.relayConfiguration) }
+                }
+            )) {
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("Kanban List")
+                        .font(.subheadline.weight(.semibold))
+                    Text(company.taskMode
+                         ? "Focused on your task list — their own ideas are paused"
+                         : "Off — the team pursues their own ideas")
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                }
+            }
+            .tint(HermesTheme.gold)
+
+            if company.taskMode && !company.state.enabled {
+                Label("Switch Company running on too — nobody works the list while it's halted.",
+                      systemImage: "exclamationmark.triangle.fill")
+                    .font(.caption2)
+                    .foregroundStyle(.orange)
+            }
+
+            NavigationLink {
+                KanbanBoardView()
+            } label: {
+                HStack {
+                    Label("Task board", systemImage: "checklist")
+                        .font(.subheadline.weight(.semibold))
+                    Spacer()
+                    if !company.tasks.isEmpty {
+                        Text("\(company.tasks(in: .done).count)/\(company.tasks.count)")
+                            .font(.caption.weight(.bold))
+                            .foregroundStyle(.secondary)
+                    }
+                }
+            }
+
+            NavigationLink {
+                AskCompanyView()
+            } label: {
+                Label("Ask the company", systemImage: "bubble.left.and.text.bubble.right.fill")
+                    .font(.subheadline.weight(.semibold))
+            }
+
+            NavigationLink {
+                CronView()
+            } label: {
+                HStack {
+                    Label("Automations", systemImage: "clock.arrow.2.circlepath")
+                        .font(.subheadline.weight(.semibold))
+                    Spacer()
+                    if !company.schedules.isEmpty {
+                        Text("\(company.schedules.filter(\.enabled).count) on")
+                            .font(.caption.weight(.bold))
+                            .foregroundStyle(.secondary)
+                    }
+                }
+            }
+
             VStack(alignment: .leading, spacing: 4) {
                 Text("Investment thesis")
                     .font(.caption.weight(.semibold))
@@ -132,6 +200,91 @@ struct BoardroomView: View {
             }
         } footer: {
             Text("You're the Chairman: the company scouts, debates, and builds on its own — it only waits on you at the gates.")
+        }
+    }
+
+    // MARK: Pitch an idea (voice memo → initiative)
+
+    private var pitchSection: some View {
+        Section {
+            Button {
+                Task { await togglePitch() }
+            } label: {
+                HStack(spacing: 10) {
+                    Image(systemName: pitchRecorder.state == .recording ? "stop.circle.fill" : "mic.circle.fill")
+                        .font(.title2)
+                        .foregroundStyle(pitchRecorder.state == .recording ? .red : HermesTheme.emerald)
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text(pitchRecorder.state == .recording ? "Tap to send your idea" : "Pitch an idea by voice")
+                            .font(.subheadline.weight(.semibold))
+                            .foregroundStyle(HermesTheme.textPrimary)
+                        Text(pitchStatus)
+                            .font(.caption2)
+                            .foregroundStyle(.secondary)
+                    }
+                    Spacer()
+                    if pitchRecorder.state == .transcribing {
+                        ProgressView().controlSize(.small)
+                    }
+                }
+            }
+            .buttonStyle(.plain)
+            .disabled(pitchRecorder.state == .transcribing)
+
+            HStack(spacing: 8) {
+                TextField("…or type an idea", text: $typedPitch, axis: .vertical)
+                    .lineLimit(1...3)
+                    .font(.subheadline)
+                Button {
+                    sendTypedPitch()
+                } label: {
+                    Image(systemName: "paperplane.fill")
+                        .foregroundStyle(HermesTheme.emerald)
+                }
+                .buttonStyle(.plain)
+                .disabled(typedPitch.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+            }
+
+            if let pitchConfirmation {
+                Label(pitchConfirmation, systemImage: "checkmark.circle.fill")
+                    .font(.caption)
+                    .foregroundStyle(HermesTheme.emerald)
+            }
+        } header: {
+            Text("Your idea")
+        } footer: {
+            Text("Speak (or type) an idea — the team researches it, debates it in the boardroom, and brings it back for your greenlight.")
+        }
+    }
+
+    private var pitchStatus: String {
+        switch pitchRecorder.state {
+        case .idle:               "The board will research and debate it"
+        case .recording:          "Recording… tap again when you're done"
+        case .transcribing:       "Transcribing your idea…"
+        case .unavailable(let m): m
+        }
+    }
+
+    private func togglePitch() async {
+        if pitchRecorder.state == .recording {
+            if let text = await pitchRecorder.finishRecordingAndTranscribe(),
+               !text.isEmpty {
+                await company.submitDirective(text, relay: runtime.relayConfiguration)
+                pitchConfirmation = "Sent to the board: \"\(text.prefix(60))\""
+            }
+        } else {
+            pitchConfirmation = nil
+            await pitchRecorder.beginRecording()
+        }
+    }
+
+    private func sendTypedPitch() {
+        let text = typedPitch
+        typedPitch = ""
+        Task {
+            await company.submitDirective(text, relay: runtime.relayConfiguration)
+            pitchConfirmation = "Sent to the board: \"\(text.prefix(60))\""
         }
     }
 
@@ -377,6 +530,12 @@ struct InitiativeDetailView: View {
                 }
 
                 Section {
+                    NavigationLink {
+                        InitiativeRoomView(initiative: detail)
+                    } label: {
+                        Label("Enter the 3D project room", systemImage: "cube.transparent")
+                            .font(.subheadline.weight(.semibold))
+                    }
                     Button {
                         showIterate = true
                     } label: {

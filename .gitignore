@@ -9,3 +9,6 @@ nohup.out
 HermesMobile.xcodeproj/
 Signing.local.xcconfig
 Scripts/.vps.local
+
+# Personal company skill map — never publish
+AR_COMPANY_SKILL_MAP.md

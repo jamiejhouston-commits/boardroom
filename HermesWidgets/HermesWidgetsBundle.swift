@@ -5,8 +5,105 @@ import WidgetKit
 @main
 struct HermesWidgetsBundle: WidgetBundle {
     var body: some Widget {
+        CompanyStatusWidget()
+        CompanyPulseLiveActivity()
         MeetingLiveActivity()
         DebateLiveActivity()
+    }
+}
+
+// MARK: - Company pulse (the company at work — lock screen + Dynamic Island)
+
+private let emeraldHex = "1C7A55"
+private let goldHex = "C7A35A"
+
+struct CompanyPulseLiveActivity: Widget {
+    var body: some WidgetConfiguration {
+        ActivityConfiguration(for: CompanyPulseAttributes.self) { context in
+            let accent = context.state.pendingGates > 0 ? goldHex : emeraldHex
+            HStack(spacing: 12) {
+                pulseDot(working: context.state.working,
+                         color: Color(hexString: accent))
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(context.state.headline)
+                        .font(.subheadline.weight(.bold))
+                        .lineLimit(1)
+                    Text(context.state.detail)
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                        .lineLimit(1)
+                }
+                Spacer()
+                if context.state.pendingGates > 0 {
+                    gateBadge(context.state.pendingGates)
+                } else {
+                    Text(context.attributes.company.uppercased())
+                        .font(.caption2.weight(.black))
+                        .tracking(1)
+                        .foregroundStyle(Color(hexString: accent))
+                }
+            }
+            .padding(14)
+            .activityBackgroundTint(Color.black.opacity(0.6))
+            .activitySystemActionForegroundColor(Color(hexString: accent))
+        } dynamicIsland: { context in
+            let accent = context.state.pendingGates > 0 ? goldHex : emeraldHex
+            return DynamicIsland {
+                DynamicIslandExpandedRegion(.leading) {
+                    Image(systemName: context.state.pendingGates > 0 ? "gavel.fill" : "building.2.fill")
+                        .font(.title2)
+                        .foregroundStyle(Color(hexString: accent))
+                }
+                DynamicIslandExpandedRegion(.trailing) {
+                    if context.state.pendingGates > 0 {
+                        gateBadge(context.state.pendingGates)
+                    } else {
+                        pulseDot(working: context.state.working, color: Color(hexString: accent))
+                    }
+                }
+                DynamicIslandExpandedRegion(.bottom) {
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text(context.state.headline)
+                            .font(.subheadline.weight(.bold))
+                            .lineLimit(1)
+                        Text(context.state.detail)
+                            .font(.caption2)
+                            .foregroundStyle(.secondary)
+                            .lineLimit(1)
+                    }
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                }
+            } compactLeading: {
+                Image(systemName: context.state.pendingGates > 0 ? "gavel.fill" : "building.2.fill")
+                    .foregroundStyle(Color(hexString: accent))
+            } compactTrailing: {
+                if context.state.pendingGates > 0 {
+                    Text("\(context.state.pendingGates)")
+                        .font(.caption2.weight(.black))
+                        .foregroundStyle(Color(hexString: goldHex))
+                } else {
+                    pulseDot(working: context.state.working, color: Color(hexString: accent))
+                }
+            } minimal: {
+                Image(systemName: context.state.pendingGates > 0 ? "gavel.fill" : "building.2.fill")
+                    .foregroundStyle(Color(hexString: accent))
+            }
+        }
+    }
+
+    private func pulseDot(working: Bool, color: Color) -> some View {
+        Circle()
+            .fill(color)
+            .frame(width: 9, height: 9)
+            .opacity(working ? 1 : 0.4)
+    }
+
+    private func gateBadge(_ count: Int) -> some View {
+        Text("\(count)")
+            .font(.caption.weight(.black))
+            .foregroundStyle(.white)
+            .frame(width: 22, height: 22)
+            .background(Color(hexString: goldHex), in: Circle())
     }
 }
 
@@ -148,9 +245,9 @@ struct DebateLiveActivity: Widget {
     }
 }
 
-// MARK: - Helpers (widget-local)
+// MARK: - Helpers (widget target-wide)
 
-private extension Color {
+extension Color {
     init(hexString: String) {
         let clean = hexString.replacingOccurrences(of: "#", with: "")
         var value: UInt64 = 0

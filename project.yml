@@ -59,6 +59,34 @@ targets:
         PRODUCT_BUNDLE_IDENTIFIER: com.jamiehouston.boardroom
         ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
         TARGETED_DEVICE_FAMILY: "1,2"
+    entitlements:
+      path: HermesMobile/HermesMobile.entitlements
+      properties:
+        com.apple.security.application-groups:
+          - group.com.jamiehouston.boardroom
+    dependencies:
+      - target: HermesWidgets
+        embed: true
+  HermesWidgets:
+    type: app-extension
+    platform: iOS
+    sources:
+      - path: HermesWidgets
+        excludes:
+          - Info.plist
+      # Shared with the app so ActivityAttributes match and the widgets can read
+      # the snapshot the app writes. Compiled into both targets by design.
+      - path: HermesMobile/Sources/HermesMobile/Models/HermesActivityAttributes.swift
+      - path: HermesMobile/Sources/HermesMobile/Models/CompanySnapshot.swift
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.jamiehouston.boardroom.widgets
+        INFOPLIST_FILE: HermesWidgets/Info.plist
+    entitlements:
+      path: HermesWidgets/HermesWidgets.entitlements
+      properties:
+        com.apple.security.application-groups:
+          - group.com.jamiehouston.boardroom
   HermesMobileTests:
     type: bundle.unit-test
     platform: iOS

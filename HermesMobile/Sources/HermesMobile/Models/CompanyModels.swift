@@ -10,9 +10,122 @@ struct CompanyState: Codable, Equatable {
     var config: CompanyConfig
     var initiatives: [CompanyInitiative]
     var meetings: [CompanyMeeting]?
+    var events: [CompanyEvent]?
+    var tasks: [CompanyTask]?
+    var taskMode: Bool?
+    var asks: [CompanyAsk]?
+    var schedules: [CompanySchedule]?
 
     static let empty = CompanyState(enabled: false, thesis: "", lastTick: 0,
-                                    config: CompanyConfig(), initiatives: [], meetings: nil)
+                                    config: CompanyConfig(), initiatives: [], meetings: nil,
+                                    events: nil, tasks: nil, taskMode: nil, asks: nil,
+                                    schedules: nil)
+}
+
+/// A recurring owner automation (the Cron): a directive or an ask the company
+/// runs on a schedule (hourly / daily / weekly).
+struct CompanySchedule: Codable, Equatable, Identifiable {
+    var id: String
+    var title: String
+    var kind: String            // "directive" | "ask"
+    var text: String
+    var cadence: String         // "hourly" | "daily" | "weekly"
+    var atHour: Int
+    var atMinute: Int
+    var weekday: Int            // Monday=0 … Sunday=6
+    var enabled: Bool
+    var lastFired: Double?
+
+    var kindLabel: String {
+        switch kind {
+        case "ask":     return "Ask"
+        case "meeting": return "Office hours"
+        default:        return "Pitch idea"
+        }
+    }
+
+    private static let weekdayNames = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
+
+    /// "Daily at 9:00", "Mondays at 8:30", "Hourly at :15".
+    var cadenceSummary: String {
+        let time = String(format: "%d:%02d", atHour, atMinute)
+        switch cadence {
+        case "hourly": return "Hourly at :\(String(format: "%02d", atMinute))"
+        case "weekly":
+            let day = Self.weekdayNames[min(max(weekday, 0), 6)]
+            return "\(day) at \(time)"
+        default:       return "Daily at \(time)"
+        }
+    }
+}
+
+/// "Ask the company": the owner's question, each leader's answer, and the CEO's
+/// synthesized answer. Built in the background (poll until `status == "done"`).
+struct CompanyAsk: Codable, Equatable, Identifiable {
+    var id: String
+    var question: String
+    var status: String                       // "live" | "done"
+    var contributions: [CompanyAskContribution]?
+    var answer: String
+    var started: String
+
+    var isLive: Bool { status == "live" }
+}
+
+struct CompanyAskContribution: Codable, Equatable, Identifiable {
+    var role: String
+    var text: String
+    var id: String { "\(role)-\(text.prefix(12))" }
+}
+
+/// One Kanban task the owner handed the company. Moves todo → doing → done.
+struct CompanyTask: Codable, Equatable, Identifiable {
+    var id: String
+    var text: String
+    var status: String              // "todo" | "doing" | "done"
+    var created: String
+    var result: String?
+    var artifacts: [String]?
+
+    var column: TaskColumn {
+        switch status {
+        case "doing": return .doing
+        case "done":  return .done
+        default:      return .todo
+        }
+    }
+
+    /// A parked task that failed all its retries (builder flags these with ⚠).
+    var failed: Bool { (result ?? "").hasPrefix("⚠") }
+}
+
+enum TaskColumn: String, CaseIterable, Identifiable {
+    case todo, doing, done
+    var id: String { rawValue }
+
+    var title: String {
+        switch self {
+        case .todo:  return "To Do"
+        case .doing: return "In Progress"
+        case .done:  return "Done"
+        }
+    }
+
+    var systemImage: String {
+        switch self {
+        case .todo:  return "tray.full"
+        case .doing: return "hammer.fill"
+        case .done:  return "checkmark.seal.fill"
+        }
+    }
+}
+
+struct CompanyEvent: Codable, Equatable, Identifiable {
+    var text: String
+    var ts: Double
+
+    var id: String { "\(ts)-\(text.prefix(16))" }
+    var date: Date { Date(timeIntervalSince1970: ts) }
 }
 
 struct CompanyMeeting: Codable, Equatable, Identifiable {
@@ -72,6 +185,8 @@ struct CompanyInitiative: Codable, Equatable, Identifiable {
     var note: String
     /// Private GitHub repo the deliverables shipped to (set after gate-2 approve).
     var repoUrl: String?
+    /// "owner" when the Chairman pitched it directly (voice memo / directive).
+    var origin: String?
     /// Present only on the detail endpoint.
     var minutes: [CompanyMinute]?
 

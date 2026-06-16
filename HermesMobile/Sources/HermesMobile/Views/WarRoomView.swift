@@ -1,6 +1,10 @@
 import SwiftUI
 
 struct WarRoomView: View {
+    @EnvironmentObject private var company: CompanyStore
+    @EnvironmentObject private var runtime: HermesRuntimeController
+    private let feedTicker = Timer.publish(every: 15, on: .main, in: .common).autoconnect()
+
     var body: some View {
         NavigationStack {
             ScrollView {
@@ -10,6 +14,8 @@ struct WarRoomView: View {
                         subtitle: "Live floor for the agent organization. Swipe each leader's room, tap a department to dive in.",
                         systemImage: "rectangle.3.group.bubble.left.fill"
                     )
+
+                    liveFeed
 
                     AgentStudio3DPanel()
 
@@ -30,7 +36,41 @@ struct WarRoomView: View {
             }
             .navigationTitle("War Room")
             .navigationBarTitleDisplayMode(.inline)
+            .task { await company.refresh(relay: runtime.relayConfiguration) }
+            .onReceive(feedTicker) { _ in
+                Task { await company.refresh(relay: runtime.relayConfiguration) }
+            }
         }
+    }
+
+    // Live activity feed — what the company has been doing, newest first.
+    @ViewBuilder
+    private var liveFeed: some View {
+        let events = (company.state.events ?? []).suffix(12).reversed()
+        VStack(alignment: .leading, spacing: 8) {
+            HStack(spacing: 6) {
+                Circle().fill(.green).frame(width: 7, height: 7)
+                Text("LIVE ACTIVITY").font(.caption.weight(.black)).tracking(1)
+                Spacer()
+            }
+            if events.isEmpty {
+                Text("Quiet right now. Switch the company on (Boardroom) and activity shows up here.")
+                    .font(.caption).foregroundStyle(.secondary)
+            } else {
+                ForEach(Array(events)) { event in
+                    HStack(alignment: .top, spacing: 8) {
+                        Image(systemName: "circle.fill").font(.system(size: 5)).foregroundStyle(HermesTheme.emerald).padding(.top, 6)
+                        Text(event.text).font(.caption).foregroundStyle(HermesTheme.textPrimary)
+                            .fixedSize(horizontal: false, vertical: true)
+                        Spacer(minLength: 0)
+                        Text(event.date, style: .time).font(.caption2).foregroundStyle(.secondary)
+                    }
+                }
+            }
+        }
+        .padding(14)
+        .background(HermesTheme.surface, in: RoundedRectangle(cornerRadius: 14))
+        .overlay(RoundedRectangle(cornerRadius: 14).strokeBorder(HermesTheme.hairline, lineWidth: 1))
     }
 }
 

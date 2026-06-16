@@ -5,6 +5,7 @@ import SwiftUI
 struct OrgGenesisView: View {
     @EnvironmentObject private var org: OrgStore
     @EnvironmentObject private var runtime: HermesRuntimeController
+    @EnvironmentObject private var company: CompanyStore
     @Environment(\.dismiss) private var dismiss
 
     enum Stage { case interview, generating, preview, failed(String) }
@@ -16,6 +17,13 @@ struct OrgGenesisView: View {
     @State private var size = 1   // 0 = lean, 1 = full
     @State private var candidates: [OrgAgent] = []
     @State private var revealed = 0
+
+    // Genesis 2.0 — set up the whole company, not just the org chart.
+    @State private var thesisDraft = ""
+    @State private var starters: [String] = []
+    @State private var starterOn: [Bool] = []
+    @State private var startNow = true
+    @State private var hiring = false
 
     var body: some View {
         NavigationStack {
@@ -120,24 +128,53 @@ struct OrgGenesisView: View {
                         .transition(.move(edge: .trailing).combined(with: .opacity))
                     }
                 }
+
+                if revealed >= candidates.count {
+                    Section("Investment thesis") {
+                        TextField("What the company pursues", text: $thesisDraft, axis: .vertical)
+                            .lineLimit(1...3)
+                        Text("The market scout filters every opportunity through this lens.")
+                            .font(.caption2).foregroundStyle(.secondary)
+                    }
+
+                    Section("Starter ideas") {
+                        ForEach(starters.indices, id: \.self) { index in
+                            HStack(alignment: .top, spacing: 10) {
+                                Image(systemName: starterOn[index] ? "checkmark.circle.fill" : "circle")
+                                    .foregroundStyle(starterOn[index] ? HermesTheme.emerald : .secondary)
+                                    .onTapGesture { starterOn[index].toggle() }
+                                TextField("Idea", text: $starters[index], axis: .vertical)
+                                    .lineLimit(1...3)
+                                    .font(.subheadline)
+                            }
+                        }
+                    }
+
+                    Section {
+                        Toggle("Start the company now", isOn: $startNow)
+                            .tint(HermesTheme.emerald)
+                    } footer: {
+                        Text("Hiring builds your org. Starting also puts the team to work — scouting the market and on the starter ideas you kept.")
+                    }
+                }
             }
             .scrollContentBackground(.hidden)
 
             VStack(spacing: 10) {
                 Button {
-                    org.applyPreset(candidates)
-                    dismiss()
+                    hire()
                 } label: {
-                    Label("Hire this company", systemImage: "person.3.fill")
+                    Label(hiring ? "Setting up…" : "Hire & set up", systemImage: "person.3.fill")
                         .frame(maxWidth: .infinity)
                         .font(.headline)
                 }
                 .buttonStyle(.borderedProminent)
                 .tint(HermesTheme.emerald)
-                .disabled(revealed < candidates.count)
+                .disabled(revealed < candidates.count || hiring)
 
                 Button("Start over") { stage = .interview }
                     .font(.subheadline)
+                    .disabled(hiring)
             }
             .padding()
         }
@@ -213,7 +250,55 @@ struct OrgGenesisView: View {
         }
         candidates = agents
         revealed = 0
+        thesisDraft = composedThesis()
+        starters = composedStarters()
+        starterOn = starters.map { _ in true }
         stage = .preview
+    }
+
+    // MARK: Genesis 2.0 — company setup defaults + hire
+
+    private func composedThesis() -> String {
+        let goalText = goal.trimmingCharacters(in: .whitespaces)
+        let businessText = business.trimmingCharacters(in: .whitespaces)
+        if !goalText.isEmpty, !businessText.isEmpty {
+            return "\(businessText). Pursue products and automations that help: \(goalText)."
+        }
+        if !businessText.isEmpty {
+            return "\(businessText). Pursue small, useful products that save time and grow the business."
+        }
+        return "Small, useful products that ship in days."
+    }
+
+    private func composedStarters() -> [String] {
+        var out: [String] = []
+        let sinks = timeSinks.trimmingCharacters(in: .whitespaces)
+        let goalText = goal.trimmingCharacters(in: .whitespaces)
+        if !sinks.isEmpty { out.append("Build a tool that takes this off my plate: \(sinks).") }
+        if !goalText.isEmpty { out.append("Ship something this month that moves us toward: \(goalText).") }
+        out.append("Find a small, high-leverage product we can build and ship in days.")
+        return Array(out.prefix(3))
+    }
+
+    private func hire() {
+        hiring = true
+        org.applyPreset(candidates)
+        let chosen = zip(starters, starterOn)
+            .filter { $0.1 }
+            .map { $0.0.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { !$0.isEmpty }
+        let thesis = thesisDraft.trimmingCharacters(in: .whitespacesAndNewlines)
+        Task {
+            if startNow {
+                await company.setEnabled(true, thesis: thesis, relay: runtime.relayConfiguration)
+            } else {
+                await company.setThesis(thesis, relay: runtime.relayConfiguration)
+            }
+            for starter in chosen {
+                await company.submitDirective(starter, relay: runtime.relayConfiguration)
+            }
+            dismiss()
+        }
     }
 }
 

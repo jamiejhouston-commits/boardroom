@@ -14,7 +14,7 @@ import os
 import re
 import secrets
 import time
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 
 # How many QA review→fix rounds the build team runs before Demo Day.
@@ -45,7 +45,92 @@ def new_state() -> dict:
         "last_tick": 0.0,
         "meetings": [],        # autonomous internal meetings the owner can listen in on
         "last_meeting": 0.0,
+        "events": [],          # rolling activity log (feeds War Room, Dynamic Island, widgets)
+        "tasks": [],           # owner-supplied Kanban backlog (To Do → In Progress → Done)
+        "task_mode": False,    # "Kanban List" toggle: drop own ideas, work the owner's list
+        "asks": [],            # "Ask the company" Q&A (leaders answer, CEO synthesizes)
+        "schedules": [],       # recurring owner automations (directives / asks) — the Cron
     }
+
+
+def log_event(state: dict, text: str) -> None:
+    """Append to the company's rolling activity feed (last 50 kept)."""
+    events = state.setdefault("events", [])
+    events.append({"text": text, "ts": time.time()})
+    del events[:-50]
+
+
+# How many times a task is retried before it's parked as "couldn't complete".
+MAX_TASK_ATTEMPTS = 3
+
+
+def new_task(text: str) -> dict:
+    return {
+        "id": secrets.token_hex(4),
+        "text": text.strip(),
+        "status": "todo",        # todo → doing → done
+        "created": datetime.now().isoformat(timespec="seconds"),
+        "result": "",            # builder's summary once done
+        "artifacts": [],         # files the task produced/changed
+        "attempts": 0,
+    }
+
+
+def add_tasks(state: dict, texts) -> list[dict]:
+    """Append owner-supplied tasks to the backlog. Blank lines are ignored."""
+    created = []
+    for raw in texts:
+        text = (raw or "").strip()
+        if text:
+            task = new_task(text)
+            state.setdefault("tasks", []).append(task)
+            created.append(task)
+    return created
+
+
+def set_task_mode(state: dict, on: bool) -> None:
+    """Flip the Kanban List toggle: on = work the owner's list, off = own ideas."""
+    state["task_mode"] = bool(on)
+
+
+def next_task(state: dict) -> dict | None:
+    """The task the team should work next: a half-done one first (resume after a
+    restart), otherwise the oldest still-to-do."""
+    tasks = state.get("tasks", [])
+    for task in tasks:
+        if task["status"] == "doing":
+            return task
+    for task in tasks:
+        if task["status"] == "todo":
+            return task
+    return None
+
+
+def find_task(state: dict, task_id: str) -> dict | None:
+    for task in state.get("tasks", []):
+        if task["id"] == task_id:
+            return task
+    return None
+
+
+def task_build_prompt(text: str, existing_files: list[str], outdir) -> str:
+    """Builder prompt for one Kanban task. Tasks share a single workspace so a
+    list of jobs accumulates on one codebase — each task reads what's there and
+    extends it, real and wired in, no stubs."""
+    listing = "\n".join(existing_files[:40]) or "(empty — this is the first task)"
+    body = (
+        f"{BUILDER_TOOLKIT}\n\n"
+        f"You are working through the owner's task list in a shared workspace at "
+        f"{outdir}. Files already there:\n{listing}\n\n"
+        f"TASK: {text}\n\n"
+        "Do exactly this one task — for real, fully wired in and working (no "
+        "stubs, no TODOs, no placeholder logic). If it builds on the existing "
+        "files, READ them first and extend them rather than starting over. Save "
+        "all work under that workspace folder using your file tools. Reply with a "
+        "2–3 line summary of what you did, and flag plainly anything that needs an "
+        "owner login or API key."
+    )
+    return role_prompt("builder", body)
 
 
 def new_meeting(topic: str, attendees: list[str]) -> dict:
@@ -64,6 +149,8 @@ def should_convene_meeting(state: dict, now: float) -> bool:
     hours, the meeting cadence, and not stacking on a live meeting."""
     if not state.get("enabled"):
         return False
+    if state.get("task_mode"):
+        return False   # focused on the owner's task list, no autonomous standups
     config = state["config"]
     hour = datetime.fromtimestamp(now).hour
     if is_quiet(hour, config["quiet_start"], config["quiet_end"]):
@@ -120,6 +207,103 @@ def meeting_turn_prompt(meeting: dict, role: str, transcript: str, state: dict) 
     return role_prompt(role, body)
 
 
+def new_schedule(title: str, kind: str, text: str, cadence: str,
+                 at_hour: int = 9, at_minute: int = 0, weekday: int = 0) -> dict:
+    """A recurring owner automation. kind = 'directive' (pitch an idea) or 'ask'
+    (ask the company). cadence = 'hourly' | 'daily' | 'weekly'."""
+    return {
+        "id": secrets.token_hex(4),
+        "title": title.strip() or text.strip()[:40] or "Automation",
+        "kind": kind if kind in ("directive", "ask", "meeting") else "directive",
+        "text": text.strip(),
+        "cadence": cadence if cadence in ("hourly", "daily", "weekly") else "daily",
+        "at_hour": max(0, min(23, int(at_hour))),
+        "at_minute": max(0, min(59, int(at_minute))),
+        "weekday": max(0, min(6, int(weekday))),   # Monday=0 … Sunday=6
+        "enabled": True,
+        # Stamp creation time so the first fire is the NEXT scheduled occurrence,
+        # not an immediate catch-up of a slot that already passed today.
+        "last_fired": time.time(),
+    }
+
+
+def schedule_last_occurrence(schedule: dict, now: float) -> float:
+    """Timestamp of the most recent moment this schedule should have fired
+    (at or before `now`). A schedule is due when last_fired predates it."""
+    moment = datetime.fromtimestamp(now)
+    hour = schedule.get("at_hour", 9)
+    minute = schedule.get("at_minute", 0)
+    cadence = schedule.get("cadence", "daily")
+
+    if cadence == "hourly":
+        occurrence = moment.replace(minute=minute, second=0, microsecond=0)
+        if occurrence > moment:
+            occurrence -= timedelta(hours=1)
+    elif cadence == "weekly":
+        occurrence = moment.replace(hour=hour, minute=minute, second=0, microsecond=0)
+        days_back = (moment.weekday() - schedule.get("weekday", 0)) % 7
+        occurrence -= timedelta(days=days_back)
+        if occurrence > moment:
+            occurrence -= timedelta(days=7)
+    else:  # daily
+        occurrence = moment.replace(hour=hour, minute=minute, second=0, microsecond=0)
+        if occurrence > moment:
+            occurrence -= timedelta(days=1)
+    return occurrence.timestamp()
+
+
+def schedule_due(schedule: dict, now: float) -> bool:
+    if not schedule.get("enabled", True):
+        return False
+    return schedule.get("last_fired", 0.0) < schedule_last_occurrence(schedule, now)
+
+
+def due_schedules(state: dict, now: float) -> list[dict]:
+    return [s for s in state.get("schedules", []) if schedule_due(s, now)]
+
+
+def new_ask(question: str) -> dict:
+    """An owner question put to the company. Leaders answer, the CEO synthesizes."""
+    return {
+        "id": secrets.token_hex(4),
+        "question": question.strip(),
+        "status": "live",            # live → done
+        "contributions": [],         # [{"role":..., "text":...}]
+        "answer": "",                # the CEO's synthesized answer
+        "started": datetime.now().isoformat(timespec="seconds"),
+    }
+
+
+def ask_panel(state: dict, question: str) -> list[str]:
+    """Which leaders to consult. The board's three lenses cover most questions
+    (money, tech, market); the CEO synthesizes their answers afterward."""
+    return ["cfo", "cto", "marketing"]
+
+
+def ask_prompt(role: str, question: str, transcript: str, state: dict) -> str:
+    active = [i["title"] for i in state["initiatives"] if i["stage"] not in TERMINAL_STAGES]
+    context = f"Active initiatives: {', '.join(active) if active else 'none right now'}."
+    colleagues = f"Colleagues have said so far:\n{transcript}\n\n" if transcript else ""
+    body = (
+        f"The owner (the Chairman) asks the company: \"{question}\"\n{context}\n\n"
+        f"{colleagues}"
+        f"Answer from your seat as the {role.upper()} in 2–4 sentences — concrete and "
+        f"honest, from your domain's angle. Natural spoken style, no markdown, no lists."
+    )
+    return role_prompt(role, body)
+
+
+def ask_synthesis_prompt(question: str, transcript: str) -> str:
+    body = (
+        f"The owner asked the company: \"{question}\"\n"
+        f"Your leaders answered:\n{transcript}\n\n"
+        "As CEO, synthesize ONE clear answer for the owner: your recommendation, the "
+        "key reasons behind it, and any important dissent worth knowing. 4–6 sentences, "
+        "plain spoken style, no markdown."
+    )
+    return role_prompt("ceo", body)
+
+
 def new_initiative(title: str, pitch: str, score: dict | None = None) -> dict:
     return {
         "id": secrets.token_hex(4),
@@ -147,6 +331,22 @@ def reopen_for_iteration(state: dict, initiative_id: str, instruction: str) -> d
     init["review_rounds"] = 0
     init["brief"] = ""
     init["stage"] = "planning"   # heartbeat picks it up and continues the project
+    return init
+
+
+def seed_initiative(state: dict, text: str, title: str | None = None) -> dict:
+    """Owner pitched an idea directly (e.g. a voice memo). Seed it as an
+    initiative so the team researches it, debates it, and brings it to the
+    gate — the same pipeline as a scouted idea, but flagged as the Chairman's
+    directive (the board treats it as a mandate, not a maybe)."""
+    text = (text or "").strip()
+    raw = (title or text).strip()
+    headline = re.split(r"[.\n]", raw, maxsplit=1)[0].strip()[:80] or "Owner directive"
+    init = new_initiative(headline, text)
+    init["note"] = "Owner directive (voice memo)"
+    init["origin"] = "owner"
+    state.setdefault("initiatives", []).insert(0, init)
+    log_event(state, f"owner directive: {headline}")
     return init
 
 
@@ -328,9 +528,14 @@ def advance_stage(state: dict, init: dict, runner, artifacts_root: Path) -> None
     they advance only via apply_gate (the owner's decision)."""
     stage = init["stage"]
 
+    directive = init.get("origin") == "owner"
+    mandate = (" This came straight from the Chairman as a directive — the "
+               "question is HOW to build it well, not whether to pursue it."
+               if directive else "")
+
     if stage == "research":
         reply = runner("research", role_prompt("research",
-            f"Initiative: {init['title']} — {init['pitch']}.\n"
+            f"Initiative: {init['title']} — {init['pitch']}.{mandate}\n"
             "Produce a focused research memo: market, competitors, target user, "
             "risks, and a recommended scope a tiny team ships in days. Be concrete."))
         log_minute(init, "research", "research", reply)
@@ -348,7 +553,7 @@ def advance_stage(state: dict, init: dict, runner, artifacts_root: Path) -> None
             log_minute(init, "boardroom", role, reply)
             transcript += f"\n{role.upper()}: {reply}"
         verdict = runner("ceo", role_prompt("ceo",
-            f"Initiative: {init['title']}.\nBoard debate:\n{transcript}\n"
+            f"Initiative: {init['title']}.{mandate}\nBoard debate:\n{transcript}\n"
             "Write a 5-line decision brief for the owner: WHAT we'd build, WHY now, "
             "WHO works on it, EFFORT estimate, and any board dissent. "
             "End with your recommendation: GREENLIGHT or PASS."))
@@ -524,6 +729,10 @@ def tick(state: dict, runner, artifacts_root: Path, now: float | None = None) ->
     config = state["config"]
     if not state["enabled"]:
         return []
+    if state.get("task_mode"):
+        # Kanban List is on — the team focuses on the owner's task backlog
+        # (worked in run_task_work), not on scouting/advancing their own ideas.
+        return []
     hour = datetime.fromtimestamp(now).hour
     if is_quiet(hour, config["quiet_start"], config["quiet_end"]):
         return []
@@ -560,4 +769,7 @@ def tick(state: dict, runner, artifacts_root: Path, now: float | None = None) ->
             events.append(f"scout failed: {error}")
         if scouted is not None:
             events.append(f"scouted new initiative {scouted['id']}: {scouted['title']}")
+
+    for event in events:
+        log_event(state, event)   # persist to the activity feed
     return events

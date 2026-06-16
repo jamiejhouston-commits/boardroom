@@ -74,6 +74,8 @@ def prewarm_hermes() -> None:
 COMPANY_STATE_PATH = Path.home() / ".hermes" / "mobile-company.json"
 # Deliverables go somewhere the owner can SEE — Finder, not a dotfolder.
 COMPANY_ARTIFACTS_ROOT = Path.home() / "Documents" / "Boardroom"
+# Kanban tasks share one workspace so a list of jobs accumulates on one codebase.
+COMPANY_TASKS_WORKSPACE = COMPANY_ARTIFACTS_ROOT / "task-list-workspace"
 COMPANY_LOCK = threading.Lock()
 _CONFIG_LOCK = threading.Lock()   # serializes RelayConfigStore writes
 
@@ -424,6 +426,7 @@ def ship_in_background(initiative_id: str) -> None:
                 return
             init["repo_url"] = url or ""
             init["note"] = note
+            company_module.log_event(state, f"{init['title']}: {note}")
             company_module.CompanyStore(COMPANY_STATE_PATH).save(state)
 
     def run() -> None:
@@ -462,6 +465,7 @@ def run_autonomous_meeting() -> None:
         state.setdefault("meetings", []).insert(0, meeting)
         state["meetings"] = state["meetings"][:20]   # keep the last 20
         state["last_meeting"] = time.time()
+        company_module.log_event(state, f"meeting started: {topic}")
         store.save(state)
     meeting_id = meeting["id"]
     print(f"company - meeting started: {topic}", flush=True)
@@ -536,6 +540,192 @@ def run_owner_meeting_response(meeting_id: str, owner_text: str) -> None:
         store.save(s)
 
 
+def run_company_ask(ask_id: str, question: str) -> None:
+    """Owner asked the company a question — the board answers (saved live so the
+    app can show each leader as they land), then the CEO synthesizes one answer.
+    Background, like meetings."""
+    store = company_module.CompanyStore(COMPANY_STATE_PATH)
+    with COMPANY_LOCK:
+        state = store.load()
+        roles = company_module.ask_panel(state, question)
+    print(f"company - ask started: {question[:60]}", flush=True)
+
+    def append_contribution(role: str, text: str) -> None:
+        with COMPANY_LOCK:
+            s = store.load()
+            for ask in s.get("asks", []):
+                if ask["id"] == ask_id:
+                    ask["contributions"].append({"role": role, "text": text.strip()})
+                    break
+            store.save(s)
+
+    transcript = ""
+    try:
+        for role in roles:
+            prompt = company_module.ask_prompt(role, question, transcript, state)
+            text = company_cli_runner(role, prompt).strip() or "(no comment)"
+            append_contribution(role, text)
+            transcript += f"\n{role.upper()}: {text}"
+        answer = company_cli_runner(
+            "ceo", company_module.ask_synthesis_prompt(question, transcript)).strip()
+    except Exception as error:  # noqa: BLE001 — never let the ask thread die silently
+        answer = ""
+        print(f"company - ask failed: {error}", flush=True)
+
+    with COMPANY_LOCK:
+        s = store.load()
+        for ask in s.get("asks", []):
+            if ask["id"] == ask_id:
+                ask["answer"] = answer or "Couldn't reach the team — try again."
+                ask["status"] = "done"
+                break
+        company_module.log_event(s, f"answered: {question[:50]}")
+        store.save(s)
+    print(f"company - ask done: {question[:60]}", flush=True)
+
+
+def run_scheduled_meeting(topic: str) -> None:
+    """A scheduled office-hours meeting fires — convene leadership and run the
+    turns live (the owner gets the 'team is meeting' ping and can join by voice
+    in the Meeting Room). Mirrors the autonomous meeting, minus the cadence gate."""
+    store = company_module.CompanyStore(COMPANY_STATE_PATH)
+    roles = ["ceo", "cfo", "cto", "marketing"]
+    with COMPANY_LOCK:
+        state = store.load()
+        if any(m.get("status") == "live" for m in state.get("meetings", [])):
+            return   # never stack on a live meeting
+        meeting = company_module.new_meeting(topic, roles)
+        state.setdefault("meetings", []).insert(0, meeting)
+        state["meetings"] = state["meetings"][:20]
+        state["last_meeting"] = time.time()
+        company_module.log_event(state, f"office hours: {topic}")
+        store.save(state)
+    meeting_id = meeting["id"]
+    print(f"company - office hours started: {topic}", flush=True)
+
+    def append_turn(role: str, text: str) -> None:
+        with COMPANY_LOCK:
+            s = store.load()
+            for m in s.get("meetings", []):
+                if m["id"] == meeting_id:
+                    m["turns"].append({"role": role, "text": text.strip(),
+                                       "ts": time.strftime("%H:%M")})
+                    break
+            store.save(s)
+
+    transcript = ""
+    try:
+        for role in roles:
+            prompt = company_module.meeting_turn_prompt(meeting, role, transcript, state)
+            text = company_cli_runner(role, prompt).strip() or "(no comment)"
+            append_turn(role, text)
+            transcript += f"\n{role.upper()}: {text}"
+    except Exception as error:  # noqa: BLE001
+        print(f"company - office hours turn failed: {error}", flush=True)
+    with COMPANY_LOCK:
+        s = store.load()
+        for m in s.get("meetings", []):
+            if m["id"] == meeting_id:
+                m["status"] = "done"
+                break
+        store.save(s)
+    print(f"company - office hours concluded: {topic}", flush=True)
+
+
+def run_schedules() -> None:
+    """Fire any owner automations that are due — recurring directives, asks, and
+    office-hours meetings (the Cron). Runs each heartbeat; gated on enabled."""
+    store = company_module.CompanyStore(COMPANY_STATE_PATH)
+    asks_to_run: list[tuple[str, str]] = []
+    meetings_to_run: list[str] = []
+    with COMPANY_LOCK:
+        state = store.load()
+        if not state.get("enabled"):
+            return
+        due = company_module.due_schedules(state, time.time())
+        if not due:
+            return
+        now = time.time()
+        for sched in due:
+            sched["last_fired"] = now
+            if sched["kind"] == "ask":
+                ask = company_module.new_ask(sched["text"])
+                state.setdefault("asks", []).insert(0, ask)
+                state["asks"] = state["asks"][:20]
+                asks_to_run.append((ask["id"], sched["text"]))
+            elif sched["kind"] == "meeting":
+                meetings_to_run.append(sched["text"] or sched["title"])
+            else:  # directive
+                company_module.seed_initiative(state, sched["text"])
+            company_module.log_event(state, f"scheduled {sched['kind']}: {sched['title']}")
+        store.save(state)
+    for ask_id, question in asks_to_run:
+        threading.Thread(target=run_company_ask, args=(ask_id, question), daemon=True).start()
+        print(f"company - scheduled ask: {question[:50]}", flush=True)
+    for topic in meetings_to_run:
+        threading.Thread(target=run_scheduled_meeting, args=(topic,), daemon=True).start()
+        print(f"company - scheduled office hours: {topic[:50]}", flush=True)
+
+
+def run_task_work() -> None:
+    """Kanban List mode: the team works through the owner's task backlog instead
+    of their own ideas — one task per heartbeat, To Do → In Progress → Done,
+    saved live so the board updates in the app. Mirrors the meeting pattern:
+    persist 'In Progress' under the lock, run the slow builder OUTSIDE it, then
+    reload-by-id and persist the result."""
+    store = company_module.CompanyStore(COMPANY_STATE_PATH)
+    with COMPANY_LOCK:
+        state = store.load()
+        if not state.get("enabled") or not state.get("task_mode"):
+            return
+        task = company_module.next_task(state)
+        if task is None:
+            return
+        task_id = task["id"]
+        text = task["text"]
+        if task["status"] == "todo":
+            task["status"] = "doing"
+            task["attempts"] = task.get("attempts", 0) + 1
+            company_module.log_event(state, f"started task: {text[:60]}")
+            store.save(state)          # makes 'In Progress' show immediately
+        attempts = task.get("attempts", 1)
+    print(f"company - task started: {text[:60]}", flush=True)
+
+    outdir = COMPANY_TASKS_WORKSPACE
+    outdir.mkdir(parents=True, exist_ok=True)
+    existing = sorted(str(p) for p in outdir.rglob("*") if p.is_file())
+    prompt = company_module.task_build_prompt(text, existing, outdir)
+    try:
+        report = company_cli_runner("builder", prompt).strip() or "(done)"
+    except Exception as error:  # noqa: BLE001 — a bad task must not wedge the queue
+        with COMPANY_LOCK:
+            s = store.load()
+            task = company_module.find_task(s, task_id)
+            if task is not None:
+                if attempts >= company_module.MAX_TASK_ATTEMPTS:
+                    task["status"] = "done"   # parked so the queue moves on
+                    task["result"] = f"⚠ couldn't complete after {attempts} tries: {error}"
+                    company_module.log_event(s, f"task parked (failed): {text[:60]}")
+                else:
+                    task["status"] = "todo"   # back to the queue to retry later
+                    task["result"] = f"retry pending ({attempts}): {error}"
+                store.save(s)
+        print(f"company - task failed ({attempts}): {error}", flush=True)
+        return
+
+    artifacts = sorted(str(p) for p in outdir.rglob("*") if p.is_file())
+    with COMPANY_LOCK:
+        s = store.load()
+        task = company_module.find_task(s, task_id)
+        if task is not None:
+            task["status"] = "done"
+            task["result"] = report[:600]
+            task["artifacts"] = artifacts
+            company_module.log_event(s, f"finished task: {text[:60]}")
+            store.save(s)
+    print(f"company - task done: {text[:60]}", flush=True)
+
+
 def company_summary(state: dict) -> dict:
     """State for the app: everything except the bulky transcripts/minutes."""
     slim = []
@@ -557,6 +747,11 @@ def company_summary(state: dict) -> dict:
         "last_tick": state["last_tick"],
         "initiatives": slim,
         "meetings": meetings,
+        "events": state.get("events", [])[-30:],   # activity feed
+        "tasks": state.get("tasks", []),            # Kanban backlog
+        "task_mode": state.get("task_mode", False), # "Kanban List" toggle
+        "asks": state.get("asks", [])[:10],         # Ask-the-company Q&A (newest first)
+        "schedules": state.get("schedules", []),    # owner automations (the Cron)
     }
 
 
@@ -564,6 +759,13 @@ def find_meeting(state: dict, meeting_id: str) -> dict | None:
     for m in state.get("meetings", []):
         if m["id"] == meeting_id:
             return m
+    return None
+
+
+def find_ask(state: dict, ask_id: str) -> dict | None:
+    for ask in state.get("asks", []):
+        if ask["id"] == ask_id:
+            return ask
     return None
 
 
@@ -585,6 +787,11 @@ def company_heartbeat_loop() -> None:
                 print(f"company - {event}", flush=True)
             # The org also meets among itself on a cadence — visible/live in the app.
             run_autonomous_meeting()
+            # Kanban List mode: work the owner's task backlog (self-gates on the
+            # enabled + task_mode flags; no-op when the toggle is off).
+            run_task_work()
+            # Owner automations (the Cron): fire due directives/asks.
+            run_schedules()
         except Exception as error:  # noqa: BLE001 — the pulse must survive anything
             print(f"company - heartbeat error: {error}", flush=True)
         time.sleep(60)
@@ -670,13 +877,31 @@ class RelayHandler(BaseHTTPRequestHandler):
             else:
                 self.send_json(meeting)
             return
+        if self.path.startswith("/company/ask/"):
+            if not self.is_authorized():
+                self.send_json({"error": "unauthorized"}, status=401)
+                return
+            ask_id = self.path.rsplit("/", 1)[-1]
+            store = company_module.CompanyStore(COMPANY_STATE_PATH)
+            with COMPANY_LOCK:
+                ask = find_ask(store.load(), ask_id)
+            if ask is None:
+                self.send_json({"error": "not_found"}, status=404)
+            else:
+                self.send_json(ask)
+            return
         self.send_json({"error": "not_found"}, status=404)
 
     def do_POST(self) -> None:
         is_meeting_say = self.path.startswith("/company/meeting/") and self.path.endswith("/say")
         if self.path not in {"/chat", "/chat/stream", "/tts",
                              "/company/start", "/company/halt", "/company/gate",
-                             "/company/iterate"} and not is_meeting_say:
+                             "/company/iterate", "/company/directive", "/company/ask",
+                             "/company/thesis",
+                             "/company/tasks", "/company/tasks/mode",
+                             "/company/tasks/clear", "/company/task/delete",
+                             "/company/schedules", "/company/schedule/delete",
+                             "/company/schedule/toggle"} and not is_meeting_say:
             self.send_json({"error": "not_found"}, status=404)
             return
 
@@ -714,6 +939,27 @@ class RelayHandler(BaseHTTPRequestHandler):
             self.send_bytes(audio, "audio/wav")
             return
 
+        if self.path == "/company/ask":
+            try:
+                question = str(self.read_json().get("question", "")).strip()
+            except Exception as error:
+                self.send_json({"error": f"invalid_json: {error}"}, status=400)
+                return
+            if not question:
+                self.send_json({"error": "question_required"}, status=400)
+                return
+            store = company_module.CompanyStore(COMPANY_STATE_PATH)
+            with COMPANY_LOCK:
+                state = store.load()
+                ask = company_module.new_ask(question)
+                state.setdefault("asks", []).insert(0, ask)
+                state["asks"] = state["asks"][:20]   # keep the last 20
+                store.save(state)
+            threading.Thread(target=run_company_ask,
+                             args=(ask["id"], question), daemon=True).start()
+            self.send_json(ask)
+            return
+
         if self.path.startswith("/company/"):
             # /company/halt needs no body — never let an empty POST block the
             # kill switch. start/gate parse a body but tolerate an empty one.
@@ -741,6 +987,50 @@ class RelayHandler(BaseHTTPRequestHandler):
                             str(body.get("id", "")),
                             str(body.get("instruction", "")),
                         )
+                    elif self.path == "/company/directive":
+                        # Owner pitched an idea (often a voice memo) — seed it
+                        # as an initiative the team researches and brings to gate.
+                        company_module.seed_initiative(state, str(body.get("text", "")))
+                    elif self.path == "/company/thesis":
+                        # Set the investment thesis without toggling the company
+                        # on (used by Genesis 2.0 setup).
+                        state["thesis"] = str(body.get("thesis", ""))
+                    elif self.path == "/company/tasks":
+                        # Owner hands the team a Kanban backlog. Accepts a list
+                        # ({"tasks": [...]}) or one item ({"text": "..."}).
+                        texts = body.get("tasks")
+                        if not isinstance(texts, list):
+                            texts = [body.get("text", "")]
+                        company_module.add_tasks(state, [str(t) for t in texts])
+                    elif self.path == "/company/tasks/mode":
+                        # The "Kanban List" toggle: on = work the owner's list.
+                        company_module.set_task_mode(state, bool(body.get("on", True)))
+                    elif self.path == "/company/schedules":
+                        state.setdefault("schedules", []).append(
+                            company_module.new_schedule(
+                                str(body.get("title", "")),
+                                str(body.get("kind", "directive")),
+                                str(body.get("text", "")),
+                                str(body.get("cadence", "daily")),
+                                int(body.get("at_hour", 9)),
+                                int(body.get("at_minute", 0)),
+                                int(body.get("weekday", 0))))
+                    elif self.path == "/company/schedule/delete":
+                        sid = str(body.get("id", ""))
+                        state["schedules"] = [s for s in state.get("schedules", [])
+                                              if s.get("id") != sid]
+                    elif self.path == "/company/schedule/toggle":
+                        sid = str(body.get("id", ""))
+                        for s in state.get("schedules", []):
+                            if s.get("id") == sid:
+                                s["enabled"] = bool(body.get("enabled", not s.get("enabled", True)))
+                    elif self.path == "/company/tasks/clear":
+                        state["tasks"] = [t for t in state.get("tasks", [])
+                                          if t.get("status") != "done"]
+                    elif self.path == "/company/task/delete":
+                        task_id = str(body.get("id", ""))
+                        state["tasks"] = [t for t in state.get("tasks", [])
+                                          if t.get("id") != task_id]
                     else:  # /company/gate
                         gated = company_module.apply_gate(
                             state,

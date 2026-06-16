@@ -9,14 +9,17 @@ import SwiftUI
 /// the office") animate the AR robots too.
 struct ARHeadquartersView: View {
     @EnvironmentObject private var org: OrgStore
+    @EnvironmentObject private var company: CompanyStore
+    @EnvironmentObject private var runtime: HermesRuntimeController
     @Environment(\.dismiss) private var dismiss
     @State private var placed = false
     @State private var selectedAgent: OrgAgent?
+    private let statusTicker = Timer.publish(every: 20, on: .main, in: .common).autoconnect()
 
     var body: some View {
         ZStack {
             if ARWorldTrackingConfiguration.isSupported {
-                ARHeadquartersContainer(agents: org.leadership, placed: $placed) { agentID in
+                ARHeadquartersContainer(agents: org.leadership, status: company.snapshot, placed: $placed) { agentID in
                     selectedAgent = org.agent(id: agentID)
                 }
                 .ignoresSafeArea()
@@ -80,6 +83,10 @@ struct ARHeadquartersView: View {
             NavigationStack { AgentChatView(agent: agent) }
         }
         .statusBarHidden()
+        .task { await company.refresh(relay: runtime.relayConfiguration) }
+        .onReceive(statusTicker) { _ in
+            Task { await company.refresh(relay: runtime.relayConfiguration) }
+        }
     }
 }
 
@@ -87,11 +94,12 @@ struct ARHeadquartersView: View {
 
 private struct ARHeadquartersContainer: UIViewRepresentable {
     let agents: [OrgAgent]
+    let status: CompanySnapshot
     @Binding var placed: Bool
     var onSelectAgent: (String) -> Void
 
     func makeCoordinator() -> Coordinator {
-        Coordinator(agents: agents, onSelectAgent: onSelectAgent) { placed = $0 }
+        Coordinator(agents: agents, status: status, onSelectAgent: onSelectAgent) { placed = $0 }
     }
 
     func makeUIView(context: Context) -> ARSCNView {
@@ -122,7 +130,9 @@ private struct ARHeadquartersContainer: UIViewRepresentable {
         return view
     }
 
-    func updateUIView(_ uiView: ARSCNView, context: Context) {}
+    func updateUIView(_ uiView: ARSCNView, context: Context) {
+        context.coordinator.updateStatus(status)
+    }
 
     static func dismantleUIView(_ uiView: ARSCNView, coordinator: Coordinator) {
         uiView.session.pause()
@@ -131,15 +141,78 @@ private struct ARHeadquartersContainer: UIViewRepresentable {
     @MainActor
     final class Coordinator: NSObject {
         private let agents: [OrgAgent]
+        private var status: CompanySnapshot
         private let onSelectAgent: (String) -> Void
         private let onPlaced: (Bool) -> Void
         private weak var view: ARSCNView?
         private var companyRoot: SCNNode?
 
-        init(agents: [OrgAgent], onSelectAgent: @escaping (String) -> Void, onPlaced: @escaping (Bool) -> Void) {
+        init(agents: [OrgAgent], status: CompanySnapshot,
+             onSelectAgent: @escaping (String) -> Void, onPlaced: @escaping (Bool) -> Void) {
             self.agents = agents
+            self.status = status
             self.onSelectAgent = onSelectAgent
             self.onPlaced = onPlaced
+        }
+
+        // MARK: Live status board (floats above the HQ, always faces you)
+
+        /// Refresh the board whenever the company snapshot changes.
+        func updateStatus(_ snapshot: CompanySnapshot) {
+            status = snapshot
+            guard let board = companyRoot?.childNode(withName: "status-board", recursively: true),
+                  let material = board.geometry?.firstMaterial else { return }
+            let image = Self.statusBoardImage(snapshot)
+            material.diffuse.contents = image
+            material.emission.contents = image
+        }
+
+        private func makeStatusBoard() -> SCNNode {
+            let plane = SCNPlane(width: 5.4, height: 2.7)
+            plane.cornerRadius = 0.18
+            let material = SCNMaterial()
+            let image = Self.statusBoardImage(status)
+            material.diffuse.contents = image
+            material.emission.contents = image          // self-lit so it reads in any AR lighting
+            material.isDoubleSided = true
+            material.lightingModel = .constant
+            plane.firstMaterial = material
+            let node = SCNNode(geometry: plane)
+            node.name = "status-board"
+            node.position = SCNVector3(0, 3.6, -1.0)
+            node.constraints = [SCNBillboardConstraint()]  // always faces the viewer
+            return node
+        }
+
+        private static func statusBoardImage(_ s: CompanySnapshot) -> UIImage {
+            let size = CGSize(width: 520, height: 260)
+            let accent = s.pendingGates > 0
+                ? UIColor(red: 0.78, green: 0.64, blue: 0.35, alpha: 1)
+                : UIColor(red: 0.11, green: 0.48, blue: 0.33, alpha: 1)
+            return UIGraphicsImageRenderer(size: size).image { ctx in
+                let cg = ctx.cgContext
+                let bg = UIBezierPath(roundedRect: CGRect(origin: .zero, size: size), cornerRadius: 26)
+                UIColor(red: 0.05, green: 0.08, blue: 0.13, alpha: 0.96).setFill()
+                bg.fill()
+
+                ("BOARDROOM" as NSString).draw(at: CGPoint(x: 26, y: 20), withAttributes: [
+                    .font: UIFont.systemFont(ofSize: 20, weight: .black),
+                    .foregroundColor: UIColor.white.withAlphaComponent(0.65), .kern: 3])
+                (s.enabled ? accent : UIColor.gray).setFill()
+                cg.fillEllipse(in: CGRect(x: 474, y: 24, width: 18, height: 18))
+
+                (s.statusLine as NSString).draw(at: CGPoint(x: 26, y: 58), withAttributes: [
+                    .font: UIFont.systemFont(ofSize: 30, weight: .bold), .foregroundColor: accent])
+                (s.headline as NSString).draw(in: CGRect(x: 26, y: 104, width: 468, height: 66), withAttributes: [
+                    .font: UIFont.systemFont(ofSize: 25, weight: .semibold), .foregroundColor: UIColor.white])
+                (s.detail as NSString).draw(at: CGPoint(x: 26, y: 174), withAttributes: [
+                    .font: UIFont.systemFont(ofSize: 19), .foregroundColor: UIColor.white.withAlphaComponent(0.6)])
+                let stats = "To Do \(s.tasksTodo)   ·   Building \(s.tasksDoing)   ·   Done \(s.tasksDone)"
+                    + (s.pendingGates > 0 ? "   ·   \(s.pendingGates) waiting" : "")
+                (stats as NSString).draw(at: CGPoint(x: 26, y: 214), withAttributes: [
+                    .font: UIFont.systemFont(ofSize: 17, weight: .semibold),
+                    .foregroundColor: UIColor.white.withAlphaComponent(0.85)])
+            }
         }
 
         func attach(to view: ARSCNView) {
@@ -243,6 +316,9 @@ private struct ARHeadquartersContainer: UIViewRepresentable {
             pm.lightingModel = .physicallyBased
             plate.geometry?.firstMaterial = pm
             root.addChildNode(plate)
+
+            // Live company status, floating above the HQ.
+            root.addChildNode(makeStatusBoard())
 
             return root
         }
