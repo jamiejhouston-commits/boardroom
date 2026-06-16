@@ -172,12 +172,12 @@ private enum RoomDioramaBuilder {
     private static func addCamera(to scene: SCNScene) {
         let camera = SCNCamera()
         camera.usesOrthographicProjection = true
-        camera.orthographicScale = 1.55
+        camera.orthographicScale = 1.85          // wider frame for the bigger room
         let node = SCNNode()
         node.camera = camera
-        node.position = SCNVector3(3.2, 3.0, 3.2)
+        node.position = SCNVector3(3.8, 3.5, 3.8)
         let target = SCNNode()
-        target.position = SCNVector3(0, 0.55, -0.2)
+        target.position = SCNVector3(0, 0.7, -0.2)
         scene.rootNode.addChildNode(target)
         node.constraints = [SCNLookAtConstraint(target: target)]
         scene.rootNode.addChildNode(node)
@@ -214,10 +214,12 @@ private enum RoomDioramaBuilder {
     // MARK: Shell (floor + walls, role-tinted)
 
     private static func addShell(to scene: SCNScene, accent: UIColor, role: Role) {
-        // Per-role floor finish.
+        // Per-role floor finish. (Executive gets pale polished marble — luxury.)
         let floorMat: SCNMaterial
         switch role {
-        case .executive, .legal:
+        case .executive:
+            floorMat = pbr(diffuse: UIColor(red: 0.20, green: 0.20, blue: 0.22, alpha: 1), metalness: 0.3, roughness: 0.12) // polished marble
+        case .legal:
             floorMat = pbr(diffuse: UIColor(red: 0.16, green: 0.115, blue: 0.08, alpha: 1), metalness: 0.05, roughness: 0.35) // walnut
         case .engineering, .operations:
             floorMat = pbr(diffuse: UIColor(red: 0.07, green: 0.085, blue: 0.1, alpha: 1), metalness: 0.7, roughness: 0.3)   // tech plate
@@ -226,7 +228,8 @@ private enum RoomDioramaBuilder {
         default:
             floorMat = pbr(diffuse: UIColor(red: 0.06, green: 0.09, blue: 0.12, alpha: 1), metalness: 0.6, roughness: 0.3)   // dark glass
         }
-        let floor = SCNNode(geometry: SCNBox(width: 2.4, height: 0.08, length: 2.4, chamferRadius: 0.02))
+        // Bigger footprint + taller ceiling = spacious, not a cramped box.
+        let floor = SCNNode(geometry: SCNBox(width: 2.9, height: 0.08, length: 2.9, chamferRadius: 0.02))
         floor.position = SCNVector3(0, -0.04, 0)
         floor.geometry?.firstMaterial = floorMat
         scene.rootNode.addChildNode(floor)
@@ -237,24 +240,24 @@ private enum RoomDioramaBuilder {
         let wallColor = UIColor(hue: h, saturation: s * 0.25, brightness: 0.14, alpha: 1)
         let wall = pbr(diffuse: wallColor, metalness: 0.3, roughness: 0.6)
 
-        let back = SCNNode(geometry: SCNBox(width: 2.4, height: 1.9, length: 0.08, chamferRadius: 0))
-        back.position = SCNVector3(0, 0.9, -1.16)
+        let back = SCNNode(geometry: SCNBox(width: 2.9, height: 2.3, length: 0.08, chamferRadius: 0))
+        back.position = SCNVector3(0, 1.1, -1.41)
         back.geometry?.firstMaterial = wall
         scene.rootNode.addChildNode(back)
 
-        let left = SCNNode(geometry: SCNBox(width: 0.08, height: 1.9, length: 2.4, chamferRadius: 0))
-        left.position = SCNVector3(-1.16, 0.9, 0)
+        let left = SCNNode(geometry: SCNBox(width: 0.08, height: 2.3, length: 2.9, chamferRadius: 0))
+        left.position = SCNVector3(-1.41, 1.1, 0)
         left.geometry?.firstMaterial = wall
         scene.rootNode.addChildNode(left)
 
         // Base trim — gold for the executive, accent for everyone else.
         let trimColor = role == .executive ? UIColor(red: 0.85, green: 0.7, blue: 0.4, alpha: 1) : accent
-        let trimA = SCNNode(geometry: SCNBox(width: 2.4, height: 0.03, length: 0.03, chamferRadius: 0))
-        trimA.position = SCNVector3(0, 0.02, 1.16)
+        let trimA = SCNNode(geometry: SCNBox(width: 2.9, height: 0.03, length: 0.03, chamferRadius: 0))
+        trimA.position = SCNVector3(0, 0.02, 1.41)
         trimA.geometry?.firstMaterial = glow(trimColor.withAlphaComponent(0.8))
         scene.rootNode.addChildNode(trimA)
-        let trimB = SCNNode(geometry: SCNBox(width: 0.03, height: 0.03, length: 2.4, chamferRadius: 0))
-        trimB.position = SCNVector3(1.16, 0.02, 0)
+        let trimB = SCNNode(geometry: SCNBox(width: 0.03, height: 0.03, length: 2.9, chamferRadius: 0))
+        trimB.position = SCNVector3(1.41, 0.02, 0)
         trimB.geometry?.firstMaterial = glow(trimColor.withAlphaComponent(0.8))
         scene.rootNode.addChildNode(trimB)
     }
@@ -263,9 +266,9 @@ private enum RoomDioramaBuilder {
 
     private static func addWallFeature(to scene: SCNScene, accent: UIColor, role: Role) {
         if role == .executive {
-            // Floor-to-ceiling window with the night skyline.
-            let window = SCNNode(geometry: SCNPlane(width: 1.9, height: 1.5))
-            window.position = SCNVector3(0.1, 1.0, -1.11)
+            // Grand floor-to-ceiling window with the night skyline.
+            let window = SCNNode(geometry: SCNPlane(width: 2.3, height: 1.85))
+            window.position = SCNVector3(0.1, 1.18, -1.36)
             let m = SCNMaterial()
             let sky = skylineMini()
             m.diffuse.contents = sky
@@ -276,16 +279,16 @@ private enum RoomDioramaBuilder {
             scene.rootNode.addChildNode(window)
 
             let gold = pbr(diffuse: UIColor(red: 0.62, green: 0.52, blue: 0.34, alpha: 1), metalness: 0.9, roughness: 0.25)
-            for x in [Float(-0.85), -0.22, 0.42, 1.05] {
-                let mull = SCNNode(geometry: SCNBox(width: 0.025, height: 1.5, length: 0.02, chamferRadius: 0))
-                mull.position = SCNVector3(x, 1.0, -1.10)
+            for x in [Float(-1.0), -0.35, 0.4, 1.15] {
+                let mull = SCNNode(geometry: SCNBox(width: 0.025, height: 1.85, length: 0.02, chamferRadius: 0))
+                mull.position = SCNVector3(x, 1.18, -1.35)
                 mull.geometry?.firstMaterial = gold
                 scene.rootNode.addChildNode(mull)
             }
         } else {
             // Drawn role dashboard on the wall.
             let panel = SCNNode(geometry: SCNPlane(width: 1.15, height: 0.72))
-            panel.position = SCNVector3(0.35, 1.1, -1.11)
+            panel.position = SCNVector3(0.35, 1.2, -1.36)
             let m = SCNMaterial()
             let tex = wallTexture(role: role, accent: accent)
             m.diffuse.contents = tex
@@ -296,7 +299,7 @@ private enum RoomDioramaBuilder {
             scene.rootNode.addChildNode(panel)
 
             let frame = SCNNode(geometry: SCNBox(width: 1.22, height: 0.79, length: 0.02, chamferRadius: 0.01))
-            frame.position = SCNVector3(0.35, 1.1, -1.13)
+            frame.position = SCNVector3(0.35, 1.2, -1.38)
             frame.geometry?.firstMaterial = pbr(diffuse: UIColor(white: 0.08, alpha: 1), metalness: 0.8, roughness: 0.3)
             scene.rootNode.addChildNode(frame)
         }
@@ -434,8 +437,8 @@ private enum RoomDioramaBuilder {
 
         // Window with the city on the left wall (where it doesn't fight a board).
         if role != .operations && role != .research && role != .executive {
-            let window = SCNNode(geometry: SCNPlane(width: 0.85, height: 0.6))
-            window.position = SCNVector3(-1.11, 1.05, 0.45)
+            let window = SCNNode(geometry: SCNPlane(width: 0.95, height: 0.7))
+            window.position = SCNVector3(-1.36, 1.12, 0.45)
             window.eulerAngles.y = .pi / 2
             let m = SCNMaterial()
             let sky = skylineMini()
@@ -445,16 +448,19 @@ private enum RoomDioramaBuilder {
             m.lightingModel = .constant
             window.geometry?.firstMaterial = m
             scene.rootNode.addChildNode(window)
-            let frame = SCNNode(geometry: SCNBox(width: 0.03, height: 0.66, length: 0.91, chamferRadius: 0.01))
-            frame.position = SCNVector3(-1.13, 1.05, 0.45)
+            let frame = SCNNode(geometry: SCNBox(width: 0.03, height: 0.76, length: 1.01, chamferRadius: 0.01))
+            frame.position = SCNVector3(-1.38, 1.12, 0.45)
             frame.geometry?.firstMaterial = pbr(diffuse: UIColor(white: 0.12, alpha: 1), metalness: 0.6, roughness: 0.35)
             scene.rootNode.addChildNode(frame)
         }
 
-        // Small sofa against the back wall (roles whose corner is free).
-        if [Role.executive, .marketing, .people, .design, .generic, .research].contains(role) {
+        // Lounge seating against the back wall. The executive (GM) gets a
+        // proper, larger sofa + a coffee table; other roles get a tidy loveseat.
+        if role == .executive {
+            scene.rootNode.addChildNode(executiveLounge(h: h, s: s))
+        } else if [Role.marketing, .people, .design, .generic, .research].contains(role) {
             let sofa = SCNNode()
-            sofa.position = SCNVector3(0.78, 0, -0.92)
+            sofa.position = SCNVector3(0.85, 0, -1.15)
             let base = SCNNode(geometry: SCNBox(width: 0.62, height: 0.18, length: 0.3, chamferRadius: 0.04))
             base.position = SCNVector3(0, 0.13, 0)
             base.geometry?.firstMaterial = pbr(diffuse: UIColor(hue: h, saturation: s * 0.4, brightness: 0.3, alpha: 1),
@@ -492,16 +498,73 @@ private enum RoomDioramaBuilder {
 
         // A piece of wall art beside the role screen.
         let art = SCNNode(geometry: SCNPlane(width: 0.3, height: 0.38))
-        art.position = SCNVector3(-0.72, 1.15, -1.11)
+        art.position = SCNVector3(-0.78, 1.25, -1.36)
         let artMat = SCNMaterial()
         artMat.diffuse.contents = UIColor(hue: h, saturation: s * 0.45, brightness: 0.42, alpha: 1)
         artMat.lightingModel = .constant
         art.geometry?.firstMaterial = artMat
         scene.rootNode.addChildNode(art)
         let artFrame = SCNNode(geometry: SCNBox(width: 0.34, height: 0.42, length: 0.015, chamferRadius: 0.005))
-        artFrame.position = SCNVector3(-0.72, 1.15, -1.13)
+        artFrame.position = SCNVector3(-0.78, 1.25, -1.38)
         artFrame.geometry?.firstMaterial = pbr(diffuse: UIColor(red: 0.55, green: 0.45, blue: 0.3, alpha: 1), metalness: 0.7, roughness: 0.35)
         scene.rootNode.addChildNode(artFrame)
+    }
+
+    /// The GM's lounge — a long leather sofa with gold feet + a glass-and-gold
+    /// coffee table. The executive office's centerpiece comfort.
+    private static func executiveLounge(h: CGFloat, s: CGFloat) -> SCNNode {
+        let lounge = SCNNode()
+        lounge.position = SCNVector3(0.7, 0, -1.02)
+        let leather = pbr(diffuse: UIColor(red: 0.18, green: 0.13, blue: 0.10, alpha: 1), metalness: 0.1, roughness: 0.5)
+        let gold = pbr(diffuse: UIColor(red: 0.82, green: 0.67, blue: 0.34, alpha: 1), metalness: 0.9, roughness: 0.25)
+
+        let base = SCNNode(geometry: SCNBox(width: 1.0, height: 0.2, length: 0.42, chamferRadius: 0.05))
+        base.position = SCNVector3(0, 0.16, 0)
+        base.geometry?.firstMaterial = leather
+        lounge.addChildNode(base)
+        let backRest = SCNNode(geometry: SCNBox(width: 1.0, height: 0.34, length: 0.1, chamferRadius: 0.05))
+        backRest.position = SCNVector3(0, 0.4, -0.16)
+        backRest.geometry?.firstMaterial = leather
+        lounge.addChildNode(backRest)
+        for dx in [Float(-0.46), 0.46] {
+            let arm = SCNNode(geometry: SCNBox(width: 0.1, height: 0.28, length: 0.42, chamferRadius: 0.05))
+            arm.position = SCNVector3(dx, 0.34, 0)
+            arm.geometry?.firstMaterial = leather
+            lounge.addChildNode(arm)
+        }
+        let cushionMat = pbr(diffuse: UIColor(hue: h, saturation: s * 0.25, brightness: 0.22, alpha: 1),
+                             metalness: 0.1, roughness: 0.6)
+        for dx in [Float(-0.3), 0, 0.3] {
+            let cushion = SCNNode(geometry: SCNBox(width: 0.3, height: 0.08, length: 0.38, chamferRadius: 0.04))
+            cushion.position = SCNVector3(dx, 0.3, 0.01)
+            cushion.geometry?.firstMaterial = cushionMat
+            lounge.addChildNode(cushion)
+        }
+        for dx in [Float(-0.44), 0.44] {
+            for dz in [Float(-0.16), 0.16] {
+                let foot = SCNNode(geometry: SCNCylinder(radius: 0.022, height: 0.08))
+                foot.position = SCNVector3(dx, 0.04, dz)
+                foot.geometry?.firstMaterial = gold
+                lounge.addChildNode(foot)
+            }
+        }
+        // Glass + gold coffee table in front of the sofa.
+        let table = SCNNode()
+        table.position = SCNVector3(0, 0, 0.5)
+        let glass = SCNNode(geometry: SCNBox(width: 0.6, height: 0.03, length: 0.34, chamferRadius: 0.02))
+        glass.position = SCNVector3(0, 0.3, 0)
+        glass.geometry?.firstMaterial = pbr(diffuse: UIColor(red: 0.1, green: 0.14, blue: 0.16, alpha: 1), metalness: 0.3, roughness: 0.1)
+        table.addChildNode(glass)
+        for dx in [Float(-0.26), 0.26] {
+            for dz in [Float(-0.13), 0.13] {
+                let leg = SCNNode(geometry: SCNCylinder(radius: 0.012, height: 0.3))
+                leg.position = SCNVector3(dx, 0.15, dz)
+                leg.geometry?.firstMaterial = gold
+                table.addChildNode(leg)
+            }
+        }
+        lounge.addChildNode(table)
+        return lounge
     }
 
     // MARK: Role props — the furniture that makes each pod ITS pod
@@ -565,14 +628,14 @@ private enum RoomDioramaBuilder {
         case .operations:
             // Kanban board on the side wall + crates.
             let board = SCNNode(geometry: SCNPlane(width: 0.9, height: 0.6))
-            board.position = SCNVector3(-1.11, 1.0, 0.2)
+            board.position = SCNVector3(-1.36, 1.0, 0.2)
             board.eulerAngles.y = .pi / 2
             board.geometry?.firstMaterial = pbr(diffuse: UIColor(white: 0.12, alpha: 1), metalness: 0.2, roughness: 0.6)
             scene.rootNode.addChildNode(board)
             for col in 0..<3 {
                 for card in 0..<(3 - col % 2) {
                     let note = SCNNode(geometry: SCNPlane(width: 0.2, height: 0.1))
-                    note.position = SCNVector3(-1.10, 1.2 - Float(card) * 0.15, -0.05 + Float(col) * 0.26)
+                    note.position = SCNVector3(-1.35, 1.2 - Float(card) * 0.15, -0.05 + Float(col) * 0.26)
                     note.eulerAngles.y = .pi / 2
                     note.geometry?.firstMaterial = glow(accent.withAlphaComponent(0.55))
                     scene.rootNode.addChildNode(note)
@@ -595,7 +658,7 @@ private enum RoomDioramaBuilder {
             tripod.position = SCNVector3(0.85, 0.25, 0.55)
             scene.rootNode.addChildNode(tripod)
             let strip = SCNNode(geometry: SCNBox(width: 0.04, height: 0.5, length: 1.4, chamferRadius: 0.01))
-            strip.position = SCNVector3(-1.1, 0.55, 0.2)
+            strip.position = SCNVector3(-1.35, 0.55, 0.2)
             strip.geometry?.firstMaterial = glow(accent.withAlphaComponent(0.35))
             scene.rootNode.addChildNode(strip)
 
@@ -632,7 +695,7 @@ private enum RoomDioramaBuilder {
         case .research:
             // Whiteboard on the side wall + magnifier on desk.
             let board = SCNNode(geometry: SCNPlane(width: 0.95, height: 0.62))
-            board.position = SCNVector3(-1.11, 1.0, 0.2)
+            board.position = SCNVector3(-1.36, 1.0, 0.2)
             board.eulerAngles.y = .pi / 2
             board.geometry?.firstMaterial = pbr(diffuse: UIColor(white: 0.85, alpha: 1), metalness: 0, roughness: 0.6)
             scene.rootNode.addChildNode(board)
@@ -641,7 +704,7 @@ private enum RoomDioramaBuilder {
             for _ in 0..<10 {
                 let dot = SCNNode(geometry: SCNSphere(radius: 0.014))
                 dot.geometry?.firstMaterial = glow(accent)
-                dot.position = SCNVector3(-1.095, 0.75 + rnd() * 0.5, -0.2 + rnd() * 0.8)
+                dot.position = SCNVector3(-1.345, 0.75 + rnd() * 0.5, -0.2 + rnd() * 0.8)
                 scene.rootNode.addChildNode(dot)
             }
             let ring = SCNNode(geometry: SCNTorus(ringRadius: 0.07, pipeRadius: 0.013))

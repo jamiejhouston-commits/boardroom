@@ -136,6 +136,8 @@ private struct ARHeadquartersContainer: UIViewRepresentable {
 
     static func dismantleUIView(_ uiView: ARSCNView, coordinator: Coordinator) {
         uiView.session.pause()
+        // Stop the office-life timer (it retains the coordinator via target:self).
+        Task { @MainActor in coordinator.stopOfficeLife() }
     }
 
     @MainActor
@@ -146,6 +148,20 @@ private struct ARHeadquartersContainer: UIViewRepresentable {
         private let onPlaced: (Bool) -> Void
         private weak var view: ARSCNView?
         private var companyRoot: SCNNode?
+        private var lifeTimer: Timer?
+        private var busyPods = Set<String>()
+        private var pendingVisits: [PendingVisit] = []
+
+        /// An agent currently away from its desk visiting another office; we
+        /// reparent it home once `returnAt` passes (checked on the life timer —
+        /// keeps everything on the main actor, no SCNAction completion closures).
+        private struct PendingVisit {
+            let robot: SCNNode
+            let parent: SCNNode
+            let transform: SCNMatrix4
+            let podID: String
+            let returnAt: Date
+        }
 
         init(agents: [OrgAgent], status: CompanySnapshot,
              onSelectAgent: @escaping (String) -> Void, onPlaced: @escaping (Bool) -> Void) {
@@ -240,6 +256,7 @@ private struct ARHeadquartersContainer: UIViewRepresentable {
                 view.scene.rootNode.addChildNode(root)
                 companyRoot = root
                 onPlaced(true)
+                startOfficeLife()
             } else {
                 // Tap a robot/pod → wave + open its chat.
                 let hits = view.hitTest(location, options: [.searchMode: SCNHitTestSearchMode.all.rawValue])
@@ -282,13 +299,103 @@ private struct ARHeadquartersContainer: UIViewRepresentable {
             AgentRobot.perform(command, on: robot, home: robot.position)
         }
 
+        // MARK: Autonomous office life — agents move on their own
+
+        /// Once the HQ is placed, the office comes alive: every few seconds a
+        /// random agent gets up and paces, stretches, or wanders — no input
+        /// needed. Makes the company feel staffed and busy when you walk around.
+        private func startOfficeLife() {
+            lifeTimer?.invalidate()
+            // Target/selector fires on the main run loop — no Sendable closure.
+            lifeTimer = Timer.scheduledTimer(timeInterval: 6.5, target: self,
+                                             selector: #selector(ambientTick),
+                                             userInfo: nil, repeats: true)
+        }
+
+        func stopOfficeLife() {
+            lifeTimer?.invalidate()
+            lifeTimer = nil
+            pendingVisits.removeAll()
+            busyPods.removeAll()
+        }
+
+        @objc private func ambientTick() {
+            guard let root = companyRoot else { return }
+            returnFinishedVisitors()
+
+            let pods = root.childNodes { node, _ in (node.name ?? "").hasPrefix("pod-") }
+            // ~1 in 3 ticks: send an agent across the floor to visit another office.
+            if pods.count >= 2, Int.random(in: 0..<3) == 0 {
+                startVisit(among: pods, in: root)
+                return
+            }
+            // Otherwise: a quick in-place stretch, wave, or pace at the desk.
+            let robots = root.childNodes { node, _ in node.name == "robotRoot" }
+            guard !robots.isEmpty else { return }
+            let actors = Int.random(in: 0..<5) == 0 ? 2 : 1
+            for robot in robots.shuffled().prefix(actors) {
+                let roll = Int.random(in: 0..<10)
+                let command: RobotCommand = roll < 6 ? .walk : (roll < 9 ? .wave : .dance)
+                AgentRobot.perform(command, on: robot, home: robot.position)
+            }
+        }
+
+        /// One agent gets up, walks across the floor to another office, huddles
+        /// (a few seconds, as if talking), then walks back. The robot is briefly
+        /// reparented into HQ space so it can travel between rooms.
+        private func startVisit(among pods: [SCNNode], in root: SCNNode) {
+            let free = pods.filter { !busyPods.contains($0.name ?? "") }.shuffled()
+            guard free.count >= 2,
+                  let podID = free[0].name,
+                  let robot = free[0].childNode(withName: "robotRoot", recursively: true)
+            else { return }
+            let host = free[1]
+
+            // Reparent into HQ space, preserving the robot's current world pose.
+            let world = robot.worldTransform
+            let parent = robot.parent ?? free[0]
+            let originalTransform = robot.transform
+            root.addChildNode(robot)
+            robot.transform = root.convertTransform(world, from: nil)
+
+            let start = robot.position
+            // Land in the "street" in front of the host office, not inside its walls.
+            let target = SCNVector3(host.position.x * 0.55, start.y, host.position.z + 0.9)
+            let heading = atan2(target.x - start.x, target.z - start.z)
+
+            let faceThere = SCNAction.rotateTo(x: 0, y: CGFloat(heading), z: 0, duration: 0.4, usesShortestUnitArc: true)
+            let walkThere = SCNAction.move(to: target, duration: 3.0)
+            walkThere.timingMode = .easeInEaseOut
+            let huddle = SCNAction.wait(duration: 3.0)
+            let faceBack = SCNAction.rotateTo(x: 0, y: CGFloat(heading + .pi), z: 0, duration: 0.4, usesShortestUnitArc: true)
+            let walkBack = SCNAction.move(to: start, duration: 3.0)
+            walkBack.timingMode = .easeInEaseOut
+            robot.runAction(.sequence([faceThere, walkThere, huddle, faceBack, walkBack]), forKey: "command")
+
+            busyPods.insert(podID)
+            pendingVisits.append(PendingVisit(robot: robot, parent: parent, transform: originalTransform,
+                                              podID: podID, returnAt: Date().addingTimeInterval(11)))
+        }
+
+        /// Reparent any visitor whose round-trip has finished back to its desk.
+        private func returnFinishedVisitors() {
+            let now = Date()
+            pendingVisits = pendingVisits.filter { visit in
+                guard now >= visit.returnAt else { return true }
+                visit.parent.addChildNode(visit.robot)
+                visit.robot.transform = visit.transform
+                busyPods.remove(visit.podID)
+                return false
+            }
+        }
+
         // MARK: Build the HQ — a street of office pods
 
         private func buildCompany() -> SCNNode {
             let root = SCNNode()
             root.name = "hermes-hq"
             let columns = 2
-            let spacing: Float = 3.1
+            let spacing: Float = 3.9   // roomier — offices no longer crammed together
 
             for (i, agent) in agents.enumerated() {
                 let pod = CompanyPod.node(for: agent)
