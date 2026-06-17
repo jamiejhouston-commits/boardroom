@@ -137,6 +137,10 @@ No random cloud agent account is required. Your iPhone talks to your Mac. Your M
 
 ## Architecture
 
+For the editable system architecture diagram, see [`docs/architecture/`](docs/architecture/).
+
+![Boardroom architecture](docs/architecture/boardroom-architecture-preview.png)
+
 ```mermaid
 flowchart TD
     Phone[iPhone App<br/>SwiftUI Boardroom UI]

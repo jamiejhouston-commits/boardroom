@@ -369,14 +369,15 @@ def ship_commands(outdir: Path, slug: str) -> list[list[str]]:
     """Commands that publish an initiative's deliverables as a PRIVATE repo
     on the owner's GitHub account. Private by design — the owner reviews and
     flips it public themselves if and when they choose."""
+    outdir_arg = outdir.as_posix()
     return [
-        ["git", "-C", str(outdir), "init", "-b", "main"],
-        ["git", "-C", str(outdir), "add", "-A"],
-        ["git", "-C", str(outdir),
+        ["git", "-C", outdir_arg, "init", "-b", "main"],
+        ["git", "-C", outdir_arg, "add", "-A"],
+        ["git", "-C", outdir_arg,
          "-c", "user.name=Boardroom", "-c", "user.email=boardroom@localhost",
          "commit", "-m", f"Ship: {slug} — built by the Boardroom company", "--allow-empty"],
         ["gh", "repo", "create", slug, "--private",
-         "--source", str(outdir), "--push"],
+         "--source", outdir_arg, "--push"],
     ]
 
 
