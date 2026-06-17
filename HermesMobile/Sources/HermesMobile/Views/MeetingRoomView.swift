@@ -7,6 +7,9 @@ import UIKit
 
 struct MeetingRoomSceneView: UIViewRepresentable {
     var attendees: [OrgAgent]
+    var avatar: UserAvatar = .default
+    var onSelectAgent: (String) -> Void = { _ in }
+    var onSelectScreen: (String) -> Void = { _ in }
 
     func makeCoordinator() -> Coordinator { Coordinator() }
 
@@ -16,12 +19,23 @@ struct MeetingRoomSceneView: UIViewRepresentable {
         view.antialiasingMode = .multisampling4X
         view.allowsCameraControl = true
         view.isPlaying = true
-        view.scene = MeetingSceneBuilder.scene(attendees: attendees)
-        context.coordinator.attach(to: view, ids: attendees.map(\.id))
+        view.scene = MeetingSceneBuilder.scene(attendees: attendees, avatar: avatar)
+        context.coordinator.avatar = avatar
+        context.coordinator.onSelectScreen = onSelectScreen
+        context.coordinator.attach(to: view, ids: attendees.map(\.id), onSelect: onSelectAgent)
         return view
     }
 
     func updateUIView(_ uiView: SCNView, context: Context) {
+        context.coordinator.onSelectAgent = onSelectAgent
+        context.coordinator.onSelectScreen = onSelectScreen
+        // The avatar changed (customized) → rebuild so "you" update at the table.
+        if avatar != context.coordinator.avatar {
+            context.coordinator.avatar = avatar
+            uiView.scene = MeetingSceneBuilder.scene(attendees: attendees, avatar: avatar)
+            context.coordinator.attach(to: uiView, ids: attendees.map(\.id), onSelect: onSelectAgent)
+            return
+        }
         let ids = attendees.map(\.id)
         let old = context.coordinator.ids
         guard ids != old else { return }
@@ -32,23 +46,76 @@ struct MeetingRoomSceneView: UIViewRepresentable {
             context.coordinator.ids = ids
             context.coordinator.walkOut(removed)
         } else {
-            uiView.scene = MeetingSceneBuilder.scene(attendees: attendees)
-            context.coordinator.attach(to: uiView, ids: ids)
+            uiView.scene = MeetingSceneBuilder.scene(attendees: attendees, avatar: avatar)
+            context.coordinator.attach(to: uiView, ids: ids, onSelect: onSelectAgent)
         }
     }
 
     /// Tracks attendees and lights up the speaking agent's seat console
     /// during a live debate.
-    final class Coordinator: NSObject {
+    @MainActor
+    final class Coordinator: NSObject, UIGestureRecognizerDelegate {
         var ids: [String] = []
+        var avatar: UserAvatar = .default
+        var onSelectAgent: ((String) -> Void)?
+        var onSelectScreen: ((String) -> Void)?
         private weak var view: SCNView?
+        private var tapRecognizer: UITapGestureRecognizer?
 
-        func attach(to view: SCNView, ids: [String]) {
+        func attach(to view: SCNView, ids: [String], onSelect: @escaping (String) -> Void) {
             self.view = view
             self.ids = ids
+            self.onSelectAgent = onSelect
+            // Add OUR tap recognizer exactly once — tracked by reference, NOT by
+            // "is there any tap recognizer", because allowsCameraControl adds its
+            // own tap recognizers and that check made ours never get installed.
+            if tapRecognizer == nil {
+                let tap = UITapGestureRecognizer(target: self, action: #selector(tapped(_:)))
+                tap.delegate = self
+                tap.cancelsTouchesInView = false
+                view.addGestureRecognizer(tap)
+                tapRecognizer = tap
+            }
             NotificationCenter.default.removeObserver(self)
             NotificationCenter.default.addObserver(self, selector: #selector(speakerChanged(_:)),
                                                    name: .hermesDebateSpeaker, object: nil)
+        }
+
+        /// Tap a seat (robot, console, dot, halo, or nameplate) → talk to that agent.
+        @objc private func tapped(_ gesture: UITapGestureRecognizer) {
+            guard let view else { return }
+            let point = gesture.location(in: view)
+            let hits = view.hitTest(point, options: [.searchMode: SCNHitTestSearchMode.all.rawValue])
+            for hit in hits {
+                var node: SCNNode? = hit.node
+                while let current = node {
+                    if let name = current.name {
+                        if name == "screen-minutes" || name == "screen-vault" {
+                            onSelectScreen?(name)
+                            return
+                        }
+                        if let id = Self.agentID(from: name) {
+                            onSelectAgent?(id)
+                            return
+                        }
+                    }
+                    node = current.parent
+                }
+            }
+        }
+
+        private static func agentID(from name: String) -> String? {
+            for prefix in ["robot-", "console-", "dot-", "plate-", "halo-"] where name.hasPrefix(prefix) {
+                let id = String(name.dropFirst(prefix.count))
+                return id == "__user__" ? nil : id
+            }
+            return nil
+        }
+
+        // Fire our tap even though SceneKit's camera control has its own recognizers.
+        func gestureRecognizer(_ gestureRecognizer: UIGestureRecognizer,
+                               shouldRecognizeSimultaneouslyWith other: UIGestureRecognizer) -> Bool {
+            true
         }
 
         @objc private func speakerChanged(_ note: Notification) {
@@ -71,6 +138,18 @@ struct MeetingRoomSceneView: UIViewRepresentable {
                     } else {
                         node.removeAction(forKey: "speak")
                         node.scale = SCNVector3(1, 1, 1)
+                    }
+                } else if name.hasPrefix("halo-") {
+                    // The glowing halo over whoever is talking — clear "who's speaking".
+                    let isSpeaking = name == "halo-\(speakingID)"
+                    node.removeAction(forKey: "halofade")
+                    node.runAction(.fadeOpacity(to: isSpeaking ? 1.0 : 0.0, duration: 0.3), forKey: "halofade")
+                    if isSpeaking {
+                        if node.action(forKey: "halospin") == nil {
+                            node.runAction(.repeatForever(.rotateBy(x: 0, y: .pi * 2, z: 0, duration: 6)), forKey: "halospin")
+                        }
+                    } else {
+                        node.removeAction(forKey: "halospin")
                     }
                 }
             }
@@ -112,7 +191,7 @@ private enum MeetingSceneBuilder {
     private static let teal = UIColor(red: 0.16, green: 0.78, blue: 0.84, alpha: 1)
     private static let emerald = UIColor(red: 0.18, green: 0.78, blue: 0.55, alpha: 1)
 
-    static func scene(attendees: [OrgAgent]) -> SCNScene {
+    static func scene(attendees: [OrgAgent], avatar: UserAvatar) -> SCNScene {
         let scene = SCNScene()
 
         scene.lightingEnvironment.contents = environmentMap()
@@ -131,6 +210,7 @@ private enum MeetingSceneBuilder {
         addDoor(to: scene)
         addTable(to: scene)
         addSeating(attendees, to: scene)
+        addUserSeat(avatar, to: scene)
         addPlants(to: scene)
         return scene
     }
@@ -170,10 +250,10 @@ private enum MeetingSceneBuilder {
         let node = SCNNode()
         node.camera = camera
         node.position = SCNVector3(0, 5.3, 6.3)
-        let target = SCNNode()
-        target.position = SCNVector3(0, 0.85, -0.55)
-        scene.rootNode.addChildNode(target)
-        node.constraints = [SCNLookAtConstraint(target: target)]
+        // Orient toward the table ONCE (baked), not with a live SCNLookAtConstraint.
+        // A live constraint + allowsCameraControl fight over the up-vector the first
+        // time a gesture engages the camera controller — that's the upside-down flip.
+        node.look(at: SCNVector3(0, 0.85, -0.55))
         scene.rootNode.addChildNode(node)
     }
 
@@ -275,14 +355,17 @@ private enum MeetingSceneBuilder {
         base.geometry?.firstMaterial = glow(teal.withAlphaComponent(0.6))
         scene.rootNode.addChildNode(base)
 
-        // Two big dashboard screens with REAL drawn content.
+        // Two big dashboard screens with REAL drawn content — tap to open the
+        // Decision Vault (left) or live Meeting Minutes (right).
         addScreen(to: scene, texture: dashboardTexture(title: "Q2 STRATEGY REVIEW", style: .strategy),
-                  center: SCNVector3(1.55, 2.05, -4.04), size: CGSize(width: 2.7, height: 1.55))
+                  center: SCNVector3(1.55, 2.05, -4.04), size: CGSize(width: 2.7, height: 1.55),
+                  tapName: "screen-minutes")
         addScreen(to: scene, texture: dashboardTexture(title: "OPERATIONS PULSE", style: .operations),
-                  center: SCNVector3(-1.55, 2.05, -4.04), size: CGSize(width: 2.7, height: 1.55))
+                  center: SCNVector3(-1.55, 2.05, -4.04), size: CGSize(width: 2.7, height: 1.55),
+                  tapName: "screen-vault")
     }
 
-    private static func addScreen(to scene: SCNScene, texture: UIImage, center: SCNVector3, size: CGSize) {
+    private static func addScreen(to scene: SCNScene, texture: UIImage, center: SCNVector3, size: CGSize, tapName: String) {
         // Bezel
         let bezel = SCNNode(geometry: SCNBox(width: size.width + 0.08, height: size.height + 0.08, length: 0.06, chamferRadius: 0.02))
         bezel.position = SCNVector3(center.x, center.y, center.z - 0.02)
@@ -293,6 +376,7 @@ private enum MeetingSceneBuilder {
         // Panel — emissive texture so it reads as a lit display.
         let panel = SCNNode(geometry: SCNPlane(width: size.width, height: size.height))
         panel.position = SCNVector3(center.x, center.y, center.z + 0.012)
+        panel.name = tapName               // tappable → opens minutes / vault
         let m = SCNMaterial()
         m.diffuse.contents = texture
         m.emission.contents = texture
@@ -424,10 +508,11 @@ private enum MeetingSceneBuilder {
 
     private static func addSeating(_ attendees: [OrgAgent], to scene: SCNScene) {
         // The render shows a full ring of chairs; keep the room looking staffed
-        // even with few attendees. Attendee seats get their accent on the console.
+        // even with few attendees. The +0.5 step leaves the front-centre gap for
+        // the user's own seat (added separately).
         let seats = max(attendees.count, 12)
         for i in 0..<seats {
-            let a = Float(i) / Float(seats) * Float.pi * 2
+            let a = (Float(i) + 0.5) / Float(seats) * Float.pi * 2
 
             let chair = chairNode()
             chair.position = SCNVector3(2.35 * sin(a), 0, 2.35 * cos(a))
@@ -463,7 +548,83 @@ private enum MeetingSceneBuilder {
                 robot.eulerAngles.y = a + .pi
                 robot.name = "robot-\(attendees[i].id)"
                 scene.rootNode.addChildNode(robot)
+
+                // Neat floating nameplate so you know who's who at a glance.
+                let plate = SCNNode(geometry: SCNPlane(width: 0.6, height: 0.165))
+                plate.position = SCNVector3(2.02 * sin(a), 1.18, 2.02 * cos(a))
+                let pm = SCNMaterial()
+                let tex = nameplateTexture(name: attendees[i].name, accent: accent)
+                pm.diffuse.contents = tex
+                pm.emission.contents = tex
+                pm.emission.intensity = 0.9
+                pm.lightingModel = .constant
+                pm.isDoubleSided = true
+                plate.geometry?.firstMaterial = pm
+                plate.constraints = [SCNBillboardConstraint()]   // always faces you
+                plate.name = "plate-\(attendees[i].id)"
+                scene.rootNode.addChildNode(plate)
+
+                // Speaker halo — hidden until this agent is the one talking.
+                let halo = SCNNode(geometry: SCNTorus(ringRadius: 0.17, pipeRadius: 0.02))
+                halo.position = SCNVector3(2.18 * sin(a), 1.0, 2.18 * cos(a))
+                halo.eulerAngles.x = .pi / 2
+                halo.geometry?.firstMaterial = glow(emerald)
+                halo.opacity = 0
+                halo.name = "halo-\(attendees[i].id)"
+                scene.rootNode.addChildNode(halo)
             }
+        }
+    }
+
+    /// The owner's own seat at the front of the table (nearest the camera),
+    /// with their customizable human avatar.
+    private static func addUserSeat(_ avatar: UserAvatar, to scene: SCNScene) {
+        let a: Float = 0   // front-centre, the gap left by addSeating
+
+        let chair = chairNode()
+        chair.position = SCNVector3(2.35 * sin(a), 0, 2.35 * cos(a))
+        chair.eulerAngles.y = a
+        scene.rootNode.addChildNode(chair)
+
+        let person = UserAvatarBuilder.node(for: avatar)
+        person.scale = SCNVector3(0.5, 0.5, 0.5)
+        person.position = SCNVector3(2.18 * sin(a), 0.26, 2.18 * cos(a))
+        person.eulerAngles.y = a + .pi
+        person.name = "robot-__user__"
+        scene.rootNode.addChildNode(person)
+
+        let plate = SCNNode(geometry: SCNPlane(width: 0.4, height: 0.165))
+        plate.position = SCNVector3(2.02 * sin(a), 1.18, 2.02 * cos(a))
+        let pm = SCNMaterial()
+        let tex = nameplateTexture(name: "You", accent: emerald)
+        pm.diffuse.contents = tex
+        pm.emission.contents = tex
+        pm.emission.intensity = 0.9
+        pm.lightingModel = .constant
+        pm.isDoubleSided = true
+        plate.geometry?.firstMaterial = pm
+        plate.constraints = [SCNBillboardConstraint()]
+        scene.rootNode.addChildNode(plate)
+    }
+
+    /// Small, clean nameplate: dark chip, accent dot, name — no wall of text.
+    private static func nameplateTexture(name: String, accent: UIColor) -> UIImage {
+        let size = CGSize(width: 440, height: 120)
+        return UIGraphicsImageRenderer(size: size).image { ctx in
+            let c = ctx.cgContext
+            let chip = UIBezierPath(roundedRect: CGRect(x: 6, y: 26, width: size.width - 12, height: 68), cornerRadius: 34)
+            UIColor(red: 0.02, green: 0.05, blue: 0.07, alpha: 0.92).setFill(); chip.fill()
+            c.setStrokeColor(accent.withAlphaComponent(0.65).cgColor); c.setLineWidth(2); chip.stroke()
+            accent.setFill(); c.fillEllipse(in: CGRect(x: 34, y: 50, width: 20, height: 20))
+            let style = NSMutableParagraphStyle()
+            style.alignment = .center
+            style.lineBreakMode = .byTruncatingTail
+            let attrs: [NSAttributedString.Key: Any] = [
+                .font: UIFont.systemFont(ofSize: 34, weight: .semibold),
+                .foregroundColor: UIColor.white,
+                .paragraphStyle: style
+            ]
+            (name as NSString).draw(in: CGRect(x: 66, y: 38, width: size.width - 96, height: 46), withAttributes: attrs)
         }
     }
 
@@ -825,7 +986,12 @@ final class MeetingConversation: ObservableObject {
     @Published private(set) var messages: [ChatMessage] = []
     @Published private(set) var isSending = false
     @Published private(set) var attendees: [OrgAgent]
+    /// Set by tapping an agent at the table — the next message goes to them.
+    @Published var directedTarget: OrgAgent?
     private var introSent = Set<String>()
+
+    /// Tap-to-talk: address one agent directly.
+    func direct(to agent: OrgAgent) { directedTarget = agent }
 
     init(attendees: [OrgAgent]) {
         self.attendees = attendees
@@ -838,6 +1004,7 @@ final class MeetingConversation: ObservableObject {
         guard attendees.contains(where: { $0.id == agent.id }) else { return }
         attendees.removeAll { $0.id == agent.id }
         introSent.remove(agent.id)
+        if directedTarget?.id == agent.id { directedTarget = nil }
         messages.append(ChatMessage(author: .system,
             text: "\(agent.name) was removed from the meeting.", date: Date()))
     }
@@ -855,7 +1022,9 @@ final class MeetingConversation: ObservableObject {
             return
         }
 
-        let target = resolveTarget(trimmed)
+        // A tapped agent wins; otherwise route by what was said.
+        let target = directedTarget ?? resolveTarget(trimmed)
+        directedTarget = nil
         var config = base
         config.profile = target.profileSlug
 
@@ -878,6 +1047,10 @@ final class MeetingConversation: ObservableObject {
         messages.append(reply)
         let session = "hermes-mobile-meeting-\(target.id)"
 
+        // Light up the speaking agent's seat (halo + console) while they reply.
+        NotificationCenter.default.post(name: .hermesDebateSpeaker, object: nil,
+                                        userInfo: ["agentID": target.id])
+
         Task {
             do {
                 for try await event in HermesRelayClient(configuration: config).stream(payload, sessionKey: session, fast: true) {
@@ -895,6 +1068,9 @@ final class MeetingConversation: ObservableObject {
                 messages.append(ChatMessage(author: .system, text: error.localizedDescription, date: Date()))
             }
             isSending = false
+            // Clear the speaker glow when the reply finishes.
+            NotificationCenter.default.post(name: .hermesDebateSpeaker, object: nil,
+                                            userInfo: ["agentID": ""])
         }
     }
 
@@ -924,9 +1100,12 @@ struct MeetingRoomView: View {
     @EnvironmentObject private var hub: MeetingHub
     @EnvironmentObject private var company: CompanyStore
     @StateObject private var convo: MeetingConversation
+    @StateObject private var avatarStore = UserAvatarStore()
     @State private var draft = ""
     @State private var elapsed = 0
     @State private var showDebate = false
+    @State private var showCustomize = false
+    @State private var archiveSheet: ConferenceArchiveKind?
     @FocusState private var focused: Bool
 
     private let ticker = Timer.publish(every: 1, on: .main, in: .common).autoconnect()
@@ -945,7 +1124,18 @@ struct MeetingRoomView: View {
     var body: some View {
         VStack(spacing: 0) {
             ZStack {
-                MeetingRoomSceneView(attendees: attendees)
+                MeetingRoomSceneView(
+                    attendees: attendees,
+                    avatar: avatarStore.avatar,
+                    onSelectAgent: { id in
+                        if let agent = attendees.first(where: { $0.id == id }) {
+                            convo.direct(to: agent)
+                            focused = true
+                        }
+                    },
+                    onSelectScreen: { name in
+                        archiveSheet = (name == "screen-minutes") ? .minutes : .vault
+                    })
 
                 VStack {
                     HStack {
@@ -1011,7 +1201,24 @@ struct MeetingRoomView: View {
                 }
             }
 
-            ChatComposer(draft: $draft, focused: $focused, disabled: convo.isSending, placeholder: "Speak to the room") { attachments in
+            if let directed = convo.directedTarget {
+                HStack(spacing: 6) {
+                    Image(systemName: "arrow.turn.down.right").font(.caption2)
+                    Text("Talking to \(directed.name)").font(.caption.weight(.semibold))
+                    Spacer()
+                    Button { convo.directedTarget = nil } label: {
+                        Image(systemName: "xmark.circle.fill")
+                    }
+                    .foregroundStyle(.secondary)
+                }
+                .foregroundStyle(HermesTheme.emerald)
+                .padding(.horizontal, 14)
+                .padding(.vertical, 6)
+                .background(HermesTheme.emerald.opacity(0.12))
+            }
+
+            ChatComposer(draft: $draft, focused: $focused, disabled: convo.isSending,
+                         placeholder: convo.directedTarget.map { "Message \($0.name)" } ?? "Speak to the room") { attachments in
                 convo.send(draft, attachments: attachments, relay: runtime.relayConfiguration,
                            context: CompanyContext.brief(org: org, hub: hub, company: company))
                 draft = ""
@@ -1022,6 +1229,12 @@ struct MeetingRoomView: View {
         .navigationBarTitleDisplayMode(.inline)
         .toolbar {
             ToolbarItem(placement: .primaryAction) {
+                Button { showCustomize = true } label: {
+                    Label("Customize you", systemImage: "person.crop.circle.badge.plus")
+                }
+                .accessibilityLabel("Customize your seat")
+            }
+            ToolbarItem(placement: .primaryAction) {
                 Button { showDebate = true } label: {
                     Label("Debate", systemImage: "person.wave.2.fill")
                 }
@@ -1030,6 +1243,15 @@ struct MeetingRoomView: View {
         }
         .fullScreenCover(isPresented: $showDebate) {
             DebateView(attendees: attendees)
+        }
+        .sheet(isPresented: $showCustomize) {
+            AvatarCustomizeView(store: avatarStore)
+        }
+        .sheet(item: $archiveSheet) { kind in
+            switch kind {
+            case .minutes: MeetingMinutesView(messages: convo.messages, elapsed: elapsedText)
+            case .vault:   DecisionVaultView(initiatives: company.state.initiatives)
+            }
         }
         .onReceive(ticker) { _ in elapsed += 1 }
     }

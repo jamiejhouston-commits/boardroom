@@ -77,7 +77,7 @@ struct CommandCenterView: View {
                     Image(systemName: "staroflife.fill")
                         .font(.caption)
                         .foregroundStyle(HermesTheme.gold)
-                    Text("HERMES")
+                    Text("BOARDROOM")
                         .font(.headline.weight(.bold))
                         .tracking(5)
                         .foregroundStyle(HermesTheme.textPrimary)

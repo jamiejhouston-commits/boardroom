@@ -35,6 +35,9 @@ targets:
       properties:
         CFBundleDisplayName: Boardroom
         LSApplicationCategoryType: public.app-category.productivity
+        CFBundleURLTypes:
+          - CFBundleURLName: com.jamiehouston.boardroom
+            CFBundleURLSchemes: [boardroom]
         NSSupportsLiveActivities: true
         NSBonjourServices: [_hermes-relay._tcp]
         UIBackgroundModes: [fetch]

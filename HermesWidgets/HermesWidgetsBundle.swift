@@ -6,9 +6,82 @@ import WidgetKit
 struct HermesWidgetsBundle: WidgetBundle {
     var body: some Widget {
         CompanyStatusWidget()
+        LenaWidget()
         CompanyPulseLiveActivity()
         MeetingLiveActivity()
         DebateLiveActivity()
+    }
+}
+
+// MARK: - Ask Lena (home + lock screen → opens the app to your assistant)
+
+struct LenaEntry: TimelineEntry { let date: Date }
+
+struct LenaProvider: TimelineProvider {
+    func placeholder(in context: Context) -> LenaEntry { LenaEntry(date: Date()) }
+    func getSnapshot(in context: Context, completion: @escaping (LenaEntry) -> Void) {
+        completion(LenaEntry(date: Date()))
+    }
+    func getTimeline(in context: Context, completion: @escaping (Timeline<LenaEntry>) -> Void) {
+        completion(Timeline(entries: [LenaEntry(date: Date())], policy: .never))
+    }
+}
+
+struct LenaWidget: Widget {
+    var body: some WidgetConfiguration {
+        StaticConfiguration(kind: "LenaWidget", provider: LenaProvider()) { _ in
+            LenaWidgetView()
+        }
+        .configurationDisplayName("Ask Lena")
+        .description("Your personal assistant — one tap away.")
+        .supportedFamilies([.systemSmall, .accessoryCircular, .accessoryRectangular])
+    }
+}
+
+private struct LenaWidgetView: View {
+    @Environment(\.widgetFamily) private var family
+
+    var body: some View {
+        content
+            .widgetURL(URL(string: "boardroom://lena"))
+            .containerBackground(for: .widget) { container }
+    }
+
+    @ViewBuilder private var content: some View {
+        switch family {
+        case .accessoryCircular:
+            Image(systemName: "person.crop.circle.badge.checkmark")
+                .font(.title2).widgetAccentable()
+        case .accessoryRectangular:
+            HStack(spacing: 6) {
+                Image(systemName: "person.crop.circle.badge.checkmark").font(.title3)
+                VStack(alignment: .leading, spacing: 1) {
+                    Text("Lena").font(.headline)
+                    Text("Tap to talk").font(.caption2)
+                }
+            }
+            .widgetAccentable()
+        default:
+            VStack(alignment: .leading, spacing: 6) {
+                Image(systemName: "person.crop.circle.badge.checkmark")
+                    .font(.title).foregroundStyle(.white)
+                Spacer()
+                Text("Lena").font(.headline.weight(.bold)).foregroundStyle(.white)
+                Text("Your assistant — tap to talk")
+                    .font(.caption2).foregroundStyle(.white.opacity(0.75))
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+        }
+    }
+
+    @ViewBuilder private var container: some View {
+        switch family {
+        case .accessoryCircular, .accessoryRectangular, .accessoryInline:
+            Color.clear
+        default:
+            LinearGradient(colors: [Color(hexString: "7E4E9E"), Color(hexString: "3F2A57")],
+                           startPoint: .top, endPoint: .bottom)
+        }
     }
 }
 
