@@ -1,4 +1,5 @@
 import SwiftUI
+import UIKit
 
 /// The Chairman's room: the autonomous company at a glance.
 /// Initiatives flow research → boardroom → YOUR greenlight → build →
@@ -8,6 +9,7 @@ struct BoardroomView: View {
     @EnvironmentObject private var runtime: HermesRuntimeController
     @EnvironmentObject private var org: OrgStore
     @EnvironmentObject private var hub: MeetingHub
+    @EnvironmentObject private var archive: ArchiveStore
 
     @State private var thesisDraft = ""
     @State private var thesisLoaded = false
@@ -42,20 +44,35 @@ struct BoardroomView: View {
                 }
             }
 
-            let runningInitiatives = company.state.initiatives.filter { !$0.isAwaitingDecision && !$0.isTerminal }
+            let archivedIDs = archive.archivedIDs
+            let runningInitiatives = company.state.initiatives.filter {
+                !$0.isAwaitingDecision && !$0.isTerminal && !archivedIDs.contains($0.id)
+            }
             if !runningInitiatives.isEmpty {
                 Section("In motion") {
                     ForEach(runningInitiatives) { initiative in
                         initiativeCard(initiative)
+                            .swipeActions(edge: .trailing) {
+                                // Only blocked items are "done" enough to archive
+                                // from here — live builds keep working.
+                                if initiative.stage == "blocked" {
+                                    archiveButton(initiative)
+                                }
+                            }
                     }
                 }
             }
 
-            let history = company.state.initiatives.filter(\.isTerminal)
+            let history = company.state.initiatives.filter {
+                $0.isTerminal && !archivedIDs.contains($0.id)
+            }
             if !history.isEmpty {
                 Section("History") {
                     ForEach(history) { initiative in
                         initiativeCard(initiative)
+                            .swipeActions(edge: .trailing) {
+                                archiveButton(initiative)
+                            }
                     }
                 }
             }
@@ -142,6 +159,8 @@ struct BoardroomView: View {
             }
             .tint(HermesTheme.gold)
 
+            workingHours
+
             if company.taskMode && !company.state.enabled {
                 Label("Switch Company running on too — nobody works the list while it's halted.",
                       systemImage: "exclamationmark.triangle.fill")
@@ -165,6 +184,13 @@ struct BoardroomView: View {
             }
 
             NavigationLink {
+                RevenueDashboardView()
+            } label: {
+                Label("Revenue", systemImage: "dollarsign.circle.fill")
+                    .font(.subheadline.weight(.semibold))
+            }
+
+            NavigationLink {
                 AskCompanyView()
             } label: {
                 Label("Ask the company", systemImage: "bubble.left.and.text.bubble.right.fill")
@@ -180,6 +206,21 @@ struct BoardroomView: View {
                     Spacer()
                     if !company.schedules.isEmpty {
                         Text("\(company.schedules.filter(\.enabled).count) on")
+                            .font(.caption.weight(.bold))
+                            .foregroundStyle(.secondary)
+                    }
+                }
+            }
+
+            NavigationLink {
+                ArchiveView()
+            } label: {
+                HStack {
+                    Label("Archive", systemImage: "archivebox.fill")
+                        .font(.subheadline.weight(.semibold))
+                    Spacer()
+                    if !archive.archived.isEmpty {
+                        Text("\(archive.archived.count)")
                             .font(.caption.weight(.bold))
                             .foregroundStyle(.secondary)
                     }
@@ -288,6 +329,62 @@ struct BoardroomView: View {
         }
     }
 
+    // MARK: Working hours — owner sets the window (or 24/7)
+
+    private var aroundClock: Bool {
+        company.state.config.quietStart == company.state.config.quietEnd
+    }
+
+    @ViewBuilder
+    private var workingHours: some View {
+        Toggle(isOn: Binding(
+            get: { aroundClock },
+            set: { on in
+                Task {
+                    if on {
+                        await company.setWorkingHours(quietStart: 0, quietEnd: 0,
+                                                      relay: runtime.relayConfiguration)
+                    } else {
+                        await company.setWorkingHours(quietStart: 22, quietEnd: 7,
+                                                      relay: runtime.relayConfiguration)
+                    }
+                }
+            }
+        )) {
+            VStack(alignment: .leading, spacing: 2) {
+                Text("Work around the clock")
+                    .font(.subheadline.weight(.semibold))
+                Text(aroundClock ? "24/7 — no quiet hours" : "Quiet hours on — set the window below")
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+            }
+        }
+        .tint(HermesTheme.emerald)
+
+        if !aroundClock {
+            Picker("Pause from", selection: Binding(
+                get: { company.state.config.quietStart },
+                set: { value in
+                    Task { await company.setWorkingHours(quietStart: value,
+                                                         quietEnd: company.state.config.quietEnd,
+                                                         relay: runtime.relayConfiguration) }
+                }
+            )) {
+                ForEach(0..<24, id: \.self) { Text(String(format: "%02d:00", $0)).tag($0) }
+            }
+            Picker("Resume at", selection: Binding(
+                get: { company.state.config.quietEnd },
+                set: { value in
+                    Task { await company.setWorkingHours(quietStart: company.state.config.quietStart,
+                                                         quietEnd: value,
+                                                         relay: runtime.relayConfiguration) }
+                }
+            )) {
+                ForEach(0..<24, id: \.self) { Text(String(format: "%02d:00", $0)).tag($0) }
+            }
+        }
+    }
+
     private func saveThesisIfRunning() {
         guard company.state.enabled else { return }
         Task {
@@ -362,6 +459,15 @@ struct BoardroomView: View {
             }
             .padding(.vertical, 4)
         }
+    }
+
+    private func archiveButton(_ initiative: CompanyInitiative) -> some View {
+        Button {
+            archive.archive(initiative)
+        } label: {
+            Label("Archive", systemImage: "archivebox.fill")
+        }
+        .tint(HermesTheme.gold)
     }
 
     private func stagePill(_ initiative: CompanyInitiative) -> some View {
@@ -478,6 +584,26 @@ struct InitiativeDetailView: View {
     @State private var showMemo = false
     @State private var showIterate = false
     @State private var iterateText = ""
+    @State private var demoShots: [DemoShot] = []
+
+    struct DemoShot: Identifiable {
+        let id: String        // filename, e.g. "01-home.png"
+        let image: UIImage
+    }
+
+    /// The canned work order behind "Prepare App Store release" — everything
+    /// the team can do without the owner's credentials, and a plain list of
+    /// what still needs him (signing, App Store Connect, RevenueCat key).
+    static let releaseInstruction = """
+    Prepare this product for an App Store release. Do everything that doesn't \
+    need the owner's credentials: fastlane setup (Fastfile, Appfile, metadata \
+    folder), App Store metadata (name, subtitle, description, keywords, \
+    promotional text, privacy details), versioning/build-number automation, \
+    RevenueCat SDK wired in with a paywall and entitlement logic behind a \
+    clean abstraction, and a RELEASE.md checklist that lists — plainly — the \
+    exact steps only the owner can do (Apple signing, App Store Connect app \
+    creation, uploading, RevenueCat API key). Never fake a step you can't run.
+    """
 
     var body: some View {
         List {
@@ -496,6 +622,26 @@ struct InitiativeDetailView: View {
                         }
                     }
                     .padding(.vertical, 2)
+                }
+
+                if !demoShots.isEmpty {
+                    // Demo Day you can SEE: swipe through real screenshots the
+                    // builder captured, before deciding ship or kill.
+                    Section("Demo Day — see it before you ship") {
+                        TabView {
+                            ForEach(demoShots) { shot in
+                                Image(uiImage: shot.image)
+                                    .resizable()
+                                    .scaledToFit()
+                                    .clipShape(RoundedRectangle(cornerRadius: 12))
+                                    .padding(.vertical, 4)
+                            }
+                        }
+                        .tabViewStyle(.page)
+                        .indexViewStyle(.page(backgroundDisplayMode: .always))
+                        .frame(height: 400)
+                        .listRowBackground(Color.clear)
+                    }
                 }
 
                 if let minutes = detail.minutes, !minutes.isEmpty {
@@ -535,6 +681,22 @@ struct InitiativeDetailView: View {
                     } label: {
                         Label("Enter the 3D project room", systemImage: "cube.transparent")
                             .font(.subheadline.weight(.semibold))
+                    }
+                    if detail.stage == "shipped" {
+                        // The revenue loop's on-ramp: turn a shipped repo into
+                        // an App Store product. Same team, same codebase.
+                        Button {
+                            Task {
+                                await company.iterate(id: initiativeID,
+                                                      instruction: Self.releaseInstruction,
+                                                      relay: runtime.relayConfiguration)
+                                await load()
+                            }
+                        } label: {
+                            Label("Prepare App Store release", systemImage: "storefront.fill")
+                                .font(.subheadline.weight(.semibold))
+                                .foregroundStyle(HermesTheme.emerald)
+                        }
                     }
                     Button {
                         showIterate = true
@@ -607,8 +769,25 @@ struct InitiativeDetailView: View {
         if let fresh = await company.initiativeDetail(id: initiativeID,
                                                       relay: runtime.relayConfiguration) {
             detail = fresh
+            await loadDemoShots(stage: fresh.stage)
         } else if detail == nil {
             loadError = "Couldn't load this initiative — check your relay connection."
         }
+    }
+
+    /// Pull the builder's Demo Day screenshots once the product is far enough
+    /// along to have any. Failures just leave the gallery hidden.
+    private func loadDemoShots(stage: String) async {
+        guard ["demo_ready", "gate2", "shipped"].contains(stage), demoShots.isEmpty else { return }
+        let client = HermesRelayClient(configuration: runtime.relayConfiguration)
+        guard let files = try? await client.companyDemoFiles(id: initiativeID) else { return }
+        var shots: [DemoShot] = []
+        for file in files.prefix(8) where !file.hasSuffix(".mp4") {
+            if let data = try? await client.companyDemoImage(id: initiativeID, filename: file),
+               let image = UIImage(data: data) {
+                shots.append(DemoShot(id: file, image: image))
+            }
+        }
+        demoShots = shots
     }
 }

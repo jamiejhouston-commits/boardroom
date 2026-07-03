@@ -1053,7 +1053,11 @@ final class MeetingConversation: ObservableObject {
 
         Task {
             do {
-                for try await event in HermesRelayClient(configuration: config).stream(payload, sessionKey: session, fast: true) {
+                // fast: false — a meeting reply is TEXT and runs the FULL agent
+                // loop. fast:true caps the CLI at 2 turns (voice-latency only);
+                // any tool use then truncates the reply to EMPTY → "(no response)"
+                // in the Conference Room. Matches AgentChatView / CompanyChatView.
+                for try await event in HermesRelayClient(configuration: config).stream(payload, sessionKey: session, fast: false) {
                     switch event.type {
                     case .start: break
                     case .delta: appendTo(responseID, event.text ?? "")

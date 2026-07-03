@@ -5,6 +5,9 @@ import UserNotifications
 @main
 struct HermesMobileApp: App {
     @Environment(\.scenePhase) private var scenePhase
+    // Receives the APNs device token and hands it to the relay, so the
+    // company can reach the owner ANYWHERE — not just on the home Wi-Fi.
+    @UIApplicationDelegateAdaptor(PushRegistrar.self) private var pushRegistrar
 
     private static let companyRefreshTaskID = "com.jamiehouston.boardroom.companyRefresh"
 
@@ -24,6 +27,8 @@ struct HermesMobileApp: App {
     @StateObject private var meetingHub = MeetingHub()
     @StateObject private var briefings = BriefingCenter()
     @StateObject private var company = CompanyStore()
+    @StateObject private var packingStore = TravelPackingStore()
+    @StateObject private var archive = ArchiveStore()
 
     var body: some Scene {
         WindowGroup {
@@ -35,9 +40,12 @@ struct HermesMobileApp: App {
                 .environmentObject(meetingHub)
                 .environmentObject(briefings)
                 .environmentObject(company)
+                .environmentObject(packingStore)
+                .environmentObject(archive)
                 .task {
                     store.load()
                     runtime.boot()
+                    PushRegistrar.registerForPush()
                 }
         }
         .onChange(of: scenePhase) { _, phase in

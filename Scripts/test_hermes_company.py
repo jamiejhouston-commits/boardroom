@@ -18,7 +18,7 @@ class StateStoreTests(unittest.TestCase):
         self.assertEqual(state["thesis"], "")
         self.assertEqual(state["initiatives"], [])
         self.assertEqual(state["config"]["max_active"], 1)
-        self.assertEqual(state["config"]["budget_calls"], 40)
+        self.assertEqual(state["config"]["budget_calls"], 70)
         self.assertEqual(state["config"]["interval_minutes"], 30)
 
     def test_store_roundtrip(self):
@@ -61,10 +61,12 @@ class GuardrailTests(unittest.TestCase):
         a = company.new_initiative("A", "")            # research → working
         b = company.new_initiative("B", "")
         b["stage"] = "gate1"                            # active, not working
+        d = company.new_initiative("D", "")
+        d["stage"] = "blocked"                          # active, not working
         c = company.new_initiative("C", "")
         c["stage"] = "killed"                           # terminal
-        state["initiatives"] = [a, b, c]
-        self.assertEqual([i["id"] for i in company.active(state)], [a["id"], b["id"]])
+        state["initiatives"] = [a, b, d, c]
+        self.assertEqual([i["id"] for i in company.active(state)], [a["id"], b["id"], d["id"]])
         self.assertEqual([i["id"] for i in company.working(state)], [a["id"]])
 
     def test_charged_runner_counts_and_raises_over_budget(self):
@@ -114,6 +116,31 @@ class ScoutTests(unittest.TestCase):
         self.assertEqual(seen["role"], "research")
         self.assertIn("no crypto", seen["prompt"])
 
+    def test_run_scout_learns_from_killed_ideas(self):
+        state = company.new_state()
+        dead = company.new_initiative("Plant Watering Lite", "")
+        dead["stage"] = "killed"
+        state["initiatives"] = [dead]
+        seen = {}
+        def runner(role, prompt):
+            seen["prompt"] = prompt
+            return SCOUT_REPLY
+        company.run_scout(state, runner)
+        self.assertIn("REJECTED", seen["prompt"])            # rejection feedback loop
+        self.assertIn("Plant Watering Lite", seen["prompt"])
+        self.assertIn("pay", seen["prompt"].lower())         # demand evidence demanded
+
+    def test_run_scout_feeds_back_portfolio_revenue(self):
+        state = company.new_state()
+        state["revenue_brief"] = "MRR: $412.00 · Active Subscriptions: 61"
+        seen = {}
+        def runner(role, prompt):
+            seen["prompt"] = prompt
+            return SCOUT_REPLY
+        company.run_scout(state, runner)
+        self.assertIn("MRR: $412.00", seen["prompt"])
+        self.assertIn("PORTFOLIO PERFORMANCE", seen["prompt"])
+
     def test_run_scout_unparseable_returns_none(self):
         state = company.new_state()
         self.assertIsNone(company.run_scout(state, lambda r, p: "imagine no json"))
@@ -157,6 +184,15 @@ class StageMachineTests(unittest.TestCase):
         self.advance()
         self.assertEqual(self.init["stage"], "execution")
 
+    def advance_until(self, runner, target, limit=40):
+        """Drive the per-turn execution machine until the initiative reaches
+        `target` (execution now advances ONE agent turn per call)."""
+        for _ in range(limit):
+            if self.init["stage"] == target:
+                return
+            self.advance(runner)
+        self.fail(f"never reached {target}; stuck at {self.init['stage']}")
+
     def test_execution_builds_reviews_and_moves_to_demo_ready(self):
         self.init["stage"] = "execution"
         outdir = self.root / company.initiative_dirname(self.init)
@@ -168,9 +204,8 @@ class StageMachineTests(unittest.TestCase):
             outdir.mkdir(parents=True, exist_ok=True)
             (outdir / "report.md").write_text("done")
             return "Created report.md"
-        self.advance(runner)
-        self.assertEqual(self.init["stage"], "demo_ready")
-        self.assertIn("qa", roles)              # QA actually reviewed the build
+        self.advance_until(runner, "demo_ready")
+        self.assertEqual(roles, ["builder", "qa"])   # one turn per tick: build, then review
         self.assertEqual(len(self.init["artifacts"]), 1)
 
     def test_execution_loops_until_qa_passes(self):
@@ -184,21 +219,90 @@ class StageMachineTests(unittest.TestCase):
                 qa_calls["n"] += 1
                 return "VERDICT: SHIP" if qa_calls["n"] >= 2 else "VERDICT: REVISE\n1. fix it"
             return "built"
-        self.advance(runner)
+        self.advance_until(runner, "demo_ready")
         self.assertEqual(qa_calls["n"], 2)      # one REVISE round, then SHIP
         self.assertEqual(self.init["review_rounds"], 2)
+
+    def test_execution_resumes_at_saved_phase_after_a_crashed_turn(self):
+        # THE ship-blocker fix: a timed-out/crashed turn must cost ONE turn,
+        # not restart the whole build + QA loop from scratch.
+        self.init["stage"] = "execution"
+        outdir = self.root / company.initiative_dirname(self.init)
+        outdir.mkdir(parents=True, exist_ok=True)
+        (outdir / "f.txt").write_text("x")
+        roles = []
+        def ok(role, prompt):
+            roles.append(role)
+            return "VERDICT: SHIP" if role == "qa" else "built"
+        def boom(role, prompt):
+            raise RuntimeError("timed out after 1800 seconds")
+        self.advance(ok)                                  # build turn done
+        self.assertEqual(self.init["exec_phase"], "review")
+        with self.assertRaises(RuntimeError):
+            self.advance(boom)                            # QA turn dies
+        self.assertEqual(self.init["exec_phase"], "review")   # progress kept
+        self.advance(ok)                                  # QA retried, ships
         self.assertEqual(self.init["stage"], "demo_ready")
+        self.assertEqual(roles, ["builder", "qa"])        # build never re-ran
+
+    def test_execution_exhausts_rounds_and_ships_what_exists(self):
+        self.init["stage"] = "execution"
+        outdir = self.root / company.initiative_dirname(self.init)
+        outdir.mkdir(parents=True, exist_ok=True)
+        (outdir / "f.txt").write_text("x")
+        def runner(role, prompt):
+            return "VERDICT: REVISE\n1. more" if role == "qa" else "built"
+        self.advance_until(runner, "demo_ready")
+        self.assertEqual(self.init["review_rounds"], company.MAX_REVIEW_ROUNDS)
+
+    def test_budget_exhaustion_mid_review_still_reaches_demo_ready(self):
+        self.init["stage"] = "execution"
+        self.init["exec_phase"] = "review"
+        def runner(role, prompt):
+            raise company.BudgetExceeded("out of calls")
+        self.advance(runner)
+        self.assertEqual(self.init["stage"], "demo_ready")   # ship what exists
+
+    def test_qa_prompt_forbids_unverifiable_revise_reasons(self):
+        # QA may only vote on what it can verify on this machine; device-only
+        # checks go to the owner checklist instead of blocking the ship.
+        self.init["stage"] = "execution"
+        self.init["exec_phase"] = "review"
+        seen = {}
+        def runner(role, prompt):
+            seen["prompt"] = prompt
+            return "VERDICT: SHIP"
+        self.advance(runner)
+        self.assertIn("OWNER CHECKLIST", seen["prompt"])
 
     def test_review_passed_parsing(self):
         self.assertTrue(company.review_passed("looks great\nVERDICT: SHIP"))
         self.assertFalse(company.review_passed("VERDICT: REVISE\n1. x"))
         self.assertFalse(company.review_passed("no verdict at all"))
 
-    def test_demo_ready_writes_invite_brief_and_moves_to_gate2(self):
+    def test_demo_ready_captures_screenshots_then_invites(self):
         self.init["stage"] = "demo_ready"
-        self.advance(lambda r, p: "Demo Day: we built Trend Radar.")
+        roles = []
+        def runner(role, prompt):
+            roles.append(role)
+            return "Demo Day: we built Trend Radar." if role == "ceo" else "captured 3 shots"
+        self.advance(runner)                      # phase 1: builder captures demo
+        self.assertEqual(self.init["stage"], "demo_ready")
+        self.assertEqual(self.init["demo_phase"], "invite")
+        self.advance(runner)                      # phase 2: CEO writes the invite
         self.assertEqual(self.init["stage"], "gate2")
         self.assertIn("Demo Day", self.init["brief"])
+        self.assertEqual(roles, ["builder", "ceo"])
+
+    def test_demo_capture_prompt_demands_real_screenshots(self):
+        self.init["stage"] = "demo_ready"
+        seen = {}
+        def runner(role, prompt):
+            seen["prompt"] = prompt
+            return "ok"
+        self.advance(runner)
+        self.assertIn(".demo", seen["prompt"])
+        self.assertIn("NEVER fake", seen["prompt"])
 
 
 class GateTests(unittest.TestCase):
@@ -230,8 +334,12 @@ class GateTests(unittest.TestCase):
 
     def test_gate2_revise_returns_to_execution(self):
         self.init["stage"] = "gate2"
+        self.init["exec_phase"] = "review"
+        self.init["review_rounds"] = 6
         company.apply_gate(self.state, self.init["id"], "revise", "fix the report")
         self.assertEqual(self.init["stage"], "execution")
+        self.assertEqual(self.init["exec_phase"], "build")   # extend, fresh QA rounds
+        self.assertEqual(self.init["review_rounds"], 0)
 
     def test_gate_rejects_wrong_stage_and_unknown_id(self):
         self.init["stage"] = "research"
@@ -254,8 +362,13 @@ class TickTests(unittest.TestCase):
         self.state["enabled"] = True
         self.tmp = tempfile.TemporaryDirectory()
         self.root = Path(self.tmp.name)
+        # Tick behavior must not depend on the host's live load average —
+        # the credit-protection gate has its own tests (OverloadGateTests).
+        self._real_overloaded = company.machine_overloaded
+        company.machine_overloaded = lambda *a, **k: False
 
     def tearDown(self):
+        company.machine_overloaded = self._real_overloaded
         self.tmp.cleanup()
 
     def tick(self, runner=None, now=NOON):
@@ -292,12 +405,21 @@ class TickTests(unittest.TestCase):
         self.tick(runner=lambda r, p: "memo")
         self.assertEqual(init["stage"], "boardroom")
 
-    def test_budget_exhaustion_kills_initiative(self):
+    def test_advances_working_initiative_even_within_interval(self):
+        # Speed fix: in-flight work no longer waits out interval_minutes between
+        # stages — advancing is every heartbeat; only scouting stays throttled.
         init = company.new_initiative("A", "")
-        init["calls_used"] = 40
+        self.state["initiatives"] = [init]
+        self.state["last_tick"] = NOON - 60   # ticked a minute ago
+        self.tick(runner=lambda r, p: "memo")
+        self.assertEqual(init["stage"], "boardroom")
+
+    def test_budget_exhaustion_blocks_initiative(self):
+        init = company.new_initiative("A", "")
+        init["calls_used"] = 70
         self.state["initiatives"] = [init]
         self.tick(runner=lambda r, p: "memo")
-        self.assertEqual(init["stage"], "killed")
+        self.assertEqual(init["stage"], "blocked")
         self.assertIn("budget", init["note"])
 
     def test_runner_crash_stalls_initiative_not_heartbeat(self):
@@ -310,14 +432,15 @@ class TickTests(unittest.TestCase):
         self.assertEqual(bad["stage"], "research")  # unchanged, retried next tick
         self.assertTrue(events)
 
-    def test_repeated_stalls_kill_initiative(self):
+    def test_repeated_stalls_block_initiative(self):
         bad = company.new_initiative("Bad", "")
         bad["stall_count"] = company.MAX_STALLS - 1
         self.state["initiatives"] = [bad]
         def runner(role, prompt):
             raise RuntimeError("relay offline")
         self.tick(runner=runner)
-        self.assertEqual(bad["stage"], "killed")   # no 20-hour silent retry loop
+        self.assertEqual(bad["stage"], "blocked")   # no silent retry loop; no false business kill
+        self.assertIn("blocked after", bad["note"])
 
 
 class IterationTests(unittest.TestCase):
@@ -388,6 +511,163 @@ class MergeTickTests(unittest.TestCase):
         merged = company.merge_tick_results(self.current, self.ticked, self.before)
         self.assertEqual(merged["initiatives"][0]["id"], fresh["id"])
         self.assertEqual(len(merged["initiatives"]), 3)
+
+    def test_tick_events_reach_the_activity_feed(self):
+        # Events tick() logged used to be dropped by the merge — the log file
+        # saw "advanced/stalled/paused" but the app's feed NEVER did, so a
+        # hard-working company looked frozen to the owner.
+        company.log_event(self.ticked, "x1 advanced to execution (review)")
+        company.log_event(self.current, "meeting started: standup")  # mid-tick
+        merged = company.merge_tick_results(self.current, self.ticked, self.before)
+        texts = [e["text"] for e in merged["events"]]
+        self.assertIn("x1 advanced to execution (review)", texts)
+        self.assertIn("meeting started: standup", texts)   # both survive
+
+    def test_engine_bookkeeping_survives_merge(self):
+        self.ticked["engine"] = {"overloaded_since": 123.0}
+        merged = company.merge_tick_results(self.current, self.ticked, self.before)
+        self.assertEqual(merged["engine"], {"overloaded_since": 123.0})
+
+
+class OverloadGateTests(unittest.TestCase):
+    """The credit-protection gate: at crush load a company turn times out
+    AFTER the API charged, so the engine must not spend at all."""
+
+    def _enabled_state(self):
+        state = company.new_state()
+        state["enabled"] = True
+        return state
+
+    def _patched(self, overloaded: bool):
+        originals = (company.machine_overloaded, company.is_quiet)
+        company.machine_overloaded = lambda *a, **k: overloaded
+        company.is_quiet = lambda *a, **k: False
+        return originals
+
+    def _restore(self, originals):
+        company.machine_overloaded, company.is_quiet = originals
+
+    def test_tick_defers_and_spends_nothing_when_overloaded(self):
+        state = self._enabled_state()
+        state["initiatives"].append({
+            "id": "x1", "title": "T", "stage": "execution",
+            "calls_used": 0, "stall_count": 0,
+        })
+        calls: list[str] = []
+
+        def runner(role, prompt):
+            calls.append(role)
+            return "should never run"
+
+        originals = self._patched(overloaded=True)
+        try:
+            with tempfile.TemporaryDirectory() as tmp:
+                events = company.tick(state, runner, Path(tmp))
+        finally:
+            self._restore(originals)
+        self.assertEqual(calls, [])                       # zero API spend
+        self.assertTrue(any("overloaded" in e for e in events))
+        self.assertEqual(state["initiatives"][0]["stall_count"], 0)  # not a stall
+
+    def test_overload_pause_is_visible_in_activity_feed_throttled(self):
+        # The pause used to be log-file-only: the owner watched a "frozen"
+        # company for hours with no explanation anywhere in the app.
+        state = self._enabled_state()
+        originals = self._patched(overloaded=True)
+        try:
+            with tempfile.TemporaryDirectory() as tmp:
+                company.tick(state, lambda r, p: "", Path(tmp), now=NOON)
+                company.tick(state, lambda r, p: "", Path(tmp), now=NOON + 60)
+        finally:
+            self._restore(originals)
+        paused = [e for e in state["events"] if "paused: Mac overloaded" in e["text"]]
+        self.assertEqual(len(paused), 1)   # visible, but throttled (≤ 1 / 15 min)
+
+    def test_starvation_escape_forces_exactly_one_turn(self):
+        # Parked 45+ min at elevated-but-not-crushing load → ONE bounded turn
+        # runs so the pipeline keeps inching toward shipping.
+        state = self._enabled_state()
+        first = company.new_initiative("First", "")
+        second = company.new_initiative("Second", "")
+        first["stage"] = second["stage"] = "research"
+        state["initiatives"] = [first, second]
+        state["engine"] = {"overloaded_since": NOON - 46 * 60}
+        originals = self._patched(overloaded=True)
+        real_load = company.load_per_core
+        company.load_per_core = lambda: (10.0, 8.0)   # limit 20, 10 < 2×limit
+        try:
+            with tempfile.TemporaryDirectory() as tmp:
+                company.tick(state, lambda r, p: "memo", Path(tmp), now=NOON)
+        finally:
+            company.load_per_core = real_load
+            self._restore(originals)
+        self.assertNotEqual(first["stage"], "research")    # advanced
+        self.assertEqual(second["stage"], "research")      # waited its turn
+        self.assertTrue(any("forcing one turn" in e["text"] for e in state["events"]))
+
+    def test_crushing_load_never_forces_a_turn(self):
+        state = self._enabled_state()
+        init = company.new_initiative("First", "")
+        init["stage"] = "research"
+        state["initiatives"] = [init]
+        state["engine"] = {"overloaded_since": NOON - 3 * 3600}
+        originals = self._patched(overloaded=True)
+        real_load = company.load_per_core
+        company.load_per_core = lambda: (60.0, 8.0)   # 60 > 2×limit(20): futile
+        try:
+            with tempfile.TemporaryDirectory() as tmp:
+                company.tick(state, lambda r, p: "memo", Path(tmp), now=NOON)
+        finally:
+            company.load_per_core = real_load
+            self._restore(originals)
+        self.assertEqual(init["stage"], "research")   # spent nothing
+
+    def test_stall_note_is_truncated_to_human_size(self):
+        state = self._enabled_state()
+        init = company.new_initiative("First", "")
+        init["stage"] = "research"
+        state["initiatives"] = [init]
+
+        def exploding_runner(role, prompt):
+            raise RuntimeError("x" * 5000)   # e.g. TimeoutExpired's full prompt dump
+
+        originals = self._patched(overloaded=False)
+        try:
+            with tempfile.TemporaryDirectory() as tmp:
+                company.tick(state, exploding_runner, Path(tmp), now=NOON)
+        finally:
+            self._restore(originals)
+        self.assertLess(len(init["note"]), 350)
+        self.assertIn("stalled (1/", init["note"])
+
+    def test_no_meeting_when_overloaded(self):
+        state = self._enabled_state()
+        state["last_meeting"] = 0.0
+        originals = self._patched(overloaded=True)
+        try:
+            self.assertFalse(company.should_convene_meeting(state, time.time()))
+        finally:
+            self._restore(originals)
+
+    def test_meeting_allowed_when_not_overloaded(self):
+        state = self._enabled_state()
+        state["last_meeting"] = 0.0
+        originals = self._patched(overloaded=False)
+        try:
+            self.assertTrue(company.should_convene_meeting(state, time.time()))
+        finally:
+            self._restore(originals)
+
+    def test_machine_overloaded_thresholds(self):
+        import os
+        original = os.getloadavg
+        try:
+            os.getloadavg = lambda: (10_000.0, 0.0, 0.0)
+            self.assertTrue(company.machine_overloaded())
+            os.getloadavg = lambda: (0.5, 0.0, 0.0)
+            self.assertFalse(company.machine_overloaded())
+        finally:
+            os.getloadavg = original
 
 
 if __name__ == "__main__":

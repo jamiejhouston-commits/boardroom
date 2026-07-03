@@ -73,6 +73,14 @@ struct SettingsView: View {
                     }
                 }
 
+                Section("Voice") {
+                    NavigationLink {
+                        VoiceSettingsView()
+                    } label: {
+                        Label("Agent voices & voice costs", systemImage: "waveform")
+                    }
+                }
+
                 Section("About") {
                     LabeledContent("App", value: "Hermes Mobile")
                     LabeledContent("Version", value: appVersion)

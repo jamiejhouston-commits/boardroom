@@ -137,6 +137,32 @@ struct ChatComposer: View {
     @State private var showFileImporter = false
     @State private var photoSelection: [PhotosPickerItem] = []
 
+    /// The real Hermes slash commands (from `hermes chat` /help). They already
+    /// work when typed — this just surfaces them with an autocomplete menu.
+    private static let slashCommands: [(name: String, hint: String, takesArg: Bool)] = [
+        ("/help",     "Show commands",            false),
+        ("/new",      "Start a fresh session",    false),
+        ("/reset",    "Fresh session",            false),
+        ("/model",    "Change the model",         false),
+        ("/tools",    "Manage available tools",   false),
+        ("/skills",   "Search / install skills",  false),
+        ("/skill",    "Load a skill by name",     true),
+        ("/memory",   "Memory status & config",   false),
+        ("/cron",     "Manage scheduled jobs",    false),
+        ("/agents",   "Active agents & tasks",    false),
+        ("/stop",     "Stop background processes", false),
+        ("/undo",     "Remove the last exchange", false),
+        ("/retry",    "Retry the last response",  false),
+        ("/compress", "Compress the context",     false)
+    ]
+
+    /// Matching commands while the draft is a single "/token" (no space yet).
+    private var slashMatches: [(name: String, hint: String, takesArg: Bool)] {
+        guard draft.hasPrefix("/"), !draft.contains(" ") else { return [] }
+        let query = draft.lowercased()
+        return Self.slashCommands.filter { query == "/" || $0.name.hasPrefix(query) }
+    }
+
     var body: some View {
         VStack(spacing: 7) {
             if let status = voice.state.status {
@@ -160,11 +186,46 @@ struct ChatComposer: View {
                 }
             }
 
+            // Slash-command autocomplete — appears as you type "/".
+            if focused && !slashMatches.isEmpty {
+                ScrollView {
+                    VStack(spacing: 0) {
+                        ForEach(slashMatches, id: \.name) { command in
+                            Button {
+                                draft = command.takesArg ? command.name + " " : command.name
+                            } label: {
+                                HStack(spacing: 8) {
+                                    Text(command.name)
+                                        .font(.subheadline.weight(.semibold))
+                                        .foregroundStyle(accent)
+                                    Text(command.hint)
+                                        .font(.caption)
+                                        .foregroundStyle(.secondary)
+                                    Spacer(minLength: 0)
+                                }
+                                .padding(.horizontal, 14)
+                                .padding(.vertical, 9)
+                                .contentShape(Rectangle())
+                            }
+                            .buttonStyle(.plain)
+                            if command.name != slashMatches.last?.name { Divider() }
+                        }
+                    }
+                }
+                .frame(maxHeight: 230)
+                .background(HermesTheme.surface, in: RoundedRectangle(cornerRadius: 14, style: .continuous))
+                .overlay(RoundedRectangle(cornerRadius: 14, style: .continuous)
+                    .strokeBorder(HermesTheme.hairline, lineWidth: 1))
+                .padding(.horizontal, 4)
+            }
+
             HStack(alignment: .bottom, spacing: 8) {
-                // Attach photos / files.
+                // Attach photos / files / slash commands.
                 Menu {
                     Button { showPhotoPicker = true } label: { Label("Photo Library", systemImage: "photo.on.rectangle") }
                     Button { showFileImporter = true } label: { Label("Choose File", systemImage: "folder") }
+                    Divider()
+                    Button { draft = "/"; focused = true } label: { Label("Slash commands", systemImage: "command") }
                 } label: {
                     Image(systemName: "plus")
                         .font(.body.weight(.semibold))
@@ -395,7 +456,11 @@ final class AgentConversation: ObservableObject {
 
         Task {
             do {
-                for try await event in HermesRelayClient(configuration: config).stream(payload, sessionKey: session, fast: true, skills: agent.skills) {
+                // fast: false — TEXT chat runs the FULL agent loop. `fast`
+                // caps the CLI at 2 turns (built for voice-call latency); any
+                // tool use then truncates the reply to EMPTY, which the app
+                // showed as "(no response)" — the "agents never reply" bug.
+                for try await event in HermesRelayClient(configuration: config).stream(payload, sessionKey: session, fast: false, skills: agent.skills) {
                     switch event.type {
                     case .start: break
                     case .delta: appendTo(responseID, event.text ?? "")
@@ -407,6 +472,12 @@ final class AgentConversation: ObservableObject {
                 }
                 if currentText(responseID).isEmpty { appendTo(responseID, "(no response)") }
             } catch {
+                // The placeholder bubble never received a delta — drop it so it
+                // doesn't linger forever as a dead "…". (Partial replies kept.)
+                if currentText(responseID).isEmpty,
+                   let idx = messages.firstIndex(where: { $0.id == responseID }) {
+                    messages.remove(at: idx)
+                }
                 messages.append(ChatMessage(author: .system, text: error.localizedDescription, date: Date()))
             }
             isSending = false

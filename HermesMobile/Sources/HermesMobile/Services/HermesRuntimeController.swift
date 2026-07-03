@@ -91,6 +91,10 @@ final class HermesRuntimeController: ObservableObject {
                     appendToMessage(id: responseID, text: "Hermes completed without text output.")
                 }
                 state = .ready
+            } catch HermesRelayError.unauthorized {
+                let guidance = HermesRelayError.unauthorized.localizedDescription
+                state = .degraded(guidance)
+                messages.append(ChatMessage(author: .system, text: guidance, date: Date()))
             } catch {
                 state = .offline(error.localizedDescription)
                 messages.append(ChatMessage(author: .system, text: error.localizedDescription, date: Date()))

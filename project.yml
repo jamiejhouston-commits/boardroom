@@ -19,6 +19,11 @@ schemes:
     build:
       targets:
         HermesMobile: all
+        HermesMobileTests: [test]
+    test:
+      config: Debug
+      targets:
+        - HermesMobileTests
     run:
       config: Debug
     archive:
@@ -30,6 +35,9 @@ targets:
     platform: iOS
     sources:
       - HermesMobile/Sources/HermesMobile
+      - path: HermesMobile/Resources/HQAssets
+        type: folder
+        buildPhase: resources
     info:
       path: HermesMobile/Info.plist
       properties:
@@ -67,6 +75,9 @@ targets:
       properties:
         com.apple.security.application-groups:
           - group.com.jamiehouston.boardroom
+        # Real APNs push from the Mac relay — gate decisions reach the owner
+        # anywhere. Xcode/App Store swaps this to production at distribution.
+        aps-environment: development
     dependencies:
       - target: HermesWidgets
         embed: true

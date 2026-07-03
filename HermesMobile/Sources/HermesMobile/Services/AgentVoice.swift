@@ -18,10 +18,21 @@ final class AgentVoice: NSObject, AVSpeechSynthesizerDelegate, AVAudioPlayerDele
 
     var isSpeaking: Bool { synthesizer.isSpeaking || (player?.isPlaying ?? false) }
 
+    /// The engine that produced the LAST playback ("elevenlabs", "piper",
+    /// or "apple") — callers badge "Paid voice" off this.
+    private(set) var lastEngine = "apple"
+
     /// Speak `text`. Uses the relay's neural voice when available, else Apple.
     /// Suspends until playback finishes (or `stop()` is called).
+    ///
+    /// VOICE-COST POLICY: `premium` may be requested ONLY by external,
+    /// revenue-facing flows (sales/customer calls, demos, marketing). It is
+    /// double-gated: the owner's settings toggle here, and the relay's
+    /// character budget on the Mac. Everything internal stays on this
+    /// default (free voice) — do NOT pass premium for in-app conversation.
     func speak(_ text: String, seedFrom id: String,
-               voice model: String? = nil, relay: HermesRelayConfiguration? = nil) async {
+               voice model: String? = nil, relay: HermesRelayConfiguration? = nil,
+               premium: Bool = false) async {
         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return }
 
@@ -31,10 +42,13 @@ final class AgentVoice: NSObject, AVSpeechSynthesizerDelegate, AVAudioPlayerDele
         try? session.setCategory(.playback, mode: .spokenAudio, options: [.duckOthers])
         try? session.setActive(true)
 
+        let tier = (premium && VoicePolicy.premiumEnabled) ? "premium" : "internal"
         if let relay, relay.isConfigured, let model,
-           let data = await Self.fetchNeural(trimmed, voice: model, relay: relay) {
-            await play(data)
+           let result = await Self.fetchNeural(trimmed, voice: model, relay: relay, tier: tier) {
+            lastEngine = result.engine
+            await play(result.data)
         } else {
+            lastEngine = "apple"
             await speakApple(trimmed, seedFrom: id)
         }
     }
@@ -83,18 +97,21 @@ final class AgentVoice: NSObject, AVSpeechSynthesizerDelegate, AVAudioPlayerDele
     }
 
     private static func fetchNeural(_ text: String, voice: String,
-                                    relay: HermesRelayConfiguration) async -> Data? {
+                                    relay: HermesRelayConfiguration,
+                                    tier: String = "internal") async -> (data: Data, engine: String)? {
         guard let baseURL = relay.baseURL else { return nil }
         var request = URLRequest(url: baseURL.appending(path: "tts"))
         request.httpMethod = "POST"
         request.timeoutInterval = 30
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         request.setValue("Bearer \(relay.token)", forHTTPHeaderField: "Authorization")
-        request.httpBody = try? JSONSerialization.data(withJSONObject: ["text": text, "voice": voice])
+        request.httpBody = try? JSONSerialization.data(
+            withJSONObject: ["text": text, "voice": voice, "tier": tier])
         guard let (data, response) = try? await URLSession.shared.data(for: request),
               let http = response as? HTTPURLResponse, http.statusCode == 200,
               !data.isEmpty else { return nil }
-        return data
+        let engine = (http.value(forHTTPHeaderField: "X-Voice-Engine") ?? "piper").lowercased()
+        return (data, engine)
     }
 
     // MARK: Apple fallback

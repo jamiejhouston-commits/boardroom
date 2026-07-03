@@ -78,6 +78,10 @@ struct HermesRelayClient {
                     let (bytes, response) = try await session.bytes(for: request)
                     guard let http = response as? HTTPURLResponse,
                           (200..<300).contains(http.statusCode) else {
+                        if let http = response as? HTTPURLResponse,
+                           http.statusCode == 401 || http.statusCode == 403 {
+                            throw HermesRelayError.unauthorized
+                        }
                         throw HermesRelayError.server("Streaming request failed.")
                     }
 
@@ -149,6 +153,12 @@ struct HermesRelayClient {
         try await companyPOST(path: "company/thesis", body: ["thesis": thesis])
     }
 
+    /// Set the working hours. quietStart == quietEnd = no quiet hours (24/7).
+    func companySetWorkingHours(quietStart: Int, quietEnd: Int) async throws -> CompanyState {
+        try await companyPOSTJSON(path: "company/config",
+                                  json: ["quiet_start": quietStart, "quiet_end": quietEnd] as [String: Any])
+    }
+
     /// Ask the company a question — returns the created ask (poll its detail).
     func companyAsk(question: String) async throws -> CompanyAsk {
         try await companyPOST(path: "company/ask", body: ["question": question])
@@ -156,6 +166,50 @@ struct HermesRelayClient {
 
     func companyAskDetail(id: String) async throws -> CompanyAsk {
         try await companyGET(path: "company/ask/\(id)")
+    }
+
+    /// The company vault as a graph (notes + wikilinks) for the knowledge-graph view.
+    func companyVaultGraph() async throws -> VaultGraph {
+        try await companyGET(path: "company/vault/graph")
+    }
+
+    /// Live portfolio metrics (RevenueCat via the relay) — what the shipped
+    /// products actually earn. `configured == false` means no key on the Mac.
+    func companyRevenue() async throws -> RevenueSummary {
+        try await companyGET(path: "company/revenue")
+    }
+
+    /// Paid-voice budget status for the Voice settings screen.
+    func voiceUsage() async throws -> VoiceUsage {
+        try await companyGET(path: "voice/usage")
+    }
+
+    // MARK: Demo Day gallery — see the product before shipping it
+
+    /// Filenames of the screenshots the builder captured for this initiative.
+    func companyDemoFiles(id: String) async throws -> [String] {
+        struct DemoManifest: Codable { var files: [String] }
+        let manifest: DemoManifest = try await companyGET(path: "company/initiative/\(id)/demo")
+        return manifest.files
+    }
+
+    /// One demo screenshot's bytes (auth-guarded raw fetch, not JSON).
+    func companyDemoImage(id: String, filename: String) async throws -> Data {
+        guard let baseURL = configuration.baseURL else {
+            throw HermesRelayError.invalidURL
+        }
+        var request = URLRequest(url: baseURL.appending(path: "company/demo/\(id)/\(filename)"))
+        request.setValue("Bearer \(configuration.token)", forHTTPHeaderField: "Authorization")
+        let (data, response) = try await session.data(for: request)
+        try validate(response: response, data: data)
+        return data
+    }
+
+    /// Register this device for real APNs push from the relay — gate
+    /// decisions reach the phone anywhere, not just on the home Wi-Fi poll.
+    func registerPushToken(_ token: String) async throws {
+        let _: CompanyAck = try await companyPOST(path: "push/register",
+                                                  body: ["token": token])
     }
 
     // MARK: Schedules (the Cron)
@@ -248,6 +302,9 @@ struct HermesRelayClient {
     private func validate(response: URLResponse, data: Data) throws {
         guard let http = response as? HTTPURLResponse else { return }
         guard (200..<300).contains(http.statusCode) else {
+            if http.statusCode == 401 || http.statusCode == 403 {
+                throw HermesRelayError.unauthorized
+            }
             let error = (try? JSONDecoder().decode(RelayErrorResponse.self, from: data).error) ?? "HTTP \(http.statusCode)"
             throw HermesRelayError.server(error)
         }
@@ -258,6 +315,37 @@ struct RelayHealth: Codable, Equatable {
     var ok: Bool
     var service: String
     var profiles: [String]
+}
+
+/// What the shipped portfolio earns, fetched by the relay from RevenueCat.
+struct RevenueSummary: Codable, Equatable {
+    var configured: Bool
+    var metrics: [RevenueMetric]
+    var brief: String
+    var note: String?
+    var fetched: Double?
+}
+
+/// Paid-voice (ElevenLabs) budget status, enforced on the relay.
+struct VoiceUsage: Codable, Equatable {
+    var premiumConfigured: Bool
+    var dailyCharBudget: Int
+    var weeklyCharBudget: Int
+    var usedToday: Int
+    var usedWeek: Int
+}
+
+struct RevenueMetric: Codable, Equatable, Identifiable {
+    var id: String
+    var name: String
+    var value: Double
+    var unit: String
+
+    var display: String {
+        unit == "$"
+            ? String(format: "$%.2f", value)
+            : String(format: value.rounded() == value ? "%.0f" : "%.2f", value)
+    }
 }
 
 struct RelayStreamEvent: Codable, Equatable {
@@ -297,12 +385,15 @@ private struct RelayErrorResponse: Codable {
 
 enum HermesRelayError: LocalizedError {
     case invalidURL
+    case unauthorized
     case server(String)
 
     var errorDescription: String? {
         switch self {
         case .invalidURL:
             "Enter a valid Hermes relay URL."
+        case .unauthorized:
+            "Mac relay rejected the saved token. Re-pair in Settings then Mac Relay (scan the QR from the relay /pair page)."
         case .server(let message):
             message
         }

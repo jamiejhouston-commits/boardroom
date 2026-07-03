@@ -67,6 +67,11 @@ final class CompanyStore: ObservableObject {
         await run(relay) { try await $0.companySetThesis(thesis) }
     }
 
+    /// Set the team's working hours. quietStart == quietEnd = around the clock.
+    func setWorkingHours(quietStart: Int, quietEnd: Int, relay: HermesRelayConfiguration) async {
+        await run(relay) { try await $0.companySetWorkingHours(quietStart: quietStart, quietEnd: quietEnd) }
+    }
+
     func decide(id: String, decision: CompanyDecision, note: String,
                 relay: HermesRelayConfiguration) async {
         do {
@@ -311,7 +316,9 @@ final class CompanyStore: ObservableObject {
             content.sound = .default
             content.categoryIdentifier = NotificationPresenter.gateCategoryID
             content.userInfo = ["initiativeTitle": initiative.title,
-                                "stage": initiative.stage]
+                                "stage": initiative.stage,
+                                // The Greenlight/Kill buttons act on this id.
+                                "initiative_id": initiative.id]
             UNUserNotificationCenter.current().add(
                 UNNotificationRequest(identifier: "gate-\(key)",   // stable: replaces, never stacks
                                       content: content, trigger: nil))
@@ -335,16 +342,93 @@ final class NotificationPresenter: NSObject, UNUserNotificationCenterDelegate, @
 
     static let gateCategoryID = "BOARDROOM_GATE"
     static let addToCalendarActionID = "ADD_GATE_MEETING_TO_CALENDAR"
+    // Approve-from-anywhere: decide a gate right on the lock screen. Works
+    // for local alerts AND the relay's APNs pushes (same category + payload).
+    static let approveGateActionID = "APPROVE_GATE"
+    static let killGateActionID = "KILL_GATE"
+    // Lock-screen chat with Lena: a notification you can reply to inline.
+    static let lenaCategoryID = "LENA_CHAT"
+    static let lenaReplyActionID = "LENA_REPLY"
 
-    /// Call once at launch so gate notifications get the calendar button.
+    /// Call once at launch so gate notifications get the calendar button and
+    /// Lena's notifications get an inline reply field.
     func registerCategories() {
+        let approve = UNNotificationAction(
+            identifier: Self.approveGateActionID,
+            title: "Greenlight ✓", options: [.authenticationRequired])
+        let kill = UNNotificationAction(
+            identifier: Self.killGateActionID,
+            title: "Kill it", options: [.destructive, .authenticationRequired])
         let addToCalendar = UNNotificationAction(
             identifier: Self.addToCalendarActionID,
             title: "Add meeting to Calendar", options: [])
         let gateCategory = UNNotificationCategory(
-            identifier: Self.gateCategoryID, actions: [addToCalendar],
+            identifier: Self.gateCategoryID, actions: [approve, kill, addToCalendar],
             intentIdentifiers: [], options: [])
-        UNUserNotificationCenter.current().setNotificationCategories([gateCategory])
+
+        let reply = UNTextInputNotificationAction(
+            identifier: Self.lenaReplyActionID,
+            title: "Reply", options: [],
+            textInputButtonTitle: "Send", textInputPlaceholder: "Message Lena…")
+        let lenaCategory = UNNotificationCategory(
+            identifier: Self.lenaCategoryID, actions: [reply],
+            intentIdentifiers: [], options: [])
+
+        UNUserNotificationCenter.current().setNotificationCategories([gateCategory, lenaCategory])
+    }
+
+    // MARK: Lock-screen chat with Lena
+
+    /// Begin a lock-screen conversation — posts Lena's opening line with an
+    /// inline reply field. Safe to call from an App Intent / Siri / a button.
+    static func startLenaChat() async {
+        let center = UNUserNotificationCenter.current()
+        let granted = (try? await center.requestAuthorization(options: [.alert, .sound])) ?? false
+        guard granted else { return }
+        postLenaMessage("I'm here, sir. What do you need?")
+    }
+
+    /// Post a message from Lena as a reply-enabled notification.
+    static func postLenaMessage(_ text: String) {
+        let content = UNMutableNotificationContent()
+        content.title = "Lena"
+        content.body = text.isEmpty ? "(no reply)" : text
+        content.sound = .default
+        content.categoryIdentifier = lenaCategoryID
+        UNUserNotificationCenter.current().add(
+            UNNotificationRequest(identifier: "lena-\(UUID().uuidString)", content: content, trigger: nil))
+    }
+
+    /// Owner replied from the lock screen → send it to Lena via the relay and
+    /// post her answer back as another reply-enabled notification.
+    static func handleLenaReply(_ text: String) async {
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return }
+        var config = HermesRuntimeController.persistedRelayConfiguration()
+        guard config.isConfigured else {
+            postLenaMessage("I can't reach the office right now, sir — open the app to reconnect.")
+            return
+        }
+        let routing = OrgAgent.lena.chatRouting
+        config.profile = routing.profile
+        let payload = "You are Lena, the owner's personal assistant — warm, concise, and you "
+            + "address him as \"sir\". Reply to his message:\n\n" + trimmed
+        var reply = ""
+        do {
+            for try await event in HermesRelayClient(configuration: config)
+                .stream(payload, sessionKey: routing.session, fast: true) {
+                switch event.type {
+                case .delta: reply += event.text ?? ""
+                case .done: if reply.isEmpty, let r = event.reply { reply = r }
+                case .error: throw HermesRelayError.server(event.message ?? "failed")
+                case .start: break
+                }
+            }
+        } catch {
+            postLenaMessage("Sorry sir, I didn't catch that — tap to try again.")
+            return
+        }
+        postLenaMessage(reply)
     }
 
     func userNotificationCenter(_ center: UNUserNotificationCenter,
@@ -355,7 +439,29 @@ final class NotificationPresenter: NSObject, UNUserNotificationCenterDelegate, @
 
     func userNotificationCenter(_ center: UNUserNotificationCenter,
                                 didReceive response: UNNotificationResponse) async {
+        // Inline reply to Lena from the lock screen → route to her, post her answer.
+        if response.actionIdentifier == Self.lenaReplyActionID,
+           let textResponse = response as? UNTextInputNotificationResponse {
+            await Self.handleLenaReply(textResponse.userText)
+            return
+        }
+
         let info = response.notification.request.content.userInfo
+
+        // Greenlight/Kill from the lock screen — the decision goes straight
+        // to the relay's gate endpoint; the company moves on immediately.
+        if response.actionIdentifier == Self.approveGateActionID
+            || response.actionIdentifier == Self.killGateActionID {
+            guard let id = info["initiative_id"] as? String, !id.isEmpty else { return }
+            let decision: CompanyDecision =
+                response.actionIdentifier == Self.approveGateActionID ? .approve : .kill
+            let relay = HermesRuntimeController.persistedRelayConfiguration()
+            guard relay.isConfigured else { return }
+            _ = try? await HermesRelayClient(configuration: relay)
+                .companyGate(id: id, decision: decision, note: "Decided from the lock screen")
+            return
+        }
+
         guard response.actionIdentifier == Self.addToCalendarActionID,
               let title = info["initiativeTitle"] as? String else { return }
         let isDemoDay = (info["stage"] as? String) == "gate2"

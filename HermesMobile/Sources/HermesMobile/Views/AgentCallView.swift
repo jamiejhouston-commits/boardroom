@@ -267,11 +267,23 @@ private final class CallModel: ObservableObject {
         if Task.isCancelled { return }
 
         let reply = collected.trimmingCharacters(in: .whitespacesAndNewlines)
-        lastAgentLine = reply.isEmpty ? "…" : reply
+        guard !reply.isEmpty else {
+            // Empty relay reply on a VOICE call — never leave the owner with a
+            // silent "…". Give a visible + audible cue; .error is recoverable
+            // (holding the mic starts the next turn).
+            lastAgentLine = "No reply came back — hold the mic and try again."
+            state = .error("No reply came back — hold the mic and try again.")
+            if voiceOn {
+                await voice.speak("Sorry, I didn't catch that. Please try again.",
+                                  seedFrom: agent.id, voice: agent.voiceModel, relay: config)
+            }
+            return
+        }
+        lastAgentLine = reply
 
         // Speak the whole reply in the agent's own neural voice (relay TTS),
         // falling back to the on-device voice if the relay can't render it.
-        if voiceOn && !reply.isEmpty {
+        if voiceOn {
             state = .speaking
             await voice.speak(reply, seedFrom: agent.id, voice: agent.voiceModel, relay: config)
         }

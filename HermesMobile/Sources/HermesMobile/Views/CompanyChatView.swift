@@ -61,7 +61,9 @@ final class CompanyConversation: ObservableObject {
 
         Task {
             do {
-                for try await event in HermesRelayClient(configuration: config).stream(payload, sessionKey: session, fast: true) {
+                // fast: false — text chat needs the full agent loop; the
+                // 2-turn voice cap truncated tool-using replies to empty.
+                for try await event in HermesRelayClient(configuration: config).stream(payload, sessionKey: session, fast: false) {
                     switch event.type {
                     case .start: break
                     case .delta: appendTo(responseID, event.text ?? "")

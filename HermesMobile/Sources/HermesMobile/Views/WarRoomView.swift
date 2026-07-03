@@ -3,6 +3,7 @@ import SwiftUI
 struct WarRoomView: View {
     @EnvironmentObject private var company: CompanyStore
     @EnvironmentObject private var runtime: HermesRuntimeController
+    @State private var showHQ = false
     private let feedTicker = Timer.publish(every: 15, on: .main, in: .common).autoconnect()
 
     var body: some View {
@@ -14,6 +15,28 @@ struct WarRoomView: View {
                         subtitle: "Live floor for the agent organization. Swipe each leader's room, tap a department to dive in.",
                         systemImage: "rectangle.3.group.bubble.left.fill"
                     )
+
+                    Button { showHQ = true } label: {
+                        HStack(spacing: 12) {
+                            Image(systemName: "building.2.crop.circle.fill")
+                                .font(.title2)
+                                .foregroundStyle(HermesTheme.gold)
+                            VStack(alignment: .leading, spacing: 2) {
+                                Text("Enter Headquarters")
+                                    .font(.headline)
+                                    .foregroundStyle(HermesTheme.textPrimary)
+                                Text("Step onto the live 3D company floor")
+                                    .font(.caption)
+                                    .foregroundStyle(.secondary)
+                            }
+                            Spacer()
+                            Image(systemName: "arrow.up.forward")
+                                .font(.subheadline.weight(.semibold))
+                                .foregroundStyle(HermesTheme.emerald)
+                        }
+                        .hermesCard()
+                    }
+                    .buttonStyle(.plain)
 
                     liveFeed
 
@@ -30,6 +53,17 @@ struct WarRoomView: View {
                     }
                     .buttonStyle(.plain)
 
+                    NavigationLink {
+                        VaultGraphView()
+                    } label: {
+                        Label("Knowledge graph", systemImage: "circle.hexagongrid.fill")
+                            .font(.subheadline.weight(.semibold))
+                            .frame(maxWidth: .infinity)
+                            .padding()
+                            .background(HermesTheme.emerald.opacity(0.15), in: RoundedRectangle(cornerRadius: 10))
+                    }
+                    .buttonStyle(.plain)
+
                     LeadershipStrip()
                 }
                 .padding()
@@ -39,6 +73,9 @@ struct WarRoomView: View {
             .task { await company.refresh(relay: runtime.relayConfiguration) }
             .onReceive(feedTicker) { _ in
                 Task { await company.refresh(relay: runtime.relayConfiguration) }
+            }
+            .fullScreenCover(isPresented: $showHQ) {
+                HeadquartersView()
             }
         }
     }

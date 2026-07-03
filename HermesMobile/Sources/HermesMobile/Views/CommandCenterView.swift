@@ -283,7 +283,18 @@ struct CommandCenterView: View {
                 actionLabel("Conference", "video.fill")
             }
             .buttonStyle(.plain)
-            actionButton("Agents", "person.3.fill") { router.go(.agents) }
+            NavigationLink {
+                EarthquakeReadyHomeView()
+            } label: {
+                actionLabel("Earthquake", "waveform.path.ecg.rectangle.fill")
+            }
+            .buttonStyle(.plain)
+            NavigationLink {
+                AirQualityWindowHomeView()
+            } label: {
+                actionLabel("Air Quality", "wind")
+            }
+            .buttonStyle(.plain)
             actionButton("War Room", "rectangle.3.group.fill") { router.go(.warRoom) }
         }
     }

@@ -63,7 +63,6 @@ final class BriefingCenter: ObservableObject {
             memo.replies.filter { $0.date > dayAgo }.map { "\($0.agentName) re: \(memo.subject)" }
         }
         let replyLines = freshReplies.isEmpty ? "none" : freshReplies.prefix(8).joined(separator: "; ")
-        let departments = org.managers.map(\.name).joined(separator: ", ")
 
         let payload = """
         You are \(secretary?.name ?? "the Executive Secretary"), delivering the owner's MORNING BRIEFING. Be warm but efficient — a real chief-of-staff opening the day.
@@ -71,9 +70,8 @@ final class BriefingCenter: ObservableObject {
         Today's date: \(Date().formatted(date: .complete, time: .omitted))
         Today's meetings: \(meetingLines)
         Memo replies in the last 24h: \(replyLines)
-        Departments: \(departments)
 
-        Write the briefing: 1) a one-line greeting, 2) today's schedule, 3) what came in overnight, 4) one sharp status line per department (invent plausible, business-like status), 5) "Three things that need your decision today" as short bullets. Keep the whole thing under 220 words. Plain text, no markdown headers.
+        Write the briefing from ONLY the real data above: 1) a one-line greeting, 2) today's schedule (say "nothing on the calendar" if none), 3) what actually came in overnight from the memo replies (say "a quiet night" if none), 4) "What needs your decision today" as short bullets drawn only from the real schedule and replies — if there isn't enough real signal, say so plainly. Do NOT invent department status, metrics, revenue, or any event that is not in the data above. Keep it under 200 words. Plain text, no markdown headers.
         """
 
         var collected = ""
@@ -94,7 +92,14 @@ final class BriefingCenter: ObservableObject {
             return
         }
 
-        briefing = collected.trimmingCharacters(in: .whitespacesAndNewlines)
+        let cleaned = collected.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !cleaned.isEmpty else {
+            // Empty/tool-only turn from the relay: show a visible, retryable
+            // error and KEEP the previous briefing intact — never persist "".
+            lastError = "Your secretary didn't return a briefing — please try again."
+            return
+        }
+        briefing = cleaned
         generatedAt = Date()
         UserDefaults.standard.set(briefing, forKey: "briefing.last")
         UserDefaults.standard.set(generatedAt, forKey: "briefing.lastDate")

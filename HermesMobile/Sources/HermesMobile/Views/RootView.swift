@@ -4,13 +4,11 @@ struct RootView: View {
     @EnvironmentObject private var store: AgentProfileStore
     @EnvironmentObject private var runtime: HermesRuntimeController
     @EnvironmentObject private var router: AppRouter
-    @Environment(\.scenePhase) private var scenePhase
     @AppStorage("appearanceMode") private var appearanceRaw = AppearanceMode.system.rawValue
 
     @State private var showLena = false
     @State private var showWelcome = true
     @State private var welcomeSession = UUID()
-    @State private var hasMovedToBackground = false
 
     private var appearance: AppearanceMode {
         AppearanceMode(rawValue: appearanceRaw) ?? .system
@@ -48,15 +46,6 @@ struct RootView: View {
         .onOpenURL { url in
             if url.host == "lena" || url.absoluteString.contains("lena") { showLena = true }
         }
-        .onChange(of: scenePhase) { _, phase in
-            if phase == .background {
-                hasMovedToBackground = true
-            } else if phase == .active, hasMovedToBackground {
-                hasMovedToBackground = false
-                welcomeSession = UUID()
-                showWelcome = true
-            }
-        }
     }
 
     /// Lena, your assistant — always one tap away, on every tab.
@@ -76,6 +65,13 @@ struct RootView: View {
         .padding(.trailing, 18)
         .padding(.bottom, 70)
         .accessibilityLabel("Call Lena, your assistant")
+        .contextMenu {
+            Button {
+                Task { await NotificationPresenter.startLenaChat() }
+            } label: {
+                Label("Chat from lock screen", systemImage: "lock.iphone")
+            }
+        }
     }
 
     @ViewBuilder
