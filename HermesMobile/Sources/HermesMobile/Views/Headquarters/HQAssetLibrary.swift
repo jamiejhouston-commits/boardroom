@@ -156,6 +156,18 @@ enum HQAssetLibrary {
 
     // MARK: Animation control
 
+    /// Whether the asset carries a clip matching `match` — guard optional
+    /// clips (Wave/Dance) so a missing clip never strands the rig in T-pose.
+    static func hasAnimation(matching match: String, under node: SCNNode) -> Bool {
+        var found = false
+        node.enumerateHierarchy { n, stop in
+            if n.animationKeys.contains(where: { $0.localizedCaseInsensitiveContains(match) }) {
+                found = true; stop.pointee = true
+            }
+        }
+        return found
+    }
+
     /// The character USDZs carry all their skeletal clips and SceneKit plays
     /// every one at once on load. Keep only the clip whose key contains
     /// `match` (e.g. "Idle", "Walking"); stop the rest. Safe no-op when the

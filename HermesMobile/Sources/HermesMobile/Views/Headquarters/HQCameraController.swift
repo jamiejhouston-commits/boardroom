@@ -1,11 +1,12 @@
 import SceneKit
 import UIKit
 
-/// The three Slice-1 camera modes.
+/// The HQ camera modes.
 enum HQCameraMode: Equatable {
     case overview                 // elevated wide framing of the whole floor
     case orbit                    // slow continuous cinematic sweep
     case inspect(agentID: String) // glide to one agent's workstation
+    case roam                     // first-person walkthrough (joystick + pan)
 }
 
 /// Owns the camera rig and animates smoothly between modes. Orbit rotates a
@@ -67,7 +68,29 @@ final class HQCameraController {
             cameraNode.worldPosition = SCNVector3(p.x, p.y + 1.9, p.z + 4.4)
             cameraNode.look(at: SCNVector3(p.x, p.y + 1.2, p.z))
             SCNTransaction.commit()
+
+        case .roam:
+            // Pose is driven per-frame by the roam loop; `enterRoam` glides in.
+            pivot.eulerAngles = SCNVector3Zero
         }
+    }
+
+    /// Glide into the walkthrough at `state`, then hand control to the render loop.
+    func enterRoam(_ state: HQRoamState) {
+        pivot.removeAction(forKey: "orbit")
+        pivot.eulerAngles = SCNVector3Zero
+        SCNTransaction.begin()
+        SCNTransaction.animationDuration = 0.7
+        SCNTransaction.animationTimingFunction = CAMediaTimingFunction(name: .easeInEaseOut)
+        applyRoamPose(state)
+        SCNTransaction.commit()
+    }
+
+    /// Per-frame walkthrough pose — called from the SceneKit render loop, so it
+    /// must stay allocation-free and immediate (no transactions).
+    func applyRoamPose(_ state: HQRoamState) {
+        cameraNode.position = SCNVector3(state.position.x, state.position.y, state.position.z)
+        cameraNode.eulerAngles = SCNVector3(state.pitch, state.yaw, 0)
     }
 
     private func setOverviewPose() {

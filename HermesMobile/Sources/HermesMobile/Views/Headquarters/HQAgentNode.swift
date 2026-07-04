@@ -10,15 +10,23 @@ import UIKit
 final class HQAgentNode: SCNNode {
 
     let agentID: String
+    let isExecutive: Bool
     private let ring: SCNNode
     private let body: SCNNode
     private let usesCharacterAsset: Bool
+    private let homeAnchor: SCNVector3
+    private let homeYaw: Float
+    private(set) var isConversing = false
+    private(set) var isInMeeting = false
 
     init(placement: HQPlacement) {
         self.agentID = placement.agent.id
+        self.homeAnchor = placement.anchor
+        self.homeYaw = placement.yaw
         self.ring = HQAgentNode.makeRing()
 
         let isExecutive = placement.archetype == .executive
+        self.isExecutive = isExecutive
         let accent: UIColor = isExecutive
             ? UIColor(red: 0.72, green: 0.55, blue: 0.26, alpha: 1)   // deep gold, never blown
             : UIColor(Color(hex: placement.agent.accentHex))
@@ -79,14 +87,132 @@ final class HQAgentNode: SCNNode {
         ring.runAction(.repeatForever(.rotateBy(x: 0, y: .pi * 2, z: 0, duration: 9)), forKey: "spin")
     }
 
+    // MARK: Face-to-face conversation
+
+    /// The owner tapped this agent: stop wandering, turn to face them, wave
+    /// (when the rig carries the clip), and hold attention until released.
+    func enterConversation(facing worldPoint: SCNVector3) {
+        guard !isConversing else { return }
+        isConversing = true
+        isInMeeting = false
+        removeAction(forKey: "stroll")
+        removeAction(forKey: "meeting")
+        let dx = worldPoint.x - worldPosition.x
+        let dz = worldPoint.z - worldPosition.z
+        let face = atan2(-dx, -dz)          // model forward is -Z
+        runAction(.rotateTo(x: 0, y: CGFloat(face), z: 0, duration: 0.4,
+                            usesShortestUnitArc: true), forKey: "converse.turn")
+        guard usesCharacterAsset else { return }
+        if HQAssetLibrary.hasAnimation(matching: "Wave", under: body) {
+            HQAssetLibrary.playAnimation(matching: "Wave", under: body)
+            body.runAction(.sequence([
+                .wait(duration: 1.7),
+                .run { n in HQAssetLibrary.playAnimation(matching: "Idle", under: n) },
+            ]), forKey: "wave.reset")
+        } else {
+            HQAssetLibrary.playAnimation(matching: "Idle", under: body)
+        }
+    }
+
+    /// Conversation over: face home and resume ambient life.
+    func leaveConversation() {
+        guard isConversing else { return }
+        isConversing = false
+        removeAction(forKey: "converse.turn")
+        body.removeAction(forKey: "wave.reset")
+        if usesCharacterAsset { HQAssetLibrary.playAnimation(matching: "Idle", under: body) }
+        runAction(.rotateTo(x: 0, y: CGFloat(homeYaw), z: 0, duration: 0.5,
+                            usesShortestUnitArc: true))
+        if usesCharacterAsset, !isExecutive, !isInMeeting { startStrolling() }
+    }
+
+    // MARK: Live-meeting choreography
+
+    /// A live board meeting pulled this agent in: walk to the dais seat, face
+    /// the holo-globe, and stand in the huddle until the meeting ends.
+    func joinMeeting(at point: SCNVector3, facing center: SCNVector3) {
+        guard !isInMeeting, !isConversing else { return }
+        isInMeeting = true
+        removeAction(forKey: "stroll")
+        let walkYaw = HQAgentNode.yaw(from: position, toward: point)
+        let faceYaw = HQAgentNode.yaw(from: point, toward: center)
+        let travel = HQAgentNode.travelTime(from: position, to: point)
+        let walkOn = SCNAction.run { n in HQAssetLibrary.playAnimation(matching: "Walking", under: n) }
+        let idleOn = SCNAction.run { n in HQAssetLibrary.playAnimation(matching: "Idle", under: n) }
+        runAction(.sequence([
+            .rotateTo(x: 0, y: CGFloat(walkYaw), z: 0, duration: 0.4, usesShortestUnitArc: true),
+            walkOn,
+            .move(to: point, duration: travel),
+            idleOn,
+            .rotateTo(x: 0, y: CGFloat(faceYaw), z: 0, duration: 0.4, usesShortestUnitArc: true),
+        ]), forKey: "meeting")
+    }
+
+    /// Meeting adjourned: walk back to the desk and resume ambient life.
+    func leaveMeeting() {
+        guard isInMeeting else { return }
+        isInMeeting = false
+        removeAction(forKey: "meeting")
+        let walkYaw = HQAgentNode.yaw(from: position, toward: homeAnchor)
+        let travel = HQAgentNode.travelTime(from: position, to: homeAnchor)
+        let walkOn = SCNAction.run { n in HQAssetLibrary.playAnimation(matching: "Walking", under: n) }
+        let idleOn = SCNAction.run { n in HQAssetLibrary.playAnimation(matching: "Idle", under: n) }
+        // The action's node IS this agent — no self capture (Sendable-safe,
+        // matching the walkOn/idleOn closures above).
+        let resume = SCNAction.run { n in
+            guard let agent = n as? HQAgentNode, agent.usesCharacterAsset,
+                  !agent.isExecutive, !agent.isInMeeting, !agent.isConversing else { return }
+            agent.startStrolling()
+        }
+        runAction(.sequence([
+            .rotateTo(x: 0, y: CGFloat(walkYaw), z: 0, duration: 0.4, usesShortestUnitArc: true),
+            walkOn,
+            .move(to: homeAnchor, duration: travel),
+            idleOn,
+            .rotateTo(x: 0, y: CGFloat(homeYaw), z: 0, duration: 0.4, usesShortestUnitArc: true),
+            resume,
+        ]), forKey: "meeting.return")
+    }
+
+    // MARK: Celebration
+
+    /// Something SHIPPED — dance if the rig has the clip, joyful spin if not.
+    func celebrate() {
+        guard !isConversing else { return }
+        if usesCharacterAsset, HQAssetLibrary.hasAnimation(matching: "Dance", under: body) {
+            HQAssetLibrary.playAnimation(matching: "Dance", under: body)
+            body.runAction(.sequence([
+                .wait(duration: 2.8),
+                .run { n in HQAssetLibrary.playAnimation(matching: "Idle", under: n) },
+            ]), forKey: "celebrate")
+        } else {
+            let hop = SCNAction.sequence([
+                .moveBy(x: 0, y: 0.25, z: 0, duration: 0.18),
+                .moveBy(x: 0, y: -0.25, z: 0, duration: 0.22),
+            ])
+            body.runAction(.sequence([hop, .rotateBy(x: 0, y: .pi * 2, z: 0, duration: 0.9), hop]),
+                           forKey: "celebrate")
+        }
+    }
+
+    private static func yaw(from: SCNVector3, toward: SCNVector3) -> Float {
+        atan2(-(toward.x - from.x), -(toward.z - from.z))
+    }
+
+    private static func travelTime(from: SCNVector3, to: SCNVector3) -> TimeInterval {
+        let dx = to.x - from.x, dz = to.z - from.z
+        let distance = Double((dx * dx + dz * dz).squareRoot())
+        return min(max(distance / 1.8, 0.8), 4.5)   // walk pace, clamped sane
+    }
+
     // MARK: Ambient life
 
     /// Every so often, walk a short loop toward the dais and back: turn, play
     /// the walking clip, glide, turn home, idle again. Closures capture nothing
     /// beyond their node parameter (strict-concurrency safe).
     private func startStrolling() {
-        let home = position
-        let homeYaw = eulerAngles.y
+        let home = homeAnchor
+        let homeYaw = self.homeYaw
         let out = SCNVector3(home.x * 0.35, home.y, home.z + 3.2)
         let dx = out.x - home.x, dz = out.z - home.z
         let outYaw = atan2(-dx, -dz)

@@ -26,18 +26,28 @@ enum HQSceneBuilder {
     /// Fixed floor anchors per zone — the single source of truth `HQLayout`
     /// uses to seat agents so placement and scenery never drift apart.
     static let zoneAnchors: [HQOfficeArchetype: SCNVector3] = [
-        .executive:      SCNVector3(1.6, 1.1, -10.2),
-        .command:        SCNVector3(0, 0.22, 2.6),
-        .researchLab:    SCNVector3(-9.3, 0, 3.5),
-        .engineeringDen: SCNVector3(9.3, 0, 3.5),
+        .executive:       SCNVector3(1.6, 1.1, -10.2),
+        .command:         SCNVector3(0, 0.22, 2.6),
+        .researchLab:     SCNVector3(-9.3, 0, 3.5),
+        .engineeringDen:  SCNVector3(9.3, 0, 3.5),
+        .commandEast:     SCNVector3(3.9, 0.22, 1.9),   // console posts flanking the dais
+        .commandWest:     SCNVector3(-3.9, 0.22, 1.9),
+        .researchLab2:    SCNVector3(-9.3, 0, 5.9),     // the pods' second desks
+        .engineeringDen2: SCNVector3(9.3, 0, 5.9),
+        .lounge:          SCNVector3(0, 0, 7.4),        // sofa corner by the mechs
     ]
 
     /// Facing (yaw) for an agent seated at each zone anchor.
     static let zoneYaw: [HQOfficeArchetype: Float] = [
-        .executive:      .pi,          // behind the desk, facing the floor
-        .command:        0,            // facing the globe
-        .researchLab:    -.pi / 2,     // outboard of the desk, facing center
-        .engineeringDen: .pi / 2,
+        .executive:       .pi,          // behind the desk, facing the floor
+        .command:         0,            // facing the globe
+        .researchLab:     -.pi / 2,     // outboard of the desk, facing center
+        .engineeringDen:  .pi / 2,
+        .commandEast:     1.117,        // atan2(3.9, 1.9) — facing the globe
+        .commandWest:     -1.117,
+        .researchLab2:    -.pi / 2,
+        .engineeringDen2: .pi / 2,
+        .lounge:          .pi,          // facing the lounge table
     ]
 
     // MARK: Public entry
@@ -58,6 +68,53 @@ enum HQSceneBuilder {
         addPerimeter(to: root)
         addCeiling(to: root)
         addLights(to: root)
+        addLiveSurfaces(to: root)
+        applyDaylight(root: root, hour: Calendar.current.component(.hour, from: Date()))
+    }
+
+    // MARK: Live surfaces — the company's real data, physically in the room
+
+    private static func addLiveSurfaces(to root: SCNNode) {
+        // War Board on the east wall: initiatives, stages, progress.
+        let warBoard = HQLiveBoards.warBoardNode()
+        warBoard.position = SCNVector3(19.68, 2.6, -1.5)
+        warBoard.eulerAngles.y = -.pi / 2
+        root.addChildNode(warBoard)
+
+        // Kanban on the west wall: the task backlog.
+        let kanban = HQLiveBoards.kanbanNode()
+        kanban.position = SCNVector3(-19.68, 2.5, -1.5)
+        kanban.eulerAngles.y = .pi / 2
+        root.addChildNode(kanban)
+
+        // News ticker riding the north wall, above the skyline band.
+        let ticker = HQLiveBoards.tickerNode()
+        ticker.position = SCNVector3(0, 4.78, -15.22)
+        root.addChildNode(ticker)
+
+        // Decision Desk by the executive steps — where gates wait for the owner.
+        let desk = HQLiveBoards.gateDeskNode()
+        desk.position = SCNVector3(-4.9, 0, -4.7)
+        root.addChildNode(desk)
+    }
+
+    /// Subtle time-of-day: warmer, brighter ambience through working hours;
+    /// the proven cool night rig after dark. Safe to re-apply on every refresh.
+    static func applyDaylight(root: SCNNode, hour: Int) {
+        let day = (7...18).contains(hour)
+        let dusk = (19...21).contains(hour) || (5...6).contains(hour)
+        if let ambient = root.childNode(withName: "hq.light.ambient", recursively: false)?.light {
+            ambient.intensity = day ? 430 : dusk ? 385 : 340
+            ambient.color = day
+                ? UIColor(red: 0.28, green: 0.30, blue: 0.36, alpha: 1)
+                : UIColor(red: 0.18, green: 0.22, blue: 0.33, alpha: 1)
+        }
+        if let sun = root.childNode(withName: "hq.light.sun", recursively: false)?.light {
+            sun.intensity = day ? 520 : dusk ? 430 : 350
+            sun.color = day
+                ? UIColor(red: 0.90, green: 0.86, blue: 0.78, alpha: 1)
+                : UIColor(red: 0.65, green: 0.75, blue: 0.95, alpha: 1)
+        }
     }
 
     // MARK: Floor + seams
@@ -346,7 +403,14 @@ enum HQSceneBuilder {
             root.addChildNode(n)
         }
 
-        light(.ambient, UIColor(red: 0.18, green: 0.22, blue: 0.33, alpha: 1), 340, pos: SCNVector3Zero)
+        let ambient = SCNLight()
+        ambient.type = .ambient
+        ambient.color = UIColor(red: 0.18, green: 0.22, blue: 0.33, alpha: 1)
+        ambient.intensity = 340
+        let ambientNode = SCNNode()
+        ambientNode.light = ambient
+        ambientNode.name = "hq.light.ambient"   // named → time-of-day retune
+        root.addChildNode(ambientNode)
 
         let sun = SCNLight()
         sun.type = .directional
@@ -354,6 +418,7 @@ enum HQSceneBuilder {
         sun.intensity = 350
         let sunNode = SCNNode()
         sunNode.light = sun
+        sunNode.name = "hq.light.sun"           // named → time-of-day retune
         sunNode.eulerAngles = SCNVector3(-Float.pi / 2.6, 0.4, 0)
         root.addChildNode(sunNode)
 

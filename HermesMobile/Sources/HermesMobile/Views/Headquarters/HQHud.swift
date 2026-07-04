@@ -1,22 +1,20 @@
 import SwiftUI
 
 /// The premium HUD over the headquarters floor: a live company-pulse strip, a
-/// camera-mode switcher, and a tap-to-inspect agent card with a quick Message
-/// action. Glassy, minimal, non-cluttered — all `HermesTheme`.
+/// live-meeting banner, the camera-mode switcher (now with Walk), and the
+/// roam joystick. Conversation UI lives in `HQConversationOverlay`, hosted by
+/// `HeadquartersView` — when it's up, the HUD's bottom controls step aside.
 struct HQHud: View {
     @EnvironmentObject private var org: OrgStore
     @EnvironmentObject private var company: CompanyStore
     @Binding var cameraMode: HQCameraMode
     @Binding var selectedAgentID: String?
+    let roamControl: HQRoamControl
+    var controlsHidden: Bool
     var onClose: () -> Void
-
-    @State private var chatAgent: OrgAgent?
 
     private var buildingCount: Int {
         company.state.initiatives.filter { !$0.isAwaitingDecision && !$0.isTerminal }.count
-    }
-    private var selectedAgent: OrgAgent? {
-        selectedAgentID.flatMap { org.agent(id: $0) }
     }
     private var isInspecting: Bool {
         if case .inspect = cameraMode { return true }
@@ -26,18 +24,26 @@ struct HQHud: View {
     var body: some View {
         VStack(spacing: 0) {
             topBar
-            Spacer()
-            if let agent = selectedAgent {
-                inspectCard(agent)
-                    .transition(.move(edge: .bottom).combined(with: .opacity))
+            if let meeting = company.liveMeeting {
+                meetingBanner(meeting)
+                    .transition(.move(edge: .top).combined(with: .opacity))
             }
-            cameraSwitcher
+            Spacer()
+            if !controlsHidden {
+                if cameraMode == .roam {
+                    HStack {
+                        HQJoystick(control: roamControl)
+                        Spacer()
+                    }
+                    .padding(.bottom, 10)
+                }
+                cameraSwitcher
+            }
         }
         .padding(16)
-        .animation(.easeInOut(duration: 0.25), value: selectedAgentID)
-        .sheet(item: $chatAgent) { agent in
-            NavigationStack { AgentChatView(agent: agent) }
-        }
+        .animation(.easeInOut(duration: 0.25), value: controlsHidden)
+        .animation(.easeInOut(duration: 0.25), value: cameraMode == .roam)
+        .animation(.easeInOut(duration: 0.25), value: company.liveMeeting?.id)
     }
 
     // MARK: Top pulse strip
@@ -68,50 +74,28 @@ struct HQHud: View {
         .overlay(Capsule().strokeBorder(tint.opacity(0.35), lineWidth: 1))
     }
 
-    // MARK: Inspect card
+    // MARK: Live meeting banner — the board is in session, in the room
 
-    private func inspectCard(_ agent: OrgAgent) -> some View {
-        let status = AgentStatusResolver.status(for: agent, in: company.state)
-        return VStack(alignment: .leading, spacing: 10) {
-            HStack(spacing: 10) {
-                Image(systemName: agent.systemImage)
-                    .foregroundStyle(Color(hex: agent.accentHex))
-                    .frame(width: 40, height: 40)
-                    .background(Color(hex: agent.accentHex).opacity(0.2),
-                                in: RoundedRectangle(cornerRadius: 10))
-                VStack(alignment: .leading, spacing: 2) {
-                    Text(agent.name).font(.headline).foregroundStyle(HermesTheme.textPrimary)
-                    Text(agent.title).font(.caption).foregroundStyle(.secondary)
-                }
-                Spacer()
-                statusChip(status)
-            }
-            Text(agent.summary).font(.caption).foregroundStyle(.secondary).lineLimit(2)
-            Button { chatAgent = agent } label: {
-                Label("Message", systemImage: "message.fill")
-                    .font(.subheadline.weight(.semibold))
-                    .frame(maxWidth: .infinity)
-                    .padding(.vertical, 10)
-                    .background(HermesTheme.emerald, in: RoundedRectangle(cornerRadius: 10))
-                    .foregroundStyle(.white)
-            }
-            .buttonStyle(.plain)
+    private func meetingBanner(_ meeting: CompanyMeeting) -> some View {
+        HStack(spacing: 8) {
+            Circle()
+                .fill(Color(red: 0.80, green: 0.26, blue: 0.24))
+                .frame(width: 7, height: 7)
+                .overlay(Circle().stroke(Color(red: 0.80, green: 0.26, blue: 0.24).opacity(0.4), lineWidth: 4))
+            Text("Live: \(meeting.topic)")
+                .font(.caption.weight(.semibold))
+                .foregroundStyle(HermesTheme.textPrimary)
+                .lineLimit(1)
+            Spacer()
+            Text("\(meeting.attendees.count) at the table")
+                .font(.caption2)
+                .foregroundStyle(.secondary)
         }
-        .padding(14)
-        .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 16))
-        .overlay(RoundedRectangle(cornerRadius: 16).strokeBorder(HermesTheme.hairline, lineWidth: 1))
-        .padding(.bottom, 10)
-    }
-
-    private func statusChip(_ status: HQAgentStatus) -> some View {
-        HStack(spacing: 5) {
-            Text(status.glyph).font(.caption2)
-            Text(status.label).font(.caption2.weight(.semibold))
-        }
-        .padding(.horizontal, 8)
-        .padding(.vertical, 5)
-        .background(Color(status.tint).opacity(0.18), in: Capsule())
-        .foregroundStyle(HermesTheme.textPrimary)
+        .padding(.horizontal, 12)
+        .padding(.vertical, 8)
+        .background(.ultraThinMaterial, in: Capsule())
+        .overlay(Capsule().strokeBorder(HermesTheme.hairline, lineWidth: 1))
+        .padding(.top, 8)
     }
 
     // MARK: Camera switcher
@@ -124,6 +108,9 @@ struct HQHud: View {
             }
             modeButton("Orbit", "rotate.3d", isActive: cameraMode == .orbit) {
                 cameraMode = .orbit
+            }
+            modeButton("Walk", "figure.walk", isActive: cameraMode == .roam) {
+                cameraMode = .roam
             }
             modeButton("Inspect", "viewfinder", isActive: isInspecting) {
                 let id = selectedAgentID ?? HQLayout.placements(for: org.agents).first?.agent.id
