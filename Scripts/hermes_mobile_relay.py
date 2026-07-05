@@ -672,10 +672,16 @@ def games_heartbeat() -> None:
         return
     if company_module.machine_overloaded(config.get("max_load_per_core", 2.5)):
         return
+    # Deep snapshot BEFORE the (multi-minute) tick, so owner POSTs that land
+    # during it — /games/halt, /games/concept, /games/score — are merged, not
+    # clobbered by a stale write. Same pattern as the company heartbeat.
+    before = json.loads(json.dumps(state))
     events = games_module.tick(state, games_cli_runner, GAMES_ARTIFACTS_ROOT)
     if events:
         with GAMES_LOCK:
-            games_module.StudioStore(GAMES_STATE_PATH).save(state)
+            store = games_module.StudioStore(GAMES_STATE_PATH)
+            current = store.load()
+            store.save(games_module.merge_tick_results(current, state, before))
         for event in events:
             print(f"games - {event}", flush=True)
 

@@ -22,10 +22,14 @@ struct GamesRoomView: View {
         var id: String { rawValue }
     }
 
-    /// The game the cabinet plays: the studio's playable/shipped title, else the
-    /// bundled flagship (which always ships in the app).
+    /// The game the cabinet plays: the first studio game whose runtime is
+    /// actually bundled in the app, else the flagship (whose SkylineStack.html
+    /// always ships). A relay game built to a server-side "index.html" is NOT
+    /// bundled, so it must never be picked — the cabinet would load a dead
+    /// "not bundled yet" placeholder instead of the real playable game.
     private var playableGame: StudioGame {
-        studio.state.games.first(where: \.isPlayable) ?? StudioGame.skylineStack
+        studio.state.games.first { ArcadeGameWebView.runtimeURL($0.runtime) != nil }
+            ?? StudioGame.skylineStack
     }
 
     var body: some View {

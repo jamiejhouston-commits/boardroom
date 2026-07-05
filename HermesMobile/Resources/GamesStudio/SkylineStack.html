@@ -154,9 +154,22 @@
   // ---- responsive sizing ----
   var W = 0, H = 0, DPR = 1;
   function resize() {
+    var oldW = W;
     DPR = Math.min(window.devicePixelRatio || 1, 3);
     W = Math.max(1, window.innerWidth);
     H = Math.max(1, window.innerHeight);
+
+    // Rebase the world when the width changes mid-play (rotation / split view):
+    // block x + widths are stored in pixels, so without this the tower would
+    // jump off-center or off-screen. Vertical (camY/BLOCK_H) is width-independent.
+    if (oldW > 0 && W !== oldW && (state === STATE.PLAY || tower.length)) {
+      var k = W / oldW;
+      for (var ti = 0; ti < tower.length; ti++) { tower[ti].x *= k; tower[ti].w *= k; }
+      for (var si = 0; si < slices.length; si++) { slices[si].x *= k; slices[si].w *= k; }
+      if (moving) { moving.x *= k; moving.w *= k; }
+      startW *= k;
+    }
+
     canvas.width = Math.round(W * DPR);
     canvas.height = Math.round(H * DPR);
     canvas.style.width = W + "px";

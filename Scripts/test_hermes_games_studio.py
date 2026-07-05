@@ -1,4 +1,5 @@
 import importlib.util
+import json
 import tempfile
 import unittest
 from pathlib import Path
@@ -70,6 +71,17 @@ class ParserTests(unittest.TestCase):
         self.assertEqual(studio.parse_playtest("meh")["rating"], 5)
         self.assertEqual(studio.parse_playtest("11/10 amazing")["rating"], 10)
         self.assertEqual(studio.parse_playtest("fun: 9")["rating"], 9)
+
+    def test_parse_playtest_ignores_numbers_in_the_reaction(self):
+        # A stray number in the prose must NOT override the stated rating.
+        self.assertEqual(
+            studio.parse_playtest("Died on level 4 instantly. Rating: 8/10")["rating"], 8)
+        self.assertEqual(
+            studio.parse_playtest("I played for 3 minutes and loved it. Rating: 9/10")["rating"], 9)
+        self.assertEqual(
+            studio.parse_playtest("Got 5 combos in a row! Rating: 10/10")["rating"], 10)
+        # A bare unlabeled number with no /10 stays at the default.
+        self.assertEqual(studio.parse_playtest("reminded me of the 90s")["rating"], 5)
 
     def test_playtest_scores_average(self):
         game = {"playtests": [{"rating": 8}, {"rating": 9}, {"rating": 7}]}
@@ -209,6 +221,53 @@ class PipelineTests(unittest.TestCase):
     def advance_with_root(self, state, game, root, runner):
         studio.advance_game(state, game,
                             studio.make_charged_runner(game, 40, runner), Path(root))
+
+
+class MergeTickTests(unittest.TestCase):
+    """The lost-update guard: owner actions during a long tick must survive."""
+
+    def _state_with_game(self, stage="playtest"):
+        state = studio.new_studio_state()
+        state["enabled"] = True
+        game = studio.seed_concept(state, "Neon Drift", "hyper-casual")
+        game["stage"] = stage
+        return state, game
+
+    def test_halt_during_tick_is_preserved(self):
+        before_state, game = self._state_with_game()
+        before = json.loads(json.dumps(before_state))
+        # The tick advances the game (its in-memory copy still enabled=True).
+        ticked = json.loads(json.dumps(before_state))
+        ticked["games"][0]["stage"] = "fun_gate"
+        # Meanwhile the owner halted the studio on disk.
+        current = json.loads(json.dumps(before_state))
+        current["enabled"] = False
+        merged = studio.merge_tick_results(current, ticked, before)
+        self.assertFalse(merged["enabled"], "halt must survive the tick's stale write")
+        self.assertEqual(merged["games"][0]["stage"], "fun_gate", "tick progress still lands")
+
+    def test_score_recorded_during_tick_is_preserved(self):
+        before_state, _ = self._state_with_game()
+        before = json.loads(json.dumps(before_state))
+        ticked = json.loads(json.dumps(before_state))
+        ticked["games"][0]["stage"] = "fun_gate"
+        current = json.loads(json.dumps(before_state))
+        current["games"][0]["score"] = 99          # owner set a high score mid-tick
+        merged = studio.merge_tick_results(current, ticked, before)
+        self.assertEqual(merged["games"][0]["score"], 99)
+        self.assertEqual(merged["games"][0]["stage"], "fun_gate")
+
+    def test_concept_pitched_during_tick_is_preserved(self):
+        before_state, _ = self._state_with_game()
+        before = json.loads(json.dumps(before_state))
+        ticked = json.loads(json.dumps(before_state))
+        ticked["games"][0]["stage"] = "fun_gate"
+        current = json.loads(json.dumps(before_state))
+        studio.seed_concept(current, "Late Idea", "daily-puzzle")   # owner pitched mid-tick
+        merged = studio.merge_tick_results(current, ticked, before)
+        titles = [g["title"] for g in merged["games"]]
+        self.assertIn("Late Idea", titles)
+        self.assertIn("Neon Drift", titles)
 
 
 class TickTests(unittest.TestCase):

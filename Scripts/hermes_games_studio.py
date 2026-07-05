@@ -145,17 +145,24 @@ def parse_pillars(text: str) -> list[str]:
     return pillars
 
 
-_RATING_RE = re.compile(r"\b(?:rating|fun)?\s*[:=]?\s*(10|[1-9])\s*/?\s*(?:10)?\b", re.I)
+# Prefer a LABELED rating ("Rating: 8", "fun 6") or the "N/10" form, and take
+# the LAST such match — so a stray number in the reaction prose ("died on
+# level 4", "played 3 minutes") never overrides the rating the tester states at
+# the end. A bare digit with no label and no "/10" is intentionally ignored.
+_RATING_RE = re.compile(
+    r"(?:rating|fun|score)\s*[:=]?\s*(\d{1,2})\b|\b(\d{1,2})\s*/\s*10\b", re.I)
 
 
 def parse_playtest(text: str) -> dict:
-    """A tester's reply → {rating, reaction}. Finds a 1-10 rating anywhere in the
-    text (defaults to 5 if none stated) and keeps a short reaction line."""
+    """A tester's reply → {rating, reaction}. Reads the tester's stated fun
+    rating (defaults to 5 if none stated) and keeps a short reaction line."""
     text = (text or "").strip()
     rating = 5
-    match = _RATING_RE.search(text)
-    if match:
-        rating = max(1, min(10, int(match.group(1))))
+    matches = list(_RATING_RE.finditer(text))
+    if matches:
+        value = next((g for g in matches[-1].groups() if g), None)
+        if value is not None:
+            rating = max(1, min(10, int(value)))
     # First non-empty sentence/line makes a compact reaction.
     reaction = ""
     for line in text.splitlines():
@@ -347,6 +354,47 @@ def advance_game(state: dict, game: dict, runner, artifacts_root: Path | None = 
 def _game_dirname(game: dict) -> str:
     slug = re.sub(r"[^a-z0-9]+", "-", game["title"].lower()).strip("-")[:40] or "game"
     return f"{slug}-{game['id'][:4]}"
+
+
+def merge_tick_results(current: dict, ticked: dict, before: dict) -> dict:
+    """Fold a long tick's changes into freshly-loaded state without stomping
+    owner actions made while the tick ran (halt, a pitched concept, a recorded
+    high score). Mirrors `hermes_company.merge_tick_results`, keyed on 'games'.
+
+    `before` is the deep snapshot taken when the tick started. Only games the
+    tick actually CHANGED overwrite the current on-disk version; `enabled` and
+    each game's owner-set `score` are always kept from `current`, so a mid-tick
+    /games/halt or /games/score survives instead of being silently reverted."""
+    before_by_id = {g["id"]: g for g in before.get("games", [])}
+    current_by_id = {g["id"]: g for g in current.get("games", [])}
+
+    for ticked_game in ticked.get("games", []):
+        gid = ticked_game["id"]
+        snapshot = before_by_id.get(gid)
+        if snapshot is None:
+            # Seeded during this tick — insert at the front if not already there.
+            if gid not in current_by_id:
+                current.setdefault("games", []).insert(0, ticked_game)
+                current_by_id[gid] = ticked_game
+            continue
+        if ticked_game != snapshot and gid in current_by_id:
+            merged = dict(ticked_game)
+            # The tick never touches `score`; the owner might have recorded one
+            # mid-tick, so the current (owner) value wins.
+            merged["score"] = current_by_id[gid].get("score", ticked_game.get("score"))
+            index = next(i for i, g in enumerate(current["games"]) if g["id"] == gid)
+            current["games"][index] = merged
+
+    # `enabled` stays as the owner left it — so /games/halt during a tick sticks.
+    seen = {(e.get("ts"), e.get("text")) for e in before.get("events", [])}
+    fresh = [e for e in ticked.get("events", []) if (e.get("ts"), e.get("text")) not in seen]
+    if fresh:
+        feed = current.setdefault("events", [])
+        known = {(e.get("ts"), e.get("text")) for e in feed}
+        feed.extend(e for e in fresh if (e.get("ts"), e.get("text")) not in known)
+        del feed[:-40]
+    current["last_tick"] = max(current.get("last_tick", 0.0), ticked.get("last_tick", 0.0))
+    return current
 
 
 def tick(state: dict, runner, artifacts_root: Path | None = None,

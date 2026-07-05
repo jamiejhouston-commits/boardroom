@@ -92,6 +92,10 @@ enum GamesRoomBuilder {
             blockers: [
                 RoamBlocker(centerX: cabinetPos.x, centerZ: cabinetPos.z, halfX: 1.2, halfZ: 1.1),
                 RoamBlocker(centerX: loungeCenter.x, centerZ: loungeCenter.z, halfX: 2.4, halfZ: 1.2),
+                // The coffee table sits forward of the couch (z − 1.7) — outside
+                // the couch blocker — so it needs its own solid or the walker
+                // clips through it.
+                RoamBlocker(centerX: loungeCenter.x, centerZ: loungeCenter.z - 1.7, halfX: 0.9, halfZ: 0.6),
             ],
             startPosition: SIMD3(0, 1.6, 9.2),
             startYaw: 0)
