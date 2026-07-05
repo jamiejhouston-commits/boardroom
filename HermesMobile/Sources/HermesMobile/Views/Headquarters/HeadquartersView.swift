@@ -19,6 +19,7 @@ struct HeadquartersView: View {
     @State private var boardSheet: BoardSheet?
     @State private var fullChatAgent: OrgAgent?
     @State private var roamControl = HQRoamControl()
+    @State private var showGamesStudio = false
 
     private enum BoardSheet: String, Identifiable {
         case warBoard, kanban, gates
@@ -42,7 +43,8 @@ struct HeadquartersView: View {
                 conversingAgentID: conversation?.agent.id,
                 roamControl: roamControl,
                 onSelectAgent: startConversation(with:),
-                onTapBoard: { boardSheet = BoardSheet($0) }
+                onTapBoard: { boardSheet = BoardSheet($0) },
+                onEnterGamesStudio: { showGamesStudio = true }
             )
             .ignoresSafeArea()
 
@@ -85,6 +87,9 @@ struct HeadquartersView: View {
         }
         .sheet(item: $fullChatAgent) { agent in
             NavigationStack { AgentChatView(agent: agent) }
+        }
+        .fullScreenCover(isPresented: $showGamesStudio) {
+            GamesRoomView()
         }
     }
 

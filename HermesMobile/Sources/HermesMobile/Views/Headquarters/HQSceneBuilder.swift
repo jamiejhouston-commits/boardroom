@@ -23,6 +23,11 @@ enum HQSceneBuilder {
 
     private static let execZ: Float = -11
 
+    /// Tap-routing name for the Games Studio doorway — the portal to the first
+    /// division room. Tapping (or walking up and tapping) it enters the Games
+    /// Production Room.
+    static let gamesStudioPortalName = "hq.tap.gamestudio"
+
     /// Fixed floor anchors per zone — the single source of truth `HQLayout`
     /// uses to seat agents so placement and scenery never drift apart.
     static let zoneAnchors: [HQOfficeArchetype: SCNVector3] = [
@@ -66,6 +71,7 @@ enum HQSceneBuilder {
         addPod(to: root, x: 8.2, accent: emerald)
         addMechsAndLounge(to: root)
         addPerimeter(to: root)
+        addGamesStudioPortal(to: root)
         addCeiling(to: root)
         addLights(to: root)
         addLiveSurfaces(to: root)
@@ -326,6 +332,98 @@ enum HQSceneBuilder {
         placeAsset("Table2", height: 0.72, accent: nil, at: (0, 9), in: root)
         placeAsset("Sofa", height: 0.95, accent: nil, at: (-2.1, 9), rotY: .pi / 2, in: root)
         placeAsset("Sofa", height: 0.95, accent: nil, at: (2.1, 9), rotY: -.pi / 2, in: root)
+    }
+
+    // MARK: Games Studio portal — the doorway to the first division room
+
+    /// A lit doorway set into the east wall (south end), signed GAMES STUDIO with
+    /// an emerald threshold. Every child carries the tap-routing name so a tap
+    /// anywhere on the doorway enters the Games Production Room. Walk up to it in
+    /// roam and tap, or tap it from overview.
+    private static func addGamesStudioPortal(to root: SCNNode) {
+        let portal = SCNNode()
+        portal.name = gamesStudioPortalName
+        portal.position = SCNVector3(19.72, 0, 7.0)
+        portal.eulerAngles.y = -.pi / 2          // faces into the room (−X), like the War Board
+
+        // Dark frame: two jambs + a lintel.
+        let frameMat = SCNMaterial()
+        frameMat.lightingModel = .physicallyBased
+        frameMat.diffuse.contents = UIColor(red: 0.08, green: 0.09, blue: 0.12, alpha: 1)
+        frameMat.metalness.contents = 0.55
+        frameMat.roughness.contents = 0.35
+        let doorH: CGFloat = 3.2, doorW: CGFloat = 2.2
+        for sx in [Float(-doorW / 2 - 0.12), Float(doorW / 2 + 0.12)] {
+            let jamb = SCNBox(width: 0.22, height: doorH + 0.2, length: 0.3, chamferRadius: 0.03)
+            jamb.materials = [frameMat]
+            let n = SCNNode(geometry: jamb)
+            n.position = SCNVector3(sx, Float(doorH) / 2, 0)
+            portal.addChildNode(n)
+        }
+        let lintel = SCNBox(width: doorW + 0.56, height: 0.3, length: 0.3, chamferRadius: 0.03)
+        lintel.materials = [frameMat]
+        let lintelNode = SCNNode(geometry: lintel)
+        lintelNode.position = SCNVector3(0, Float(doorH) + 0.05, 0)
+        portal.addChildNode(lintelNode)
+
+        // Glowing threshold portal (emerald), gently pulsing so it reads as a way through.
+        let glow = SCNPlane(width: doorW, height: doorH)
+        let gm = SCNMaterial()
+        gm.diffuse.contents = UIColor.black
+        gm.emission.contents = emeraldHot
+        gm.emission.intensity = 0.9
+        gm.isDoubleSided = true
+        glow.materials = [gm]
+        let glowNode = SCNNode(geometry: glow)
+        glowNode.position = SCNVector3(0, Float(doorH) / 2, 0.02)
+        let pulse = SCNAction.sequence([
+            .customAction(duration: 1.6) { n, t in
+                n.geometry?.firstMaterial?.emission.intensity = 0.55 + 0.35 * (t / 1.6)
+            },
+            .customAction(duration: 1.6) { n, t in
+                n.geometry?.firstMaterial?.emission.intensity = 0.9 - 0.35 * (t / 1.6)
+            },
+        ])
+        glowNode.runAction(.repeatForever(pulse))
+        portal.addChildNode(glowNode)
+
+        // A soft real light so the doorway casts into the room.
+        let light = SCNLight()
+        light.type = .omni
+        light.color = emerald
+        light.intensity = 300
+        light.attenuationEndDistance = 8
+        let lightNode = SCNNode()
+        lightNode.light = light
+        lightNode.position = SCNVector3(0, 1.6, 1.2)
+        portal.addChildNode(lightNode)
+
+        // Sign above the door: GAMES STUDIO in gold.
+        let sign = SCNText(string: "GAMES STUDIO", extrusionDepth: 0.4)
+        sign.font = UIFont.systemFont(ofSize: 5, weight: .bold)
+        sign.flatness = 0.15
+        let signMat = SCNMaterial()
+        signMat.diffuse.contents = UIColor.black
+        signMat.emission.contents = gold
+        signMat.emission.intensity = 1.0
+        sign.materials = [signMat]
+        let signNode = SCNNode(geometry: sign)
+        signNode.scale = SCNVector3(0.07, 0.07, 0.07)
+        let (lo, hi) = signNode.boundingBox
+        signNode.pivot = SCNMatrix4MakeTranslation((lo.x + hi.x) / 2, 0, 0)
+        signNode.position = SCNVector3(0, Float(doorH) + 0.42, 0.05)
+        portal.addChildNode(signNode)
+
+        // A controller glyph plate beside the sign so it reads at a glance.
+        let glyph = SCNText(string: "🎮", extrusionDepth: 0.2)
+        glyph.font = UIFont.systemFont(ofSize: 5)
+        glyph.flatness = 0.2
+        let glyphNode = SCNNode(geometry: glyph)
+        glyphNode.scale = SCNVector3(0.06, 0.06, 0.06)
+        glyphNode.position = SCNVector3(-Float(doorW) / 2 - 0.02, Float(doorH) + 0.4, 0.05)
+        portal.addChildNode(glyphNode)
+
+        root.addChildNode(portal)
     }
 
     // MARK: Perimeter walls + emissive trim

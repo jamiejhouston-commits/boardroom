@@ -1,0 +1,488 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover" />
+<title>Skyline Stack</title>
+<style>
+  :root {
+    --navy:#0a0f18; --navy2:#0d1524; --emerald:#1fae74; --emeraldHot:#28d98d;
+    --gold:#c7a35a; --ink:#e9edf3; --dim:#8b95a6;
+  }
+  * { margin:0; padding:0; box-sizing:border-box; -webkit-tap-highlight-color:transparent; }
+  html, body { height:100%; overflow:hidden; background:var(--navy); }
+  body {
+    font-family:-apple-system,BlinkMacSystemFont,"Helvetica Neue",Arial,sans-serif;
+    color:var(--ink); user-select:none; -webkit-user-select:none; touch-action:none;
+  }
+  #wrap { position:fixed; inset:0; display:flex; align-items:center; justify-content:center; }
+  canvas { display:block; width:100%; height:100%; }
+
+  /* HUD */
+  #hud { position:fixed; top:0; left:0; right:0; padding:16px 18px calc(env(safe-area-inset-top) + 4px);
+         padding-top:calc(env(safe-area-inset-top) + 14px);
+         display:flex; align-items:flex-start; justify-content:space-between; pointer-events:none; }
+  .stat { text-align:left; }
+  .stat .k { font-size:11px; letter-spacing:2px; color:var(--dim); font-weight:800; }
+  .stat .v { font-size:34px; font-weight:800; line-height:1; margin-top:3px;
+             font-variant-numeric:tabular-nums; text-shadow:0 2px 14px rgba(0,0,0,.6); }
+  .stat.best { text-align:right; }
+  .stat.best .v { font-size:22px; color:var(--gold); }
+  #combo { position:fixed; top:34%; left:0; right:0; text-align:center; pointer-events:none;
+           font-size:26px; font-weight:800; letter-spacing:1px; color:var(--gold);
+           opacity:0; transform:translateY(8px) scale(.9); transition:opacity .18s, transform .18s;
+           text-shadow:0 2px 18px rgba(0,0,0,.7); }
+  #combo.show { opacity:1; transform:translateY(0) scale(1); }
+
+  /* Overlays */
+  .overlay { position:fixed; inset:0; display:flex; flex-direction:column; align-items:center;
+             justify-content:center; text-align:center; gap:16px; padding:28px;
+             background:radial-gradient(120% 80% at 50% 30%, rgba(13,21,36,.55), rgba(10,15,24,.9));
+             backdrop-filter:blur(3px); -webkit-backdrop-filter:blur(3px);
+             transition:opacity .3s; z-index:5; }
+  .overlay.hidden { opacity:0; pointer-events:none; }
+  .brand { font-size:13px; letter-spacing:5px; font-weight:800; color:var(--emerald); }
+  .title { font-size:42px; font-weight:800; letter-spacing:1px;
+           background:linear-gradient(180deg,#fff,#b9c6d6); -webkit-background-clip:text;
+           background-clip:text; color:transparent; }
+  .sub { font-size:14px; color:var(--dim); max-width:280px; line-height:1.5; }
+  .big { font-size:15px; color:var(--ink); }
+  .go-score { font-size:70px; font-weight:800; line-height:1; font-variant-numeric:tabular-nums; }
+  .go-best { font-size:14px; color:var(--gold); font-weight:700; letter-spacing:.5px; }
+  .newbest { color:var(--gold); font-weight:800; letter-spacing:2px; font-size:13px;
+             opacity:0; transition:opacity .3s; }
+  .newbest.show { opacity:1; }
+  .btn { pointer-events:auto; margin-top:6px; padding:15px 40px; border-radius:16px; border:0;
+         font-size:17px; font-weight:800; letter-spacing:.5px; color:#06110c; cursor:pointer;
+         background:linear-gradient(180deg,var(--emeraldHot),var(--emerald));
+         box-shadow:0 10px 30px rgba(31,174,116,.32), inset 0 1px 0 rgba(255,255,255,.35); }
+  .btn:active { transform:translateY(1px); }
+  .hint { font-size:12px; color:var(--dim); letter-spacing:.5px; }
+</style>
+</head>
+<body>
+<div id="wrap"><canvas id="c"></canvas></div>
+
+<div id="hud">
+  <div class="stat"><div class="k">SCORE</div><div class="v" id="score">0</div></div>
+  <div class="stat best"><div class="k">BEST</div><div class="v" id="best">0</div></div>
+</div>
+<div id="combo"></div>
+
+<div class="overlay" id="startOverlay">
+  <div class="brand">BOARDROOM · GAMES STUDIO</div>
+  <div class="title">Skyline Stack</div>
+  <div class="sub">Tap to drop each floor. Land it clean for a perfect — miss the tower and it's over.</div>
+  <button class="btn" id="startBtn">Play</button>
+  <div class="hint">tap / space to drop</div>
+</div>
+
+<div class="overlay hidden" id="overOverlay">
+  <div class="brand">TOWER TOPPLED</div>
+  <div class="go-score" id="goScore">0</div>
+  <div class="go-best" id="goBest">Best 0</div>
+  <div class="newbest" id="newBest">★ NEW BEST ★</div>
+  <button class="btn" id="againBtn">Play again</button>
+  <div class="hint">tap / space to drop</div>
+</div>
+
+<script>
+(function () {
+  "use strict";
+
+  var BEST_KEY = "skylineStack.best";
+  var canvas = document.getElementById("c");
+  var ctx = canvas.getContext("2d");
+
+  // ---- native bridge (records the owner's real high score in the cabinet) ----
+  function notifyNative(event, score, best) {
+    try {
+      if (window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers.arcade) {
+        window.webkit.messageHandlers.arcade.postMessage({ event: event, score: score, best: best });
+      }
+    } catch (e) { /* standalone browser — no-op */ }
+  }
+
+  // ---- persistence ----
+  function loadBest() {
+    try { return parseInt(localStorage.getItem(BEST_KEY) || "0", 10) || 0; } catch (e) { return 0; }
+  }
+  function saveBest(v) { try { localStorage.setItem(BEST_KEY, String(v)); } catch (e) {} }
+
+  // ---- palette ----
+  var COL = {
+    skyTop: "#0d1524", skyBot: "#0a0f18",
+    emerald: [31, 174, 116], emeraldHot: [40, 217, 141], gold: [199, 163, 90],
+  };
+  function rgb(a) { return "rgb(" + a[0] + "," + a[1] + "," + a[2] + ")"; }
+  function rgba(a, al) { return "rgba(" + a[0] + "," + a[1] + "," + a[2] + "," + al + ")"; }
+  function lerp(a, b, t) { return a + (b - a) * t; }
+  function mix(c1, c2, t) { return [Math.round(lerp(c1[0], c2[0], t)), Math.round(lerp(c1[1], c2[1], t)), Math.round(lerp(c1[2], c2[2], t))]; }
+
+  // ---- audio (WebAudio, lazily created on first user gesture) ----
+  var AC = null;
+  function audio() {
+    if (AC === null) {
+      try { AC = new (window.AudioContext || window.webkitAudioContext)(); }
+      catch (e) { AC = false; }
+    }
+    if (AC && AC.state === "suspended") { AC.resume(); }
+    return AC || null;
+  }
+  function blip(freq, dur, type, gain) {
+    var ac = audio(); if (!ac) return;
+    var o = ac.createOscillator(), g = ac.createGain();
+    o.type = type || "sine"; o.frequency.value = freq;
+    var now = ac.currentTime;
+    g.gain.setValueAtTime(0.0001, now);
+    g.gain.exponentialRampToValueAtTime(gain || 0.16, now + 0.012);
+    g.gain.exponentialRampToValueAtTime(0.0001, now + (dur || 0.16));
+    o.connect(g); g.connect(ac.destination);
+    o.start(now); o.stop(now + (dur || 0.16) + 0.02);
+  }
+  function soundPlace() { blip(220, 0.14, "triangle", 0.14); }
+  function soundPerfect(combo) {
+    var base = 440 * Math.pow(2, Math.min(combo, 12) / 12);
+    blip(base, 0.16, "sine", 0.16);
+    blip(base * 1.5, 0.14, "sine", 0.08);
+  }
+  function soundOver() {
+    blip(180, 0.4, "sawtooth", 0.12);
+    setTimeout(function () { blip(120, 0.5, "sawtooth", 0.10); }, 90);
+  }
+
+  // ---- responsive sizing ----
+  var W = 0, H = 0, DPR = 1;
+  function resize() {
+    DPR = Math.min(window.devicePixelRatio || 1, 3);
+    W = Math.max(1, window.innerWidth);
+    H = Math.max(1, window.innerHeight);
+    canvas.width = Math.round(W * DPR);
+    canvas.height = Math.round(H * DPR);
+    canvas.style.width = W + "px";
+    canvas.style.height = H + "px";
+    ctx.setTransform(DPR, 0, 0, DPR, 0, 0);
+    // static twinkle field, sized to viewport
+    stars = [];
+    var n = Math.round((W * H) / 14000);
+    for (var i = 0; i < n; i++) {
+      stars.push({ x: Math.random() * W, y: Math.random() * H * 0.75,
+                   r: Math.random() * 1.3 + 0.2, a: Math.random() * 0.5 + 0.2,
+                   ph: Math.random() * Math.PI * 2 });
+    }
+  }
+
+  // ---- game state ----
+  var stars = [];
+  var STATE = { MENU: 0, PLAY: 1, OVER: 2 };
+  var state = STATE.MENU;
+
+  var BLOCK_H = 34;          // pixel height of one floor
+  var startW = 0;            // initial block width (set from viewport)
+  var tower = [];            // placed blocks: {x, w, colorT}
+  var moving = null;         // current sliding block
+  var slices = [];           // falling trimmed pieces
+  var camY = 0;              // camera vertical offset (world scroll)
+  var camTarget = 0;
+  var score = 0, best = loadBest(), combo = 0;
+  var speed = 2.2;           // px/frame for the mover
+  var dir = 1;
+  var flash = 0;             // perfect flash timer
+  var shake = 0;
+
+  function baseline() { return H - 120; }  // y of the first block's bottom in screen space at camY=0
+
+  function reset() {
+    tower = []; slices = []; moving = null;
+    camY = 0; camTarget = 0; score = 0; combo = 0; speed = 2.2; dir = 1; flash = 0; shake = 0;
+    startW = Math.min(W * 0.44, 190);
+    var cx = W / 2;
+    // seed base tower block
+    tower.push({ x: cx - startW / 2, w: startW, worldY: 0, colorT: 0 });
+    spawnMover();
+    setScore(0);
+  }
+
+  function spawnMover() {
+    var top = tower[tower.length - 1];
+    var w = top.w;
+    var worldY = tower.length; // each floor is one unit tall in world rows
+    var fromLeft = dir > 0;
+    moving = {
+      x: fromLeft ? -w : W,
+      w: w,
+      worldY: worldY,
+      colorT: Math.min(1, worldY / 40),
+      vx: fromLeft ? speed : -speed,   // travels inward from the side it entered
+    };
+    dir *= -1;                          // alternate entry side each floor
+  }
+
+  // world row → screen y (bottom of that row's block)
+  function rowScreenY(worldY) {
+    return baseline() - worldY * BLOCK_H + camY;
+  }
+
+  function drop() {
+    if (state !== STATE.PLAY || !moving) return;
+    var top = tower[tower.length - 1];
+    var mv = moving;
+    var left = Math.max(mv.x, top.x);
+    var right = Math.min(mv.x + mv.w, top.x + top.w);
+    var overlap = right - left;
+
+    if (overlap <= 0) {
+      // total miss → the floor falls, tower topples
+      slices.push({ x: mv.x, w: mv.w, worldY: mv.worldY, vy: 0, vx: dir * -2, colorT: mv.colorT, rot: 0, vr: (Math.random() - .5) * 0.2 });
+      moving = null;
+      gameOver();
+      return;
+    }
+
+    // trim the overhang into a falling slice
+    var perfect = Math.abs(mv.x - top.x) <= Math.max(4, top.w * 0.04);
+    if (!perfect) {
+      if (mv.x < left) {
+        slices.push({ x: mv.x, w: left - mv.x, worldY: mv.worldY, vy: 0, vx: -1.5, colorT: mv.colorT, rot: 0, vr: -0.12 });
+      }
+      if (mv.x + mv.w > right) {
+        slices.push({ x: right, w: (mv.x + mv.w) - right, worldY: mv.worldY, vy: 0, vx: 1.5, colorT: mv.colorT, rot: 0, vr: 0.12 });
+      }
+      combo = 0;
+      hideCombo();
+      soundPlace();
+    } else {
+      // perfect: snap to the tower, grow back a touch, build combo
+      left = top.x;
+      overlap = Math.min(top.w + 6, mv.w + 6);
+      combo++;
+      flash = 1;
+      shake = Math.min(6, 2 + combo * 0.4);
+      showCombo(combo);
+      soundPerfect(combo);
+    }
+
+    tower.push({ x: left, w: overlap, worldY: mv.worldY, colorT: mv.colorT });
+    score += 1 + (perfect ? Math.min(combo, 8) : 0);
+    setScore(score);
+
+    // rise difficulty + scroll camera up so the new top sits mid-screen
+    speed = 2.2 + Math.min(tower.length * 0.08, 6.5);
+    camTarget = Math.max(0, (tower.length - 5) * BLOCK_H);
+
+    moving = null;
+    spawnMover();
+  }
+
+  function gameOver() {
+    state = STATE.OVER;
+    shake = 8;
+    soundOver();
+    var isBest = score > best;
+    if (isBest) { best = score; saveBest(best); setBest(best); }
+    notifyNative(isBest ? "newbest" : "gameover", score, best);
+    document.getElementById("goScore").textContent = score;
+    document.getElementById("goBest").textContent = "Best " + best;
+    document.getElementById("newBest").classList.toggle("show", isBest);
+    var ov = document.getElementById("overOverlay");
+    // brief delay so the topple animation reads before the panel
+    setTimeout(function () { ov.classList.remove("hidden"); }, 480);
+  }
+
+  // ---- HUD helpers ----
+  function setScore(v) { document.getElementById("score").textContent = v; }
+  function setBest(v) { document.getElementById("best").textContent = v; }
+  var comboEl = document.getElementById("combo");
+  var comboTimer = null;
+  function showCombo(c) {
+    comboEl.textContent = (c >= 2 ? "PERFECT ×" + c : "PERFECT");
+    comboEl.classList.add("show");
+    if (comboTimer) clearTimeout(comboTimer);
+    comboTimer = setTimeout(hideCombo, 900);
+  }
+  function hideCombo() { comboEl.classList.remove("show"); }
+
+  // ---- render ----
+  function drawBackground() {
+    var g = ctx.createLinearGradient(0, 0, 0, H);
+    g.addColorStop(0, COL.skyTop); g.addColorStop(1, COL.skyBot);
+    ctx.fillStyle = g; ctx.fillRect(0, 0, W, H);
+
+    // stars twinkle
+    var t = performance.now() / 1000;
+    for (var i = 0; i < stars.length; i++) {
+      var s = stars[i];
+      var a = s.a * (0.6 + 0.4 * Math.sin(t * 1.5 + s.ph));
+      ctx.fillStyle = "rgba(200,214,235," + a.toFixed(3) + ")";
+      ctx.fillRect(s.x, s.y, s.r, s.r);
+    }
+
+    // distant skyline silhouette (parallax with camY)
+    var horizon = H - 70 + Math.min(camY * 0.05, 40);
+    ctx.fillStyle = "rgba(18,28,46,0.9)";
+    var seed = 1234, bx = 0;
+    while (bx < W) {
+      seed = (seed * 9301 + 49297) % 233280;
+      var r = seed / 233280;
+      var bw = 20 + r * 34;
+      seed = (seed * 9301 + 49297) % 233280;
+      var bh = 30 + (seed / 233280) * 90;
+      ctx.fillRect(bx, horizon - bh, bw - 3, bh + 120);
+      bx += bw;
+    }
+  }
+
+  function blockPath(x, y, w, h) {
+    var r = 4;
+    ctx.beginPath();
+    ctx.moveTo(x + r, y);
+    ctx.arcTo(x + w, y, x + w, y + h, r);
+    ctx.arcTo(x + w, y + h, x, y + h, r);
+    ctx.arcTo(x, y + h, x, y, r);
+    ctx.arcTo(x, y, x + w, y, r);
+    ctx.closePath();
+  }
+
+  function drawBlock(x, w, worldY, colorT, opts) {
+    opts = opts || {};
+    var yBottom = rowScreenY(worldY);
+    var yTop = yBottom - BLOCK_H;
+    if (yTop > H + 40 || yBottom < -40) return; // cull off-screen
+    var base = mix(COL.emerald, COL.emeraldHot, colorT);
+    var top = mix(base, [255, 255, 255], 0.18);
+    var g = ctx.createLinearGradient(0, yTop, 0, yBottom);
+    g.addColorStop(0, rgb(top)); g.addColorStop(1, rgb(base));
+    blockPath(x, yTop, w, BLOCK_H);
+    ctx.fillStyle = g; ctx.fill();
+    // lit windows
+    ctx.save(); ctx.clip();
+    ctx.fillStyle = "rgba(10,20,16,0.55)";
+    var cols = Math.max(1, Math.floor(w / 16));
+    for (var i = 0; i < cols; i++) {
+      var wx = x + 6 + i * 16;
+      if (((i + worldY) % 3) !== 0) ctx.fillRect(wx, yTop + 8, 7, BLOCK_H - 16);
+    }
+    ctx.restore();
+    // gold rim on perfects / marker
+    if (opts.gold) {
+      ctx.strokeStyle = rgba(COL.gold, 0.9); ctx.lineWidth = 2;
+      blockPath(x + 1, yTop + 1, w - 2, BLOCK_H - 2); ctx.stroke();
+    } else {
+      ctx.strokeStyle = "rgba(255,255,255,0.10)"; ctx.lineWidth = 1;
+      blockPath(x + .5, yTop + .5, w - 1, BLOCK_H - 1); ctx.stroke();
+    }
+  }
+
+  function drawSlice(s) {
+    var yBottom = rowScreenY(s.worldY) + s.vy;
+    var yTop = yBottom - BLOCK_H;
+    ctx.save();
+    ctx.translate(s.x + s.w / 2, (yTop + yBottom) / 2);
+    ctx.rotate(s.rot);
+    var base = mix(COL.emerald, COL.emeraldHot, s.colorT);
+    ctx.globalAlpha = Math.max(0, 1 - s.vy / (H * 1.2));
+    ctx.fillStyle = rgb(base);
+    blockPath(-s.w / 2, -BLOCK_H / 2, s.w, BLOCK_H); ctx.fill();
+    ctx.restore();
+  }
+
+  function frame() {
+    // camera easing
+    camY += (camTarget - camY) * 0.12;
+    if (flash > 0) flash = Math.max(0, flash - 0.06);
+    if (shake > 0) shake = Math.max(0, shake - 0.4);
+
+    var sx = shake ? (Math.random() - 0.5) * shake : 0;
+    var sy = shake ? (Math.random() - 0.5) * shake : 0;
+    ctx.save();
+    ctx.translate(sx, sy);
+
+    drawBackground();
+
+    // placed tower
+    for (var i = 0; i < tower.length; i++) {
+      var b = tower[i];
+      drawBlock(b.x, b.w, b.worldY, b.colorT, { gold: false });
+    }
+    // top block gold hint when combo active
+    if (combo > 0 && tower.length) {
+      var t = tower[tower.length - 1];
+      drawBlock(t.x, t.w, t.worldY, t.colorT, { gold: true });
+    }
+
+    // falling slices
+    for (var j = slices.length - 1; j >= 0; j--) {
+      var s = slices[j];
+      s.vy += 0.9; s.x += s.vx; s.rot += s.vr;
+      drawSlice(s);
+      if (rowScreenY(s.worldY) + s.vy - BLOCK_H > H + 60) slices.splice(j, 1);
+    }
+
+    // moving block
+    if (state === STATE.PLAY && moving) {
+      // keep pace with the rising difficulty, preserving travel direction
+      moving.vx = (moving.vx < 0 ? -1 : 1) * speed;
+      moving.x += moving.vx;
+      // bounce off the play-field edges so it always sweeps the tower
+      if (moving.x < -moving.w * 0.6) { moving.x = -moving.w * 0.6; moving.vx = speed; }
+      if (moving.x > W - moving.w * 0.4) { moving.x = W - moving.w * 0.4; moving.vx = -speed; }
+      drawBlock(moving.x, moving.w, moving.worldY, moving.colorT, { gold: false });
+      // guide line at the tower's top edge
+      var top = tower[tower.length - 1];
+      var gy = rowScreenY(top.worldY) - BLOCK_H;
+      ctx.strokeStyle = "rgba(199,163,90,0.25)"; ctx.setLineDash([4, 6]); ctx.lineWidth = 1;
+      ctx.beginPath(); ctx.moveTo(top.x, gy); ctx.lineTo(top.x + top.w, gy); ctx.stroke();
+      ctx.setLineDash([]);
+    }
+
+    // perfect flash
+    if (flash > 0) {
+      ctx.fillStyle = rgba(COL.gold, flash * 0.10);
+      ctx.fillRect(0, 0, W, H);
+    }
+
+    ctx.restore();
+    requestAnimationFrame(frame);
+  }
+
+  // ---- input ----
+  function press() {
+    var ac = audio(); // unlock on first gesture
+    if (state === STATE.MENU) { startGame(); return; }
+    if (state === STATE.PLAY) { drop(); return; }
+    // OVER handled by button; ignore stray taps until panel shown
+  }
+  function startGame() {
+    document.getElementById("startOverlay").classList.add("hidden");
+    document.getElementById("overOverlay").classList.add("hidden");
+    reset();
+    state = STATE.PLAY;
+  }
+
+  document.getElementById("startBtn").addEventListener("click", function (e) { e.stopPropagation(); startGame(); });
+  document.getElementById("againBtn").addEventListener("click", function (e) { e.stopPropagation(); startGame(); });
+
+  window.addEventListener("pointerdown", function (e) {
+    // ignore taps that land on a button (handled above)
+    if (e.target && e.target.classList && e.target.classList.contains("btn")) return;
+    press();
+  }, { passive: true });
+
+  window.addEventListener("keydown", function (e) {
+    if (e.code === "Space" || e.code === "Enter" || e.code === "ArrowUp") {
+      e.preventDefault();
+      if (state === STATE.OVER) { startGame(); } else { press(); }
+    }
+  });
+
+  window.addEventListener("resize", resize);
+  window.addEventListener("orientationchange", function () { setTimeout(resize, 120); });
+
+  // ---- boot ----
+  setBest(best);
+  resize();
+  requestAnimationFrame(frame);
+})();
+</script>
+</body>
+</html>

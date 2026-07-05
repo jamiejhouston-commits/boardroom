@@ -40,6 +40,12 @@ company_module = importlib.util.module_from_spec(_COMPANY_SPEC)
 assert _COMPANY_SPEC.loader is not None
 _COMPANY_SPEC.loader.exec_module(company_module)
 
+_GAMES_SPEC = importlib.util.spec_from_file_location(
+    "hermes_games_studio", Path(__file__).with_name("hermes_games_studio.py"))
+games_module = importlib.util.module_from_spec(_GAMES_SPEC)
+assert _GAMES_SPEC.loader is not None
+_GAMES_SPEC.loader.exec_module(games_module)
+
 _ACP_SPEC = importlib.util.spec_from_file_location(
     "hermes_acp_client", Path(__file__).with_name("hermes_acp_client.py"))
 acp_module = importlib.util.module_from_spec(_ACP_SPEC)
@@ -101,6 +107,12 @@ COMPANY_TASKS_WORKSPACE = COMPANY_ARTIFACTS_ROOT / "task-list-workspace"
 # (meeting minutes + decisions). Open this folder as a vault in Obsidian.
 COMPANY_VAULT_ROOT = Path.home() / "Documents" / "Boardroom-Vault"
 COMPANY_LOCK = threading.Lock()
+
+# Games Studio — the first Boardroom division. Its own state file + workspace,
+# a sibling of the company engine (see hermes_games_studio.py).
+GAMES_STATE_PATH = Path.home() / ".hermes" / "mobile-games-studio.json"
+GAMES_ARTIFACTS_ROOT = COMPANY_ARTIFACTS_ROOT / "games-studio"
+GAMES_LOCK = threading.Lock()
 _CONFIG_LOCK = threading.Lock()   # serializes RelayConfigStore writes
 
 # Free local neural TTS (Piper) — real human voices for the agents at $0 cost.
@@ -612,6 +624,60 @@ def company_cli_runner(role: str, prompt: str) -> str:
     if result.returncode != 0:
         raise RuntimeError(f"hermes exited {result.returncode} for role {role}")
     return clean_reply(result.stdout)
+
+
+def games_cli_runner(role: str, prompt: str) -> str:
+    """runner(role, prompt) for the Games Studio engine — one Hermes CLI call per
+    turn, with a persistent session per studio role (games-<role>) so the Game
+    Designer, playtesters, and distributor keep their own memory, cleanly
+    separated from the company board's sessions. The games engine already builds
+    the full role prompt (culture + soul), so no company brain is injected."""
+    store = RelayConfigStore(CONFIG_PATH)
+    session_key = f"games-{role}"
+    resume = store.session_id("default", session_key)
+    timeout = company_turn_timeout()
+    try:
+        result = run_killable(
+            company_chat_command(prompt, role, resume),
+            timeout=timeout,
+        )
+    except subprocess.TimeoutExpired as error:
+        raise RuntimeError(
+            f"games {role} turn timed out after {timeout // 60} min — retries next tick"
+        ) from error
+    output = (result.stdout or "") + "\n" + (result.stderr or "")
+    session_id = extract_session_id(output) or latest_session_id("default")
+    if session_id:
+        store.save_session("default", session_key, session_id)
+    if result.returncode != 0:
+        raise RuntimeError(f"hermes exited {result.returncode} for games role {role}")
+    return clean_reply(result.stdout)
+
+
+def games_heartbeat() -> None:
+    """One Games Studio pulse, sharing the company's working hours + overload
+    guard so studio turns never buy timeouts. No-op unless the studio is enabled
+    and has a game in flight (the shipped flagship needs no turns)."""
+    with GAMES_LOCK:
+        state = games_module.StudioStore(GAMES_STATE_PATH).load()
+    if not state.get("enabled") or not games_module.working(state):
+        return
+    # Respect the same quiet hours + machine-load rules as the company engine.
+    try:
+        config = company_module.CompanyStore(COMPANY_STATE_PATH).load().get("config", {})
+    except Exception:  # noqa: BLE001
+        config = {}
+    hour = time.localtime().tm_hour
+    if company_module.is_quiet(hour, config.get("quiet_start", 22), config.get("quiet_end", 7)):
+        return
+    if company_module.machine_overloaded(config.get("max_load_per_core", 2.5)):
+        return
+    events = games_module.tick(state, games_cli_runner, GAMES_ARTIFACTS_ROOT)
+    if events:
+        with GAMES_LOCK:
+            games_module.StudioStore(GAMES_STATE_PATH).save(state)
+        for event in events:
+            print(f"games - {event}", flush=True)
 
 
 # ── Absolute binary resolution — ship must be PATH-INDEPENDENT. When the relay
@@ -1746,6 +1812,8 @@ def company_heartbeat_loop() -> None:
                     send_push("⏸ Company waiting on your Mac",
                               "The Mac has been overloaded for 45+ min, so builds are paced. "
                               "Close heavy apps to let the company ship faster.")
+            # Games Studio division — advance any in-flight game one stage.
+            games_heartbeat()
             # The org also meets among itself on a cadence — visible/live in the app.
             run_autonomous_meeting()
             # Kanban List mode: work the owner's task backlog (self-gates on the
@@ -1885,6 +1953,27 @@ class RelayHandler(BaseHTTPRequestHandler):
             else:
                 self.send_json(ask)
             return
+        if self.path == "/games":
+            if not self.is_authorized():
+                self.send_json({"error": "unauthorized"}, status=401)
+                return
+            with GAMES_LOCK:
+                state = games_module.StudioStore(GAMES_STATE_PATH).load()
+            self.send_json(games_module.studio_summary(state))
+            return
+        if self.path.startswith("/games/game/"):
+            if not self.is_authorized():
+                self.send_json({"error": "unauthorized"}, status=401)
+                return
+            game_id = self.path.rsplit("/", 1)[-1]
+            with GAMES_LOCK:
+                state = games_module.StudioStore(GAMES_STATE_PATH).load()
+            game = next((g for g in state.get("games", []) if g["id"] == game_id), None)
+            if game is None:
+                self.send_json({"error": "not_found"}, status=404)
+            else:
+                self.send_json(game)
+            return
         if self.path == "/company/vault/graph":
             if not self.is_authorized():
                 self.send_json({"error": "unauthorized"}, status=401)
@@ -1923,7 +2012,9 @@ class RelayHandler(BaseHTTPRequestHandler):
                              "/company/tasks", "/company/tasks/mode",
                              "/company/tasks/clear", "/company/task/delete",
                              "/company/schedules", "/company/schedule/delete",
-                             "/company/schedule/toggle"} and not is_meeting_say:
+                             "/company/schedule/toggle",
+                             "/games/start", "/games/halt",
+                             "/games/concept", "/games/score"} and not is_meeting_say:
             self.send_json({"error": "not_found"}, status=404)
             return
 
@@ -2003,6 +2094,38 @@ class RelayHandler(BaseHTTPRequestHandler):
         if self.path == "/company/vault/sync":
             filed = vault_backfill()
             self.send_json({"ok": True, "filed": filed, "vault": str(COMPANY_VAULT_ROOT)})
+            return
+
+        if self.path.startswith("/games/"):
+            # Games Studio division controls: on/off, pitch a game, record a score.
+            try:
+                body = self.read_json()
+            except Exception:
+                body = {}
+            with GAMES_LOCK:
+                store = games_module.StudioStore(GAMES_STATE_PATH)
+                state = store.load()
+                if self.path == "/games/start":
+                    state["enabled"] = True
+                    state["last_tick"] = 0.0
+                elif self.path == "/games/halt":
+                    state["enabled"] = False
+                elif self.path == "/games/concept":
+                    games_module.seed_concept(
+                        state,
+                        str(body.get("title", "")),
+                        str(body.get("line", "hyper-casual")),
+                        str(body.get("pitch", "")))
+                elif self.path == "/games/score":
+                    # The cabinet reports the owner's best arcade score.
+                    gid, score = str(body.get("id", "")), int(body.get("score", 0))
+                    for game in state.get("games", []):
+                        if game["id"] == gid:
+                            if game.get("score") is None or score > game["score"]:
+                                game["score"] = score
+                            break
+                store.save(state)
+            self.send_json(games_module.studio_summary(state))
             return
 
         if self.path.startswith("/company/"):

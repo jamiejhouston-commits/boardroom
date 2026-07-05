@@ -38,6 +38,9 @@ targets:
       - path: HermesMobile/Resources/HQAssets
         type: folder
         buildPhase: resources
+      - path: HermesMobile/Resources/GamesStudio
+        type: folder
+        buildPhase: resources
     info:
       path: HermesMobile/Info.plist
       properties:

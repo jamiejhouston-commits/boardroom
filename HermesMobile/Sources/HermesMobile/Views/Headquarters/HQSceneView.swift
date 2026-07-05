@@ -15,11 +15,13 @@ struct HQSceneView: UIViewRepresentable {
     let roamControl: HQRoamControl
     var onSelectAgent: (String) -> Void
     var onTapBoard: (HQLiveBoards.Kind) -> Void
+    var onEnterGamesStudio: () -> Void
 
     func makeCoordinator() -> Coordinator {
         Coordinator(roamControl: roamControl,
                     onSelectAgent: onSelectAgent,
-                    onTapBoard: onTapBoard)
+                    onTapBoard: onTapBoard,
+                    onEnterGamesStudio: onEnterGamesStudio)
     }
 
     func makeUIView(context: Context) -> SCNView {
@@ -106,6 +108,7 @@ struct HQSceneView: UIViewRepresentable {
         private let roamControl: HQRoamControl
         private let onSelectAgent: (String) -> Void
         private let onTapBoard: (HQLiveBoards.Kind) -> Void
+        private let onEnterGamesStudio: () -> Void
         private var boardsSignature = ""
         private var huddleIDs: Set<String> = []
         private var shippedIDs: Set<String>?
@@ -113,10 +116,12 @@ struct HQSceneView: UIViewRepresentable {
 
         init(roamControl: HQRoamControl,
              onSelectAgent: @escaping (String) -> Void,
-             onTapBoard: @escaping (HQLiveBoards.Kind) -> Void) {
+             onTapBoard: @escaping (HQLiveBoards.Kind) -> Void,
+             onEnterGamesStudio: @escaping () -> Void) {
             self.roamControl = roamControl
             self.onSelectAgent = onSelectAgent
             self.onTapBoard = onTapBoard
+            self.onEnterGamesStudio = onEnterGamesStudio
         }
 
         // MARK: Roam render loop (render thread — keep it lean)
@@ -148,6 +153,10 @@ struct HQSceneView: UIViewRepresentable {
                 while let current = node {
                     if let agentNode = current as? HQAgentNode {
                         onSelectAgent(agentNode.agentID)
+                        return
+                    }
+                    if current.name == HQSceneBuilder.gamesStudioPortalName {
+                        onEnterGamesStudio()
                         return
                     }
                     if let kind = HQLiveBoards.kind(forNodeName: current.name) {

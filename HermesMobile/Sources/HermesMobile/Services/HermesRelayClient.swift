@@ -173,6 +173,36 @@ struct HermesRelayClient {
         try await companyGET(path: "company/vault/graph")
     }
 
+    // MARK: Games Studio (the first Boardroom division)
+
+    func gamesState() async throws -> GamesStudioState {
+        try await companyGET(path: "games")
+    }
+
+    func gamesGameDetail(id: String) async throws -> StudioGame {
+        try await companyGET(path: "games/game/\(id)")
+    }
+
+    func gamesStart() async throws -> GamesStudioState {
+        try await companyPOSTJSON(path: "games/start", json: [String: Any]())
+    }
+
+    func gamesHalt() async throws -> GamesStudioState {
+        try await companyPOSTJSON(path: "games/halt", json: [String: Any]())
+    }
+
+    /// Owner pitches a game idea into the studio pipeline.
+    func gamesConcept(title: String, line: String, pitch: String) async throws -> GamesStudioState {
+        try await companyPOSTJSON(path: "games/concept",
+                                  json: ["title": title, "line": line, "pitch": pitch] as [String: Any])
+    }
+
+    /// The arcade cabinet reports the owner's best score for a game.
+    func gamesScore(id: String, score: Int) async throws -> GamesStudioState {
+        try await companyPOSTJSON(path: "games/score",
+                                  json: ["id": id, "score": score] as [String: Any])
+    }
+
     /// Live portfolio metrics (RevenueCat via the relay) — what the shipped
     /// products actually earn. `configured == false` means no key on the Mac.
     func companyRevenue() async throws -> RevenueSummary {
