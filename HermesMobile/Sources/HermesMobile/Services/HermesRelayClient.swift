@@ -159,6 +159,12 @@ struct HermesRelayClient {
                                   json: ["quiet_start": quietStart, "quiet_end": quietEnd] as [String: Any])
     }
 
+    /// Switch the production line's target platform (HQ Production Bay).
+    func companySetPlatform(_ platform: ProductionPlatform) async throws -> CompanyState {
+        try await companyPOSTJSON(path: "company/config",
+                                  json: ["platform": platform.rawValue] as [String: Any])
+    }
+
     /// Ask the company a question — returns the created ask (poll its detail).
     func companyAsk(question: String) async throws -> CompanyAsk {
         try await companyPOST(path: "company/ask", body: ["question": question])

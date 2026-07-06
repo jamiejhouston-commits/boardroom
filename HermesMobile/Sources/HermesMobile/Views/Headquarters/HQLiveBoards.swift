@@ -25,14 +25,15 @@ enum HQLiveBoards {
     private static let gateRingName = "hq.gatedesk.ring"
 
     /// What a tapped board opens.
-    enum Kind { case warBoard, kanban, gates }
+    enum Kind { case warBoard, kanban, gates, production }
 
     static func kind(forNodeName name: String?) -> Kind? {
         switch name {
-        case warBoardName: .warBoard
-        case kanbanName:   .kanban
-        case gateDeskName: .gates
-        default:           nil
+        case warBoardName:                        .warBoard
+        case kanbanName:                          .kanban
+        case gateDeskName:                        .gates
+        case HQSceneBuilder.productionBayName:    .production
+        default:                                  nil
         }
     }
 

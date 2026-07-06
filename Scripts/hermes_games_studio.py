@@ -32,15 +32,24 @@ import time
 from datetime import datetime
 from pathlib import Path
 
-# The three narrow product lines the studio makes.
-LINES = ("daily-puzzle", "hyper-casual", "viral-funnel")
+# The product lines the studio makes: playable games, and sellable game-asset
+# packs (2D + 3D) that flow through the same pipeline with asset-aware prompts.
+GAME_LINES = ("daily-puzzle", "hyper-casual", "viral-funnel")
+ASSET_LINES = ("asset-2d", "asset-3d")
+LINES = GAME_LINES + ASSET_LINES
 
 # Stage machine.
 STAGE_ORDER = ("concept", "design", "build", "playtest", "fun_gate",
                "distribution", "shipped")
 TERMINAL_STAGES = ("shipped", "shelved")
 DISTRIBUTION_CHANNELS = ("itch", "reddit", "portals")
+# Asset packs sell on marketplaces, not game portals.
+ASSET_CHANNELS = ("itch", "roblox", "unity")
 CHANNEL_STATES = ("planned", "submitted", "live")
+
+
+def is_asset(game: dict) -> bool:
+    return str(game.get("line", "")).startswith("asset-")
 
 # How many independent playtesters sit on the couch per build.
 PLAYTEST_PANEL = ("Pixel", "Bolt", "Ada")
@@ -81,7 +90,8 @@ def new_game(title: str, line: str, pitch: str = "") -> dict:
         "runtime": "",                       # bundled/served HTML filename
         "playtests": [],                     # [{tester, rating, reaction}]
         "fun_gate": {"verdict": "", "reasons": []},   # APPROVED | REJECTED
-        "distribution": {c: "planned" for c in DISTRIBUTION_CHANNELS},
+        "distribution": {c: "planned" for c in
+                         (ASSET_CHANNELS if line in ASSET_LINES else DISTRIBUTION_CHANNELS)},
         "score": None,                       # owner's best arcade score (from app)
         "created": datetime.now().isoformat(timespec="seconds"),
         "iteration": 0,                      # bumped on each Fun-Gate rejection
@@ -117,7 +127,40 @@ ROLE_SOULS = {
     "builder": (
         "You are the Lead Game Developer. You build the actual playable HTML5 "
         "game — canvas, input, audio, juice — real and working, never a mockup."),
+    "artist": (
+        "You are the Lead Game Artist — a professional 2D/3D asset artist whose "
+        "packs sell on real marketplaces. Consistency is your religion: one "
+        "palette, one style, one naming convention across every piece. You "
+        "produce real files with real tools, never descriptions of files."),
 }
+
+# Burned into every asset-pack build turn. The artist is a Hermes agent with
+# full shell access on this Mac — these are the REAL tools it drives, so the
+# output is store-ready files, not prose. The honest-fallback clause is
+# load-bearing: a missing tool must degrade the format, never fake the output.
+ASSET_TOOLKIT = (
+    "You have FULL developer tools on this machine and you USE them:\n"
+    "• 2D: author crisp vector art as hand-written SVG (consistent palette, "
+    "stroke weight, and silhouette language across the whole pack), then "
+    "rasterize to transparent PNGs at 1x/2x with `rsvg-convert`, `qlmanage`, or "
+    "a small Python (cairosvg/Pillow) script; assemble sprite sheets and "
+    "9-slices where the pack calls for them.\n"
+    "• 3D: script Blender headless (`blender -b -P build.py`) to model, "
+    "UV-unwrap, and texture game-ready meshes; keep sensible budgets "
+    "(props ≤5k tris, hero pieces ≤10k); bake simple PBR materials; export "
+    "each piece as glTF/GLB plus FBX and OBJ so every engine imports it.\n"
+    "• Roblox: export FBX that imports cleanly into Roblox Studio (single "
+    "material per mesh where possible, Y-up, real-world scale) and include a "
+    "Roblox import note; write .rbxmx (XML) model files directly when a "
+    "ready-made model tree helps buyers.\n"
+    "• Store-ready packaging: organized folders per format, preview renders "
+    "of every piece, LICENSE.txt (royalty-free, resale of the pack itself "
+    "prohibited), and a README with per-engine import instructions (Roblox, "
+    "Unity, Unreal, Godot, web).\n"
+    "If a tool is genuinely missing (e.g. Blender isn't installed), SAY SO in "
+    "your summary and ship the best format you can actually produce and verify "
+    "— never fake a file you didn't make."
+)
 
 
 def role_prompt(role: str, body: str) -> str:
@@ -208,16 +251,24 @@ def parse_fun_reasons(text: str) -> list[str]:
     return reasons
 
 
-def parse_distribution(text: str) -> dict:
+def parse_distribution(text: str, asset: bool = False) -> dict:
     """Map a distributor reply onto per-channel status. Recognizes each channel
     name near a status word; anything unseen keeps a sensible default."""
     lowered = (text or "").lower()
-    result = {"itch": "live", "reddit": "submitted", "portals": "planned"}
-    aliases = {
-        "itch": ["itch"],
-        "reddit": ["reddit", "r/"],
-        "portals": ["portal", "newgrounds", "crazygames", "poki", "kongregate"],
-    }
+    if asset:
+        result = {"itch": "live", "roblox": "submitted", "unity": "planned"}
+        aliases = {
+            "itch": ["itch"],
+            "roblox": ["roblox", "creator store", "creator marketplace"],
+            "unity": ["unity", "unreal", "fab", "godot", "marketplace", "asset store"],
+        }
+    else:
+        result = {"itch": "live", "reddit": "submitted", "portals": "planned"}
+        aliases = {
+            "itch": ["itch"],
+            "reddit": ["reddit", "r/"],
+            "portals": ["portal", "newgrounds", "crazygames", "poki", "kongregate"],
+        }
     for channel, keys in aliases.items():
         for key in keys:
             idx = lowered.find(key)
@@ -258,23 +309,47 @@ def advance_game(state: dict, game: dict, runner, artifacts_root: Path | None = 
     and (optionally) writing the built game file to disk."""
     stage = game["stage"]
 
+    asset = is_asset(game)
+    kind = "3D" if game["line"] == "asset-3d" else "2D"
+
     if stage == "concept":
-        reply = runner("game_designer", role_prompt("game_designer",
-            f"New {game['line']} web game concept: '{game['title']}'"
-            f"{' — ' + game['pitch'] if game['pitch'] else ''}.\n"
-            "In 2-3 sentences, sharpen the concept: the one core action, the hook "
-            "that makes it fun in ten seconds, and why a player comes back. "
-            "Natural prose, no lists."))
+        if asset:
+            body = (
+                f"New {kind} game-asset pack concept: '{game['title']}'"
+                f"{' — ' + game['pitch'] if game['pitch'] else ''}.\n"
+                "In 2-3 sentences, sharpen the pack: the theme and style, roughly "
+                "what pieces it contains, who buys it (Roblox creators, Unity/Unreal "
+                "indies, web devs), and why it sells over free alternatives. "
+                "Natural prose, no lists.")
+        else:
+            body = (
+                f"New {game['line']} web game concept: '{game['title']}'"
+                f"{' — ' + game['pitch'] if game['pitch'] else ''}.\n"
+                "In 2-3 sentences, sharpen the concept: the one core action, the hook "
+                "that makes it fun in ten seconds, and why a player comes back. "
+                "Natural prose, no lists.")
+        reply = runner("game_designer", role_prompt("game_designer", body))
         game["pitch"] = reply.strip()[:400] or game["pitch"]
         game["stage"] = "design"
 
     elif stage == "design":
-        reply = runner("game_designer", role_prompt("game_designer",
-            f"Lock the design for '{game['title']}' ({game['line']}). "
-            f"Concept: {game['pitch']}\n"
-            "Write 3-5 crisp DESIGN PILLARS — the non-negotiables the build must "
-            "honor (core loop, control scheme, feedback/juice, difficulty curve, "
-            "session length). One pillar per line, no preamble."))
+        if asset:
+            body = (
+                f"Lock the spec for the {kind} asset pack '{game['title']}'. "
+                f"Concept: {game['pitch']}\n"
+                "Write 3-5 crisp PACK PILLARS — the non-negotiables the build must "
+                "honor (art style + palette, the exact piece list, technical budget "
+                "— poly counts / texture sizes / formats, naming + export "
+                "conventions, and the one thing that makes it stand out on a "
+                "store). One pillar per line, no preamble.")
+        else:
+            body = (
+                f"Lock the design for '{game['title']}' ({game['line']}). "
+                f"Concept: {game['pitch']}\n"
+                "Write 3-5 crisp DESIGN PILLARS — the non-negotiables the build must "
+                "honor (core loop, control scheme, feedback/juice, difficulty curve, "
+                "session length). One pillar per line, no preamble.")
+        reply = runner("game_designer", role_prompt("game_designer", body))
         game["pillars"] = parse_pillars(reply)
         game["stage"] = "build"
 
@@ -283,29 +358,55 @@ def advance_game(state: dict, game: dict, runner, artifacts_root: Path | None = 
         if artifacts_root is not None:
             outdir = Path(artifacts_root) / _game_dirname(game)
             outdir.mkdir(parents=True, exist_ok=True)
-        reply = runner("builder", role_prompt("builder",
-            f"Build '{game['title']}' as a real, single-file HTML5 game honoring "
-            f"these pillars:\n- " + "\n- ".join(game["pillars"] or [game["pitch"]]) +
-            (f"\nSave it to {outdir}/index.html." if outdir else "") +
-            "\nCanvas render loop, touch + keyboard input, WebAudio feedback, a "
-            "score and a best-score, and a restart loop. No stubs. Summarize what "
-            "you built in 2-3 lines and name the entry file."))
-        game["build_notes"] = reply.strip()[:600]
-        # Record the runtime filename. The flagship keeps its bundled file.
-        if not game["runtime"]:
-            game["runtime"] = "index.html"
+        pillars = "\n- ".join(game["pillars"] or [game["pitch"]])
+        if asset:
+            reply = runner("artist", role_prompt("artist",
+                f"{ASSET_TOOLKIT}\n\n"
+                f"Produce the {kind} asset pack '{game['title']}' honoring these "
+                f"pillars:\n- {pillars}\n" +
+                (f"Save every file under {outdir}/ in the store-ready layout." if outdir
+                 else "Lay the pack out store-ready.") +
+                "\nBuild EVERY piece in the pillar piece list — professional, "
+                "consistent, sellable quality, no filler. Summarize what you made "
+                "in 2-3 lines: piece count, formats, and anything a buyer must know."))
+            game["build_notes"] = reply.strip()[:600]
+            # Asset packs aren't playable in the cabinet — no runtime file.
+        else:
+            reply = runner("builder", role_prompt("builder",
+                f"Build '{game['title']}' as a real, single-file HTML5 game honoring "
+                f"these pillars:\n- {pillars}" +
+                (f"\nSave it to {outdir}/index.html." if outdir else "") +
+                "\nCanvas render loop, touch + keyboard input, WebAudio feedback, a "
+                "score and a best-score, and a restart loop. No stubs. Summarize what "
+                "you built in 2-3 lines and name the entry file."))
+            game["build_notes"] = reply.strip()[:600]
+            # Record the runtime filename. The flagship keeps its bundled file.
+            if not game["runtime"]:
+                game["runtime"] = "index.html"
         game["stage"] = "playtest"
 
     elif stage == "playtest":
         # Playtest choreography: each tester on the couch plays and reports.
+        # For asset packs the same panel sits as picky store buyers instead.
         game["playtests"] = []
         for tester in PLAYTEST_PANEL:
-            reply = runner("playtester", role_prompt("playtester",
-                f"You are {tester}. Play '{game['title']}' ({game['line']}). "
-                f"Design pillars:\n- " + "\n- ".join(game["pillars"] or ["(none)"]) +
-                f"\nBuild notes: {game['build_notes']}\n"
-                "React in ONE honest sentence, then give a fun rating from 1 to 10 "
-                "as 'Rating: N/10'."))
+            if asset:
+                body = (
+                    f"You are {tester}, a picky game developer browsing a store for "
+                    f"a {kind} asset pack. Judge '{game['title']}'. "
+                    f"Pack pillars:\n- " + "\n- ".join(game["pillars"] or ["(none)"]) +
+                    f"\nBuild notes: {game['build_notes']}\n"
+                    "Would you pay for this — is it consistent, complete, and easy to "
+                    "drop into your engine? React in ONE honest sentence, then give a "
+                    "quality rating from 1 to 10 as 'Rating: N/10'.")
+            else:
+                body = (
+                    f"You are {tester}. Play '{game['title']}' ({game['line']}). "
+                    f"Design pillars:\n- " + "\n- ".join(game["pillars"] or ["(none)"]) +
+                    f"\nBuild notes: {game['build_notes']}\n"
+                    "React in ONE honest sentence, then give a fun rating from 1 to 10 "
+                    "as 'Rating: N/10'.")
+            reply = runner("playtester", role_prompt("playtester", body))
             result = parse_playtest(reply)
             result["tester"] = tester
             game["playtests"].append(result)
@@ -316,24 +417,34 @@ def advance_game(state: dict, game: dict, runner, artifacts_root: Path | None = 
         transcript = "\n".join(
             f"{t['tester']}: {t['rating']}/10 — {t['reaction']}"
             for t in game.get("playtests", []))
-        reply = runner("game_designer", role_prompt("game_designer",
-            f"FUN GATE for '{game['title']}'. Average playtest score {avg}/10 "
-            f"across {count} testers.\nPlaytests:\n{transcript}\n\n"
-            "Decide whether this build is fun enough to ship. Give up to 4 bullet "
-            "reasons, then end with EXACTLY one line: 'GATE: APPROVED' or "
-            "'GATE: REJECTED'."))
+        if asset:
+            body = (
+                f"QUALITY GATE for the {kind} asset pack '{game['title']}'. Average "
+                f"review score {avg}/10 across {count} reviewers.\nReviews:\n{transcript}\n\n"
+                "Decide whether this pack is professional enough to SELL — would a "
+                "real studio pay for it and not refund? Give up to 4 bullet reasons, "
+                "then end with EXACTLY one line: 'GATE: APPROVED' or 'GATE: REJECTED'.")
+        else:
+            body = (
+                f"FUN GATE for '{game['title']}'. Average playtest score {avg}/10 "
+                f"across {count} testers.\nPlaytests:\n{transcript}\n\n"
+                "Decide whether this build is fun enough to ship. Give up to 4 bullet "
+                "reasons, then end with EXACTLY one line: 'GATE: APPROVED' or "
+                "'GATE: REJECTED'.")
+        reply = runner("game_designer", role_prompt("game_designer", body))
         passed = fun_gate_passed(reply)
         game["fun_gate"] = {
             "verdict": "APPROVED" if passed else "REJECTED",
             "reasons": parse_fun_reasons(reply),
         }
+        gate_name = "Quality Gate" if asset else "Fun Gate"
         if passed:
             game["stage"] = "distribution"
-            log_event(state, f"Fun Gate APPROVED: {game['title']}")
+            log_event(state, f"{gate_name} APPROVED: {game['title']}")
         else:
             game["rejections"] = game.get("rejections", 0) + 1
             game["iteration"] = game.get("iteration", 0) + 1
-            log_event(state, f"Fun Gate REJECTED: {game['title']} — back to design")
+            log_event(state, f"{gate_name} REJECTED: {game['title']} — back to design")
             if game["rejections"] >= MAX_REJECTIONS:
                 game["stage"] = "shelved"
                 log_event(state, f"shelved after {MAX_REJECTIONS} rejections: {game['title']}")
@@ -342,11 +453,19 @@ def advance_game(state: dict, game: dict, runner, artifacts_root: Path | None = 
 
     elif stage == "distribution":
         avg, _ = playtest_scores(game)
-        reply = runner("distributor", role_prompt("distributor",
-            f"'{game['title']}' passed the Fun Gate (avg {avg}/10). Get it in front "
-            "of players. For each channel — itch.io, Reddit, portals — say whether "
-            "it is 'live', 'submitted', or 'planned' and one line on the angle."))
-        game["distribution"] = parse_distribution(reply)
+        if asset:
+            reply = runner("distributor", role_prompt("distributor",
+                f"The {kind} asset pack '{game['title']}' passed the Quality Gate "
+                f"(avg {avg}/10). Put it up for sale. For each channel — itch.io, "
+                "the Roblox Creator Store, and Unity Asset Store / other engine "
+                "marketplaces — say whether it is 'live', 'submitted', or 'planned' "
+                "and one line on pricing/positioning."))
+        else:
+            reply = runner("distributor", role_prompt("distributor",
+                f"'{game['title']}' passed the Fun Gate (avg {avg}/10). Get it in front "
+                "of players. For each channel — itch.io, Reddit, portals — say whether "
+                "it is 'live', 'submitted', or 'planned' and one line on the angle."))
+        game["distribution"] = parse_distribution(reply, asset=asset)
         game["stage"] = "shipped"
         log_event(state, f"shipped: {game['title']}")
 

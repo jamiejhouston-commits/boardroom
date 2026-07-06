@@ -2179,6 +2179,11 @@ class RelayHandler(BaseHTTPRequestHandler):
                             cfg["quiet_end"] = max(0, min(23, int(body["quiet_end"])))
                         if "interval_minutes" in body:
                             cfg["interval_minutes"] = max(1, int(body["interval_minutes"]))
+                        if "platform" in body:
+                            # HQ Production Bay: what the line produces.
+                            plat = str(body["platform"]).lower()
+                            if plat in ("ios", "ipados", "macos"):
+                                cfg["platform"] = plat
                     elif self.path == "/company/tasks":
                         # Owner hands the team a Kanban backlog. Accepts a list
                         # ({"tasks": [...]}) or one item ({"text": "..."}).

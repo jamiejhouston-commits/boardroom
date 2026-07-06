@@ -154,6 +154,53 @@ struct CompanyConfig: Codable, Equatable {
     var quietEnd: Int = 7
     var maxActive: Int = 1
     var budgetCalls: Int = 40
+    /// Production-line target. Optional so a relay that predates the field
+    /// still decodes; missing means the historical default, iOS.
+    var platform: String?
+
+    var productionPlatform: ProductionPlatform {
+        ProductionPlatform(rawValue: platform ?? "") ?? .ios
+    }
+}
+
+/// What the company's production line builds — switched from the HQ's
+/// Production Bay. Raw values match the relay (`hermes_company.PLATFORM_DIRECTIVES`).
+enum ProductionPlatform: String, CaseIterable, Identifiable {
+    case ios, ipados, macos
+
+    var id: String { rawValue }
+
+    var label: String {
+        switch self {
+        case .ios:    "iPhone"
+        case .ipados: "iPad"
+        case .macos:  "Mac"
+        }
+    }
+
+    var systemLabel: String {
+        switch self {
+        case .ios:    "iOS"
+        case .ipados: "iPadOS"
+        case .macos:  "macOS"
+        }
+    }
+
+    var icon: String {
+        switch self {
+        case .ios:    "iphone"
+        case .ipados: "ipad.landscape"
+        case .macos:  "desktopcomputer"
+        }
+    }
+
+    var blurb: String {
+        switch self {
+        case .ios:    "Native SwiftUI iPhone apps, verified in the iPhone Simulator."
+        case .ipados: "Native SwiftUI iPad apps — split views, pointer, big-canvas layouts."
+        case .macos:  "Native SwiftUI Mac apps — windows, menus, keyboard-first."
+        }
+    }
 }
 
 struct CompanyScore: Codable, Equatable {

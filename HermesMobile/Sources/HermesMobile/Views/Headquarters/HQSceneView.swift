@@ -193,6 +193,8 @@ struct HQSceneView: UIViewRepresentable {
                 boardsSignature = signature
                 if let root = scnView?.scene?.rootNode {
                     HQLiveBoards.update(root: root, state: state)
+                    HQSceneBuilder.applyProductionPlatform(
+                        root: root, platform: state.config.productionPlatform)
                     HQSceneBuilder.applyDaylight(
                         root: root, hour: Calendar.current.component(.hour, from: Date()))
                 }
@@ -257,7 +259,8 @@ struct HQSceneView: UIViewRepresentable {
             let inits = state.initiatives.map { "\($0.id):\($0.stage)" }.joined(separator: ",")
             let tasks = (state.tasks ?? []).map { "\($0.id):\($0.status)" }.joined(separator: ",")
             let lastEvent = state.events?.last?.id ?? "-"
-            return "\(inits)|\(tasks)|\(lastEvent)|\(liveMeetingID ?? "-")"
+            let platform = state.config.productionPlatform.rawValue
+            return "\(inits)|\(tasks)|\(lastEvent)|\(liveMeetingID ?? "-")|\(platform)"
         }
     }
 }

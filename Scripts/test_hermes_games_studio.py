@@ -112,6 +112,12 @@ class ParserTests(unittest.TestCase):
         for status in dist.values():
             self.assertIn(status, studio.CHANNEL_STATES)
 
+    def test_parse_distribution_asset_channels(self):
+        text = ("itch: live. Roblox Creator Store: submitted for review. "
+                "Unity Asset Store: planned for next week.")
+        dist = studio.parse_distribution(text, asset=True)
+        self.assertEqual(dist, {"itch": "live", "roblox": "submitted", "unity": "planned"})
+
 
 class ChargedRunnerTests(unittest.TestCase):
     def test_counts_and_raises_over_budget(self):
@@ -166,6 +172,39 @@ class PipelineTests(unittest.TestCase):
         self.assertEqual(stages,
                          ["design", "build", "playtest", "fun_gate",
                           "distribution", "shipped"])
+
+    def test_full_pipeline_ships_an_asset_pack(self):
+        state = studio.new_studio_state()
+        state["enabled"] = True
+        game = studio.seed_concept(state, "Voxel Dungeon Props", "asset-3d",
+                                   "50 modular dungeon pieces")
+        self.assertTrue(studio.is_asset(game))
+
+        def runner(role, prompt):
+            if role == "game_designer" and "QUALITY GATE" in prompt:
+                return "- Consistent style\n- Store-ready formats\nGATE: APPROVED"
+            if role == "game_designer" and "PACK PILLARS" in prompt:
+                return "- Low-poly stylized, one palette\n- 50 pieces\n- glTF+FBX+OBJ"
+            if role == "artist":
+                self.assertIn("blender", prompt.lower())   # the toolkit rode along
+                self.assertIn("roblox", prompt.lower())
+                return "Built 50 meshes, exported glTF/FBX/OBJ + previews."
+            if role == "playtester":
+                return "Would buy — drops straight into Unity. Rating: 9/10"
+            if role == "distributor":
+                return "itch: live. Roblox Creator Store: submitted. Unity: planned."
+            return "sharpened pack concept"
+
+        for _ in range(len(studio.STAGE_ORDER) + 1):
+            if game["stage"] in studio.TERMINAL_STAGES:
+                break
+            self.advance(state, game, runner)
+
+        self.assertEqual(game["stage"], "shipped")
+        self.assertEqual(game["fun_gate"]["verdict"], "APPROVED")
+        self.assertEqual(game["runtime"], "")   # packs never enter the cabinet
+        self.assertEqual(set(game["distribution"].keys()), {"itch", "roblox", "unity"})
+        self.assertEqual(game["distribution"]["roblox"], "submitted")
 
     def test_fun_gate_rejection_loops_back_to_design(self):
         state, game = self.make_state()

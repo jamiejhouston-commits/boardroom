@@ -20,6 +20,17 @@ class StateStoreTests(unittest.TestCase):
         self.assertEqual(state["config"]["max_active"], 1)
         self.assertEqual(state["config"]["budget_calls"], 70)
         self.assertEqual(state["config"]["interval_minutes"], 30)
+        self.assertEqual(state["config"]["platform"], "ios")
+
+    def test_platform_directive(self):
+        state = company.new_state()
+        self.assertIn("iPhone", company.platform_directive(state))
+        state["config"]["platform"] = "macos"
+        self.assertIn("macOS", company.platform_directive(state))
+        state["config"]["platform"] = "ipados"
+        self.assertIn("iPad", company.platform_directive(state))
+        state["config"]["platform"] = "bogus"   # unknown → safe iPhone default
+        self.assertIn("iPhone", company.platform_directive(state))
 
     def test_store_roundtrip(self):
         with tempfile.TemporaryDirectory() as tmp:

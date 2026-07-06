@@ -12,6 +12,7 @@ enum GamesCameraMode: Equatable { case overview, orbit, roam }
 /// Mirrors `HQSceneView`'s `UIViewRepresentable` + `Coordinator` shape.
 struct GamesRoomSceneView: UIViewRepresentable {
     var game: StudioGame?
+    var bestScore: Int = 0
     var cameraMode: GamesCameraMode
     let roamControl: RoamController
     var onTap: (GamesRoomBuilder.Tap) -> Void
@@ -65,7 +66,7 @@ struct GamesRoomSceneView: UIViewRepresentable {
 
         camera.apply(cameraMode)
         context.coordinator.lastMode = cameraMode
-        context.coordinator.refresh(game: game)
+        context.coordinator.refresh(game: game, bestScore: bestScore)
         return view
     }
 
@@ -81,7 +82,7 @@ struct GamesRoomSceneView: UIViewRepresentable {
             }
             coordinator.lastMode = cameraMode
         }
-        coordinator.refresh(game: game)
+        coordinator.refresh(game: game, bestScore: bestScore)
     }
 
     // MARK: Coordinator
@@ -135,13 +136,13 @@ struct GamesRoomSceneView: UIViewRepresentable {
         }
 
         @MainActor
-        func refresh(game: StudioGame?) {
-            let newSig = Self.signatureString(game)
+        func refresh(game: StudioGame?, bestScore: Int = 0) {
+            let newSig = Self.signatureString(game) + "|best:\(bestScore)"
             guard newSig != signature else { return }
             let hadDecision = signature.contains("APPROVED")
             signature = newSig
             guard let root = scnView?.scene?.rootNode else { return }
-            GamesRoomBoards.update(root: root, game: game)
+            GamesRoomBoards.update(root: root, game: game, bestScore: bestScore)
 
             // Playtest choreography: when a build lands as fun, the couch reacts.
             if let game, game.funGate.isApproved, !hadDecision {

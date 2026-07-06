@@ -46,6 +46,11 @@ enum GamesRoomBoards {
                     sceneSize: CGSize(width: 840, height: 480), title: "DISTRIBUTION")
     }
 
+    static func highScoresNode() -> SCNNode {
+        framedBoard(name: GamesRoomBuilder.highScoreBoardName, width: 5.6, height: 3.2,
+                    sceneSize: CGSize(width: 840, height: 480), title: "HIGH SCORES")
+    }
+
     static func cabinetScreenMaterial() -> SCNMaterial {
         boardMaterial(scene: attractScene(), emissionIntensity: 0.9)
     }
@@ -64,7 +69,7 @@ enum GamesRoomBoards {
 
     // MARK: Live update
 
-    static func update(root: SCNNode, game: StudioGame?) {
+    static func update(root: SCNNode, game: StudioGame?, bestScore: Int = 0) {
         if let scene = scene(under: root, named: GamesRoomBuilder.megaScreenName) {
             drawMegaScreen(scene, game: game)
         }
@@ -74,13 +79,18 @@ enum GamesRoomBoards {
         if let scene = scene(under: root, named: GamesRoomBuilder.distributionName) {
             drawDistribution(scene, game: game)
         }
+        if let scene = scene(under: root, named: GamesRoomBuilder.highScoreBoardName) {
+            drawHighScores(scene, game: game, bestScore: bestScore)
+        }
         if let scene = scene(under: root, named: GamesRoomBuilder.cabinetMarqueeName) {
             drawMarquee(scene, title: (game?.title ?? "SKYLINE STACK").uppercased())
         }
         if let scene = scene(under: root, named: GamesRoomBuilder.funGateBadgeName) {
-            drawPlaque(scene, verdict: game?.funGate)
+            drawPlaque(scene, verdict: game?.funGate,
+                       title: (game?.gateLabel ?? "Fun Gate").uppercased())
         }
         updateFunGateColor(root: root, game: game)
+        GamesRoomBuilder.updatePipeline(root: root, stage: game?.stage ?? "concept")
     }
 
     private static func updateFunGateColor(root: SCNNode, game: StudioGame?) {
@@ -217,6 +227,34 @@ enum GamesRoomBoards {
         }
     }
 
+    // MARK: High-score wall — the owner's arcade record + the review panel
+
+    private static func drawHighScores(_ scene: SKScene, game: StudioGame?, bestScore: Int) {
+        redraw(scene, title: "HIGH SCORES") { content, size in
+            // The owner's record, front and center.
+            content.addChild(label("YOU", font: fontBold, size: 26, color: textDim,
+                                   at: CGPoint(x: 46, y: size.height - 150), align: .left))
+            content.addChild(label(bestScore > 0 ? "\(bestScore)" : "— play the cabinet —",
+                                   font: fontBold, size: bestScore > 0 ? 96 : 30,
+                                   color: bestScore > 0 ? gold : textDim,
+                                   at: CGPoint(x: 46, y: size.height - 250), align: .left))
+            guard let game else { return }
+            // The panel's verdicts, ranked.
+            var y = size.height - 320
+            let ranked = game.playtests.sorted { $0.rating > $1.rating }
+            for (i, test) in ranked.prefix(3).enumerated() {
+                let rankColor: UIColor = i == 0 ? gold : i == 1 ? emerald : textDim
+                content.addChild(label("\(i + 1).", font: fontBold, size: 26, color: rankColor,
+                                       at: CGPoint(x: 46, y: y), align: .left))
+                content.addChild(label(test.tester, font: fontSemi, size: 26, color: textBright,
+                                       at: CGPoint(x: 92, y: y), align: .left))
+                content.addChild(label("\(test.rating)/10", font: fontBold, size: 26, color: rankColor,
+                                       at: CGPoint(x: size.width - 46, y: y), align: .right))
+                y -= 52
+            }
+        }
+    }
+
     // MARK: Cabinet marquee + attract + Fun-Gate plaque
 
     private static func drawMarquee(_ scene: SKScene, title: String) {
@@ -227,14 +265,15 @@ enum GamesRoomBoards {
         scene.addChild(node)
     }
 
-    private static func drawPlaque(_ scene: SKScene, verdict: StudioFunGate?) {
+    private static func drawPlaque(_ scene: SKScene, verdict: StudioFunGate?,
+                                   title titleText: String = "FUN GATE") {
         scene.removeAllChildren()
         let word: String
         let color: UIColor
         if let verdict, verdict.isApproved { word = "APPROVED"; color = emerald }
         else if let verdict, verdict.isRejected { word = "REJECTED"; color = amber }
         else { word = "PENDING"; color = textDim }
-        let title = label("FUN GATE", font: fontBold, size: 40, color: textDim,
+        let title = label(titleText, font: fontBold, size: 40, color: textDim,
                           at: CGPoint(x: scene.size.width / 2, y: scene.size.height * 0.66))
         title.verticalAlignmentMode = .center
         scene.addChild(title)

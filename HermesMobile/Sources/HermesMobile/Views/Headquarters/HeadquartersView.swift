@@ -22,14 +22,15 @@ struct HeadquartersView: View {
     @State private var showGamesStudio = false
 
     private enum BoardSheet: String, Identifiable {
-        case warBoard, kanban, gates
+        case warBoard, kanban, gates, production
         var id: String { rawValue }
 
         init(_ kind: HQLiveBoards.Kind) {
             switch kind {
-            case .warBoard: self = .warBoard
-            case .kanban:   self = .kanban
-            case .gates:    self = .gates
+            case .warBoard:   self = .warBoard
+            case .kanban:     self = .kanban
+            case .gates:      self = .gates
+            case .production: self = .production
             }
         }
     }
@@ -165,6 +166,80 @@ struct HeadquartersView: View {
 
         case .gates:
             HQGateSheet()
+
+        case .production:
+            HQProductionSheet()
+        }
+    }
+}
+
+// MARK: - Production Bay sheet — pick what the line builds
+
+private struct HQProductionSheet: View {
+    @EnvironmentObject private var company: CompanyStore
+    @EnvironmentObject private var runtime: HermesRuntimeController
+    @Environment(\.dismiss) private var dismiss
+    @State private var switching = false
+    @State private var errorText: String?
+
+    private var current: ProductionPlatform { company.state.config.productionPlatform }
+
+    var body: some View {
+        List {
+            Section {
+                ForEach(ProductionPlatform.allCases) { platform in
+                    Button { select(platform) } label: {
+                        HStack(spacing: 14) {
+                            Image(systemName: platform.icon)
+                                .font(.title3)
+                                .frame(width: 34)
+                                .foregroundStyle(platform == current
+                                                 ? HermesTheme.emerald : .secondary)
+                            VStack(alignment: .leading, spacing: 3) {
+                                Text("\(platform.label) · \(platform.systemLabel)")
+                                    .font(.subheadline.weight(.semibold))
+                                    .foregroundStyle(.primary)
+                                Text(platform.blurb)
+                                    .font(.caption)
+                                    .foregroundStyle(.secondary)
+                            }
+                            Spacer()
+                            if platform == current {
+                                Image(systemName: "checkmark.circle.fill")
+                                    .foregroundStyle(HermesTheme.emerald)
+                            }
+                        }
+                        .padding(.vertical, 4)
+                    }
+                    .buttonStyle(.plain)
+                }
+            } footer: {
+                Text("Every new initiative is designed, built, and demoed for this platform. In-flight builds keep their original target.")
+            }
+            if let errorText {
+                Text(errorText).font(.caption).foregroundStyle(.red)
+            }
+        }
+        .navigationTitle("Production Line")
+        .navigationBarTitleDisplayMode(.inline)
+        .disabled(switching)
+        .overlay { if switching { ProgressView() } }
+    }
+
+    private func select(_ platform: ProductionPlatform) {
+        guard platform != current else { dismiss(); return }
+        switching = true
+        errorText = nil
+        Task {
+            do {
+                _ = try await HermesRelayClient(configuration: runtime.relayConfiguration)
+                    .companySetPlatform(platform)
+                await company.refresh(relay: runtime.relayConfiguration)
+                dismiss()
+            } catch {
+                errorText = error.localizedDescription
+            }
+            switching = false
         }
     }
 }

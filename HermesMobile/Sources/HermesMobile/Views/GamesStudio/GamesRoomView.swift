@@ -36,6 +36,7 @@ struct GamesRoomView: View {
         ZStack {
             GamesRoomSceneView(
                 game: studio.currentGame,
+                bestScore: studio.localBest,
                 cameraMode: cameraMode,
                 roamControl: roamControl,
                 onTap: handleTap
@@ -113,10 +114,10 @@ struct GamesRoomView: View {
             pill(icon: "gamecontroller.fill",
                  text: studio.currentGame?.stageLabel ?? "Idle",
                  tint: GamesRoomTheme.emerald)
-            if let gate = studio.currentGame?.funGate, gate.isDecided {
-                pill(icon: gate.isApproved ? "checkmark.seal.fill" : "xmark.seal.fill",
-                     text: gate.isApproved ? "Fun Gate ✓" : "Fun Gate ✗",
-                     tint: gate.isApproved ? GamesRoomTheme.emerald : GamesRoomTheme.amber)
+            if let game = studio.currentGame, game.funGate.isDecided {
+                pill(icon: game.funGate.isApproved ? "checkmark.seal.fill" : "xmark.seal.fill",
+                     text: "\(game.gateLabel) \(game.funGate.isApproved ? "✓" : "✗")",
+                     tint: game.funGate.isApproved ? GamesRoomTheme.emerald : GamesRoomTheme.amber)
             }
             Spacer()
             Button { pitching = true } label: {
@@ -313,14 +314,16 @@ private struct FunGateSheet: View {
                     }
                 }
                 Section {
-                    Text("The Game Designer owns the Fun Gate. A build that isn't fun in the first ten seconds does not ship — it goes back to design.")
+                    Text(game?.isAssetPack == true
+                         ? "The Game Designer owns the Quality Gate. A pack a real studio wouldn't pay for does not go on sale — it goes back to design."
+                         : "The Game Designer owns the Fun Gate. A build that isn't fun in the first ten seconds does not ship — it goes back to design.")
                         .font(.footnote).foregroundStyle(.secondary)
                 }
             } else {
                 ContentUnavailableView("No verdict yet", systemImage: "hourglass")
             }
         }
-        .navigationTitle("Fun Gate")
+        .navigationTitle(game?.gateLabel ?? "Fun Gate")
         .navigationBarTitleDisplayMode(.inline)
     }
 }
@@ -346,7 +349,9 @@ private struct DistributionSheet: View {
                     }
                 }
                 Section {
-                    Text("The distribution agent gets shipped games in front of players on itch.io, Reddit, and HTML5 portals.")
+                    Text(game.isAssetPack
+                         ? "The distribution agent lists finished packs for sale on itch.io, the Roblox Creator Store, and engine marketplaces (Unity, Unreal/Fab, Godot)."
+                         : "The distribution agent gets shipped games in front of players on itch.io, Reddit, and HTML5 portals.")
                         .font(.footnote).foregroundStyle(.secondary)
                 }
             } else { Text("—").foregroundStyle(.secondary) }
@@ -363,24 +368,43 @@ private struct GamePitchSheet: View {
     @State private var line = "hyper-casual"
     @State private var pitch = ""
 
-    private let lines = [("hyper-casual", "Hyper-Casual"),
-                         ("daily-puzzle", "Daily Puzzle"),
-                         ("viral-funnel", "Viral Funnel")]
+    private let gameLines = [("hyper-casual", "Hyper-Casual"),
+                             ("daily-puzzle", "Daily Puzzle"),
+                             ("viral-funnel", "Viral Funnel")]
+    // Sellable asset packs — 2D sprite/UI packs and 3D model packs built
+    // store-ready for Roblox, Unity, Unreal, Godot, and the web.
+    private let assetLines = [("asset-2d", "2D Asset Pack"),
+                              ("asset-3d", "3D Asset Pack")]
+
+    private var isAsset: Bool { line.hasPrefix("asset-") }
 
     var body: some View {
         Form {
-            Section("Game") {
+            Section("Product") {
                 TextField("Title", text: $title)
                 Picker("Line", selection: $line) {
-                    ForEach(lines, id: \.0) { Text($0.1).tag($0.0) }
+                    Section("Games") {
+                        ForEach(gameLines, id: \.0) { Text($0.1).tag($0.0) }
+                    }
+                    Section("Asset packs — built to sell") {
+                        ForEach(assetLines, id: \.0) { Text($0.1).tag($0.0) }
+                    }
                 }
             }
-            Section("The hook") {
-                TextField("One line on why it's fun", text: $pitch, axis: .vertical)
+            Section(isAsset ? "The pack" : "The hook") {
+                TextField(isAsset ? "Theme, pieces, and who buys it"
+                                  : "One line on why it's fun",
+                          text: $pitch, axis: .vertical)
                     .lineLimit(2...4)
             }
+            if isAsset {
+                Section {
+                    Text("The studio's artist builds every piece with real tools — 2D vector/sprite work and Blender-scripted 3D — exported store-ready for Roblox, Unity, Unreal, Godot, and the web, with previews, license, and import docs.")
+                        .font(.footnote).foregroundStyle(.secondary)
+                }
+            }
         }
-        .navigationTitle("Pitch a game")
+        .navigationTitle("Pitch to the studio")
         .navigationBarTitleDisplayMode(.inline)
         .toolbar {
             ToolbarItem(placement: .cancellationAction) { Button("Cancel") { dismiss() } }

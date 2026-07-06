@@ -51,6 +51,27 @@ enum GamesRoomBuilder {
     static let funGateBadgeName = "games.fungate.badge"
     static let cabinetMarqueeName = "games.cabinet.marquee"
     static let cabinetScreenName = "games.cabinet.screen"
+    static let pipelineCartName = "games.pipeline.cart"
+    static let pipelineLampPrefix = "games.pipeline.lamp."
+    static let highScoreBoardName = "games.highscores"
+
+    // MARK: The production line — the pipeline made physical
+    //
+    // A conveyor runs the room's spine, straight through the Fun Gate arch;
+    // one station per stage, and a glowing cart that sits at the stage the
+    // current build is in. The Fun Gate station lands exactly at the arch.
+
+    static let pipelineStages = ["concept", "design", "build", "playtest",
+                                 "fun_gate", "distribution", "shipped"]
+    static let pipelineStationSpacing: Float = 2.1
+
+    static func pipelineStationZ(_ index: Int) -> Float {
+        funGateZ + Float(index - 4) * pipelineStationSpacing   // fun_gate == index 4 → the arch
+    }
+
+    static func pipelineStageIndex(_ stage: String) -> Int {
+        pipelineStages.firstIndex(of: stage) ?? 1   // shelved/unknown parks at design
+    }
 
     /// What a tapped node opens.
     enum Tap { case megaScreen, cabinet, funGate, whiteboard, distribution }
@@ -81,6 +102,7 @@ enum GamesRoomBuilder {
         addArcadeCabinet(to: root)
         addPlaytestLounge(to: root)
         addFunGate(to: root)
+        addPipeline(to: root)
         mountBoards(to: root)
         addLights(to: root)
     }
@@ -96,6 +118,13 @@ enum GamesRoomBuilder {
                 // the couch blocker — so it needs its own solid or the walker
                 // clips through it.
                 RoamBlocker(centerX: loungeCenter.x, centerZ: loungeCenter.z - 1.7, halfX: 0.9, halfZ: 0.6),
+                // The production-line conveyor runs the room's spine — solid,
+                // so the walker steps around it, not through it. Ends short of
+                // the roam start (z 9.2).
+                RoamBlocker(centerX: 0,
+                            centerZ: (pipelineStationZ(0) + pipelineStationZ(6)) / 2,
+                            halfX: 0.75,
+                            halfZ: (pipelineStationZ(6) - pipelineStationZ(0)) / 2 + 0.9),
             ],
             startPosition: SIMD3(0, 1.6, 9.2),
             startYaw: 0)
@@ -414,6 +443,152 @@ enum GamesRoomBuilder {
         root.addChildNode(gate)
     }
 
+    // MARK: The production line — conveyor, stations, and the live cart
+
+    private static func addPipeline(to root: SCNNode) {
+        let line = SCNNode()
+        root.addChildNode(line)
+
+        let beltStart = pipelineStationZ(0) - 0.9
+        let beltEnd = pipelineStationZ(6) + 0.9
+        let beltLength = CGFloat(beltEnd - beltStart)
+        let beltCenterZ = (beltStart + beltEnd) / 2
+
+        // Belt bed + emissive rails down both edges.
+        let bed = SCNBox(width: 0.95, height: 0.14, length: beltLength, chamferRadius: 0.04)
+        let bedMat = SCNMaterial()
+        bedMat.lightingModel = .physicallyBased
+        bedMat.diffuse.contents = graphite
+        bedMat.metalness.contents = 0.5
+        bedMat.roughness.contents = 0.4
+        bed.materials = [bedMat]
+        let bedNode = SCNNode(geometry: bed)
+        bedNode.position = SCNVector3(0, 0.07, beltCenterZ)
+        line.addChildNode(bedNode)
+
+        for sx in [Float(-0.44), 0.44] {
+            let rail = SCNBox(width: 0.04, height: 0.02, length: beltLength - 0.1, chamferRadius: 0)
+            let rm = SCNMaterial()
+            rm.diffuse.contents = UIColor.black
+            rm.emission.contents = emerald
+            rm.emission.intensity = 0.8
+            rail.materials = [rm]
+            let rn = SCNNode(geometry: rail)
+            rn.position = SCNVector3(sx, 0.15, beltCenterZ)
+            line.addChildNode(rn)
+        }
+
+        // One station per stage: a lamp puck beside the belt + a floor label.
+        // Lamps are named per stage so the live update relights them.
+        for (index, stage) in pipelineStages.enumerated() {
+            let z = pipelineStationZ(index)
+
+            let puck = SCNCylinder(radius: 0.16, height: 0.05)
+            let pm = SCNMaterial()
+            pm.diffuse.contents = UIColor.black
+            pm.emission.contents = UIColor(red: 0.45, green: 0.5, blue: 0.6, alpha: 1)
+            pm.emission.intensity = 0.3
+            puck.materials = [pm]
+            let puckNode = SCNNode(geometry: puck)
+            puckNode.name = pipelineLampPrefix + stage
+            puckNode.position = SCNVector3(0.75, 0.03, z)
+            line.addChildNode(puckNode)
+
+            let text = SCNText(string: stageSign(stage), extrusionDepth: 0.2)
+            text.font = UIFont.systemFont(ofSize: 5, weight: .semibold)
+            text.flatness = 0.2
+            let tm = SCNMaterial()
+            tm.diffuse.contents = UIColor.black
+            tm.emission.contents = gold
+            tm.emission.intensity = 0.75
+            text.materials = [tm]
+            let textNode = SCNNode(geometry: text)
+            textNode.scale = SCNVector3(0.032, 0.032, 0.032)
+            let (lo, hi) = textNode.boundingBox
+            textNode.pivot = SCNMatrix4MakeTranslation((lo.x + hi.x) / 2, 0, 0)
+            // Flat on the floor beside the lamp, readable from the south entry.
+            textNode.position = SCNVector3(1.6, 0.02, z)
+            textNode.eulerAngles.x = -.pi / 2
+            line.addChildNode(textNode)
+        }
+
+        // The cart — the current build made physical: a glowing crate that
+        // hovers over the belt and rides to whichever station the game is in.
+        let cart = SCNNode()
+        cart.name = pipelineCartName
+        cart.position = SCNVector3(0, 0.42, pipelineStationZ(0))
+
+        // The visible body bobs on its own child node so the idle bob never
+        // fights the absolute ride-to-station move on the cart itself.
+        let body = SCNNode()
+        cart.addChildNode(body)
+
+        let crate = SCNBox(width: 0.52, height: 0.36, length: 0.52, chamferRadius: 0.06)
+        let crateMat = SCNMaterial()
+        crateMat.lightingModel = .physicallyBased
+        crateMat.diffuse.contents = surface
+        crateMat.metalness.contents = 0.45
+        crateMat.roughness.contents = 0.35
+        crate.materials = [crateMat]
+        body.addChildNode(SCNNode(geometry: crate))
+
+        let band = SCNBox(width: 0.54, height: 0.05, length: 0.54, chamferRadius: 0.02)
+        let bandMat = SCNMaterial()
+        bandMat.diffuse.contents = UIColor.black
+        bandMat.emission.contents = emeraldHot
+        bandMat.emission.intensity = 1.3
+        band.materials = [bandMat]
+        body.addChildNode(SCNNode(geometry: band))
+
+        // A gentle idle bob so the line always reads alive.
+        let bob = SCNAction.sequence([
+            .moveBy(x: 0, y: 0.08, z: 0, duration: 1.1),
+            .moveBy(x: 0, y: -0.08, z: 0, duration: 1.1),
+        ])
+        bob.timingMode = .easeInEaseOut
+        body.runAction(.repeatForever(bob))
+        line.addChildNode(cart)
+    }
+
+    private static func stageSign(_ stage: String) -> String {
+        switch stage {
+        case "concept":      "CONCEPT"
+        case "design":       "DESIGN"
+        case "build":        "BUILD"
+        case "playtest":     "PLAYTEST"
+        case "fun_gate":     "FUN GATE"
+        case "distribution": "DISTRIBUTE"
+        default:             "SHIPPED"
+        }
+    }
+
+    /// Ride the cart to the station for `stage` and relight the lamps: done
+    /// stages glow soft emerald, the live one burns hot, the future stays dim.
+    static func updatePipeline(root: SCNNode, stage: String) {
+        let index = pipelineStageIndex(stage)
+        if let cart = root.childNode(withName: pipelineCartName, recursively: true) {
+            let ride = SCNAction.move(
+                to: SCNVector3(0, cart.position.y, pipelineStationZ(index)),
+                duration: 1.4)
+            ride.timingMode = .easeInEaseOut
+            cart.runAction(ride, forKey: "ride")
+        }
+        for (i, name) in pipelineStages.enumerated() {
+            guard let lamp = root.childNode(withName: pipelineLampPrefix + name, recursively: true),
+                  let material = lamp.geometry?.firstMaterial else { continue }
+            if i < index {
+                material.emission.contents = emerald
+                material.emission.intensity = 0.7
+            } else if i == index {
+                material.emission.contents = emeraldHot
+                material.emission.intensity = 1.5
+            } else {
+                material.emission.contents = UIColor(red: 0.45, green: 0.5, blue: 0.6, alpha: 1)
+                material.emission.intensity = 0.3
+            }
+        }
+    }
+
     // MARK: Live wall surfaces
 
     private static func mountBoards(to root: SCNNode) {
@@ -433,6 +608,12 @@ enum GamesRoomBuilder {
         dist.position = SCNVector3(13.78, 2.5, -3.4)
         dist.eulerAngles.y = -.pi / 2
         root.addChildNode(dist)
+
+        // High-score wall — east wall, south of distribution, by the cabinet.
+        let scores = GamesRoomBoards.highScoresNode()
+        scores.position = SCNVector3(13.78, 2.5, 3.6)
+        scores.eulerAngles.y = -.pi / 2
+        root.addChildNode(scores)
     }
 
     // MARK: Light rig (real lights — emissives don't illuminate)

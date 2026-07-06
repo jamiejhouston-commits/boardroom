@@ -28,6 +28,12 @@ enum HQSceneBuilder {
     /// Production Room.
     static let gamesStudioPortalName = "hq.tap.gamestudio"
 
+    /// Tap-routing name for the Production Bay — the west-wall line of device
+    /// totems showing what the company currently builds (iPhone / iPad / Mac).
+    /// Tapping it opens the platform toggle sheet.
+    static let productionBayName = "hq.tap.production"
+    private static let productionScreenPrefix = "hq.production.screen."
+
     /// Fixed floor anchors per zone — the single source of truth `HQLayout`
     /// uses to seat agents so placement and scenery never drift apart.
     static let zoneAnchors: [HQOfficeArchetype: SCNVector3] = [
@@ -72,6 +78,7 @@ enum HQSceneBuilder {
         addMechsAndLounge(to: root)
         addPerimeter(to: root)
         addGamesStudioPortal(to: root)
+        addProductionBay(to: root)
         addCeiling(to: root)
         addLights(to: root)
         addLiveSurfaces(to: root)
@@ -424,6 +431,172 @@ enum HQSceneBuilder {
         portal.addChildNode(glyphNode)
 
         root.addChildNode(portal)
+    }
+
+    // MARK: Production Bay — what the line builds (iPhone / iPad / Mac)
+
+    /// A display plinth against the west wall (mirroring the Games Studio door
+    /// on the east): three device totems on an emerald conveyor strip. The
+    /// active production target's screen burns bright; the others idle dim.
+    /// Tap anywhere on the bay to switch what the company produces.
+    private static func addProductionBay(to root: SCNNode) {
+        let bay = SCNNode()
+        bay.name = productionBayName
+        bay.position = SCNVector3(-19.6, 0, 7.0)
+        bay.eulerAngles.y = .pi / 2              // faces into the room (+X), like the Kanban
+
+        let metalMat = SCNMaterial()
+        metalMat.lightingModel = .physicallyBased
+        metalMat.diffuse.contents = UIColor(red: 0.07, green: 0.085, blue: 0.115, alpha: 1)
+        metalMat.metalness.contents = 0.5
+        metalMat.roughness.contents = 0.38
+
+        // Plinth + emerald conveyor strip running its length.
+        let plinth = SCNBox(width: 6.2, height: 0.5, length: 1.5, chamferRadius: 0.05)
+        plinth.materials = [metalMat]
+        let plinthNode = SCNNode(geometry: plinth)
+        plinthNode.position = SCNVector3(0, 0.25, 0)
+        bay.addChildNode(plinthNode)
+
+        let belt = SCNBox(width: 5.9, height: 0.02, length: 0.5, chamferRadius: 0)
+        let beltMat = SCNMaterial()
+        beltMat.diffuse.contents = UIColor.black
+        beltMat.emission.contents = emerald
+        beltMat.emission.intensity = 0.7
+        belt.materials = [beltMat]
+        let beltNode = SCNNode(geometry: belt)
+        beltNode.position = SCNVector3(0, 0.512, 0.15)
+        let beltPulse = SCNAction.sequence([
+            .customAction(duration: 1.4) { n, t in
+                n.geometry?.firstMaterial?.emission.intensity = 0.45 + 0.45 * (t / 1.4)
+            },
+            .customAction(duration: 1.4) { n, t in
+                n.geometry?.firstMaterial?.emission.intensity = 0.9 - 0.45 * (t / 1.4)
+            },
+        ])
+        beltNode.runAction(.repeatForever(beltPulse))
+        bay.addChildNode(beltNode)
+
+        // The three device totems. Screens are named so the live refresh can
+        // relight the active platform without a scene rebuild.
+        addDeviceTotem(.ios, at: -2.1, to: bay, bodyMat: metalMat)
+        addDeviceTotem(.ipados, at: 0, to: bay, bodyMat: metalMat)
+        addDeviceTotem(.macos, at: 2.1, to: bay, bodyMat: metalMat)
+
+        // Sign above the bay, same treatment as the GAMES STUDIO sign.
+        let sign = SCNText(string: "PRODUCTION LINE", extrusionDepth: 0.4)
+        sign.font = UIFont.systemFont(ofSize: 5, weight: .bold)
+        sign.flatness = 0.15
+        let signMat = SCNMaterial()
+        signMat.diffuse.contents = UIColor.black
+        signMat.emission.contents = gold
+        signMat.emission.intensity = 1.0
+        sign.materials = [signMat]
+        let signNode = SCNNode(geometry: sign)
+        signNode.scale = SCNVector3(0.06, 0.06, 0.06)
+        let (lo, hi) = signNode.boundingBox
+        signNode.pivot = SCNMatrix4MakeTranslation((lo.x + hi.x) / 2, 0, 0)
+        signNode.position = SCNVector3(0, 3.1, 0.1)
+        bay.addChildNode(signNode)
+
+        // A soft wash so the bay reads from across the floor.
+        let light = SCNLight()
+        light.type = .omni
+        light.color = emerald
+        light.intensity = 260
+        light.attenuationEndDistance = 8
+        let lightNode = SCNNode()
+        lightNode.light = light
+        lightNode.position = SCNVector3(0, 2.2, 1.4)
+        bay.addChildNode(lightNode)
+
+        root.addChildNode(bay)
+    }
+
+    /// One device totem on the plinth: a slab (or monitor-on-stand for the Mac),
+    /// a named screen plane, and an engraved platform label.
+    private static func addDeviceTotem(_ platform: ProductionPlatform, at x: Float,
+                                       to bay: SCNNode, bodyMat: SCNMaterial) {
+        let totem = SCNNode()
+        totem.position = SCNVector3(x, 0.5, 0)
+
+        let screenSize: (w: CGFloat, h: CGFloat)
+        let screenY: Float
+        switch platform {
+        case .ios:
+            let body = SCNBox(width: 0.55, height: 1.05, length: 0.07, chamferRadius: 0.06)
+            body.materials = [bodyMat]
+            let n = SCNNode(geometry: body)
+            n.position = SCNVector3(0, 0.72, 0)
+            totem.addChildNode(n)
+            screenSize = (0.46, 0.94); screenY = 0.72
+        case .ipados:
+            let body = SCNBox(width: 0.95, height: 1.22, length: 0.07, chamferRadius: 0.05)
+            body.materials = [bodyMat]
+            let n = SCNNode(geometry: body)
+            n.position = SCNVector3(0, 0.82, 0)
+            totem.addChildNode(n)
+            screenSize = (0.84, 1.1); screenY = 0.82
+        case .macos:
+            let stand = SCNCylinder(radius: 0.05, height: 0.34)
+            stand.materials = [bodyMat]
+            let standNode = SCNNode(geometry: stand)
+            standNode.position = SCNVector3(0, 0.17, 0)
+            totem.addChildNode(standNode)
+            let foot = SCNCylinder(radius: 0.26, height: 0.03)
+            foot.materials = [bodyMat]
+            let footNode = SCNNode(geometry: foot)
+            footNode.position = SCNVector3(0, 0.015, 0)
+            totem.addChildNode(footNode)
+            let body = SCNBox(width: 1.35, height: 0.88, length: 0.07, chamferRadius: 0.04)
+            body.materials = [bodyMat]
+            let n = SCNNode(geometry: body)
+            n.position = SCNVector3(0, 0.78, 0)
+            totem.addChildNode(n)
+            screenSize = (1.24, 0.76); screenY = 0.78
+        }
+
+        let screen = SCNPlane(width: screenSize.w, height: screenSize.h)
+        let sm = SCNMaterial()
+        sm.diffuse.contents = UIColor.black
+        sm.emission.contents = UIColor(red: 0.45, green: 0.5, blue: 0.6, alpha: 1)
+        sm.emission.intensity = 0.25
+        screen.materials = [sm]
+        let screenNode = SCNNode(geometry: screen)
+        screenNode.name = productionScreenPrefix + platform.rawValue
+        screenNode.position = SCNVector3(0, screenY, 0.045)
+        totem.addChildNode(screenNode)
+
+        let label = SCNText(string: platform.label.uppercased(), extrusionDepth: 0.3)
+        label.font = UIFont.systemFont(ofSize: 5, weight: .semibold)
+        label.flatness = 0.2
+        let lm = SCNMaterial()
+        lm.diffuse.contents = UIColor.black
+        lm.emission.contents = gold
+        lm.emission.intensity = 0.8
+        label.materials = [lm]
+        let labelNode = SCNNode(geometry: label)
+        labelNode.scale = SCNVector3(0.028, 0.028, 0.028)
+        let (lo, hi) = labelNode.boundingBox
+        labelNode.pivot = SCNMatrix4MakeTranslation((lo.x + hi.x) / 2, 0, 0)
+        labelNode.position = SCNVector3(0, 0.06, 0.5)
+        totem.addChildNode(labelNode)
+
+        bay.addChildNode(totem)
+    }
+
+    /// Relight the bay for the active production target. Cheap and idempotent —
+    /// called from the same signature-gated refresh as the live boards.
+    static func applyProductionPlatform(root: SCNNode, platform: ProductionPlatform) {
+        root.enumerateHierarchy { node, _ in
+            guard let name = node.name, name.hasPrefix(productionScreenPrefix),
+                  let material = node.geometry?.firstMaterial else { return }
+            let active = name == productionScreenPrefix + platform.rawValue
+            material.emission.contents = active
+                ? emeraldHot
+                : UIColor(red: 0.45, green: 0.5, blue: 0.6, alpha: 1)
+            material.emission.intensity = active ? 1.25 : 0.25
+        }
     }
 
     // MARK: Perimeter walls + emissive trim

@@ -72,10 +72,16 @@ struct StudioGame: Codable, Equatable, Identifiable {
     var score: Int?                     // owner's best arcade score
     var created: String?
 
+    /// Sellable asset packs (2D/3D) flow through the same pipeline as games,
+    /// with asset-aware stages, reviewers, and marketplaces.
+    var isAssetPack: Bool { line.hasPrefix("asset-") }
+
     var lineLabel: String {
         switch line {
         case "daily-puzzle": "Daily Puzzle"
         case "viral-funnel": "Viral Funnel"
+        case "asset-2d":     "2D Asset Pack"
+        case "asset-3d":     "3D Asset Pack"
         default:             "Hyper-Casual"
         }
     }
@@ -100,14 +106,17 @@ struct StudioGame: Codable, Equatable, Identifiable {
         case "concept":      "Concepting"
         case "design":       "Designing"
         case "build":        "Building"
-        case "playtest":     "Playtesting"
-        case "fun_gate":     "Fun Gate"
-        case "distribution": "Distributing"
-        case "shipped":      "Shipped"
+        case "playtest":     isAssetPack ? "Art Review" : "Playtesting"
+        case "fun_gate":     gateLabel
+        case "distribution": isAssetPack ? "Listing for Sale" : "Distributing"
+        case "shipped":      isAssetPack ? "On Sale" : "Shipped"
         case "shelved":      "Shelved"
         default:             stage
         }
     }
+
+    /// Asset packs pass a Quality Gate (would a studio pay?); games a Fun Gate.
+    var gateLabel: String { isAssetPack ? "Quality Gate" : "Fun Gate" }
 
     var isShipped: Bool { stage == "shipped" }
     /// Playable in the cabinet only when a runtime file exists in the bundle.
@@ -119,11 +128,17 @@ struct StudioGame: Codable, Equatable, Identifiable {
         return (Double(playtests.map(\.rating).reduce(0, +)) / Double(playtests.count) * 10).rounded() / 10
     }
 
-    /// Channel status in a stable display order.
+    /// Channel status in a stable display order. Games go to players; asset
+    /// packs go to marketplaces (itch.io, Roblox Creator Store, engine stores).
     var distributionChannels: [(name: String, status: String)] {
-        [("itch.io", distribution["itch"] ?? "planned"),
-         ("Reddit", distribution["reddit"] ?? "planned"),
-         ("Portals", distribution["portals"] ?? "planned")]
+        if isAssetPack {
+            return [("itch.io", distribution["itch"] ?? "planned"),
+                    ("Roblox Store", distribution["roblox"] ?? "planned"),
+                    ("Engine Stores", distribution["unity"] ?? "planned")]
+        }
+        return [("itch.io", distribution["itch"] ?? "planned"),
+                ("Reddit", distribution["reddit"] ?? "planned"),
+                ("Portals", distribution["portals"] ?? "planned")]
     }
 
     /// The real, shipped flagship — mirrors `seed_flagship` on the relay.

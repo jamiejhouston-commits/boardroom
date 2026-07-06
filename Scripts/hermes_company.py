@@ -36,7 +36,34 @@ DEFAULT_CONFIG = {
     "budget_calls": 70,
     "scout_sources": "Hacker News, Product Hunt, GitHub trending, App Store charts, Reddit",
     "meeting_gap_minutes": 90,   # how often the org holds an internal standup
+    "platform": "ios",   # production line target: ios | ipados | macos
 }
+
+# What the production line builds. The owner switches this from the HQ's
+# Production Bay; the directive is injected into planning, build, and demo
+# prompts so every stage designs, builds, and verifies for the same target.
+PLATFORM_DIRECTIVES = {
+    "ios": (
+        "TARGET PLATFORM: iPhone (iOS). Every product ships as a native SwiftUI "
+        "iPhone app — design for a one-handed phone screen, and verify by building "
+        "for and booting an iPhone Simulator."),
+    "ipados": (
+        "TARGET PLATFORM: iPad (iPadOS). Every product ships as a native SwiftUI "
+        "iPad app — design for the big canvas (sidebars, split views, multi-column "
+        "layouts, keyboard and pointer support), and verify by building for and "
+        "booting an iPad Simulator (e.g. `xcrun simctl boot 'iPad Pro 13-inch (M4)'`)."),
+    "macos": (
+        "TARGET PLATFORM: Mac (macOS). Every product ships as a native SwiftUI "
+        "macOS app — design for desktop (resizable windows, menus, keyboard-first "
+        "workflows), build with `xcodebuild -destination 'platform=macOS'`, and "
+        "verify by launching the built .app and capturing its window with "
+        "`screencapture` (no simulator needed)."),
+}
+
+
+def platform_directive(state: dict) -> str:
+    key = (state.get("config") or {}).get("platform") or "ios"
+    return PLATFORM_DIRECTIVES.get(key, PLATFORM_DIRECTIVES["ios"])
 
 GATE_STAGES = ("gate1", "gate2")
 BLOCKED_STAGE = "blocked"
@@ -685,6 +712,7 @@ def advance_stage(state: dict, init: dict, runner, artifacts_root: Path) -> None
             note = f" The owner added: {init['note']}." if init["note"] else ""
             reply = runner("ceo", role_prompt("ceo",
                 f"The owner GREENLIT '{init['title']}'.{note}\n"
+                f"{platform_directive(state)}\n"
                 f"Research memo:\n{last_text(init, 'research')}\n"
                 "Write a work order for a COMPLETE, production-ready product the owner "
                 "can put in front of real users — not a bare MVP or a single toy "
@@ -725,7 +753,7 @@ def advance_stage(state: dict, init: dict, runner, artifacts_root: Path) -> None
                 if existing:
                     # Iteration/resume: extend the project on disk, don't rebuild.
                     build = runner("builder", role_prompt("builder",
-                        f"{BUILDER_TOOLKIT}\n\n"
+                        f"{BUILDER_TOOLKIT}\n\n{platform_directive(state)}\n\n"
                         f"EXTEND the existing project at {outdir} — do NOT rebuild it. "
                         f"Read what's already there, then make ONLY the additions in the "
                         f"work order, wired in properly and working (no stubs/TODOs). "
@@ -739,7 +767,7 @@ def advance_stage(state: dict, init: dict, runner, artifacts_root: Path) -> None
                     # hardened toward production over the QA rounds, so build this
                     # pass solid and real (no stubs); don't ship a skeleton.
                     build = runner("builder", role_prompt("builder",
-                        f"{BUILDER_TOOLKIT}\n\n"
+                        f"{BUILDER_TOOLKIT}\n\n{platform_directive(state)}\n\n"
                         f"Build '{init['title']}' as a real, working, polished product — not a "
                         f"toy or a skeleton. Implement the core experience fully and well: real "
                         f"logic and real data (NO stubs, TODOs, placeholder text, fake results, "
@@ -825,13 +853,14 @@ def advance_stage(state: dict, init: dict, runner, artifacts_root: Path) -> None
             # execution — a timeout here costs the turn, not the stage.
             demo_dir = outdir / ".demo"
             capture = runner("builder", role_prompt("builder",
-                f"{BUILDER_TOOLKIT}\n\n"
+                f"{BUILDER_TOOLKIT}\n\n{platform_directive(state)}\n\n"
                 f"Demo Day prep for '{init['title']}' (project at {outdir}). Produce REAL "
                 f"visual evidence of the product so the owner can SEE it before deciding "
                 f"to ship. Save numbered PNG screenshots of the main screens and flows "
                 f"into {demo_dir} (01-onboarding.png, 02-home.png, … up to 8).\n"
-                "How: for an iOS app, build it and boot it in the iOS Simulator "
-                "(`xcodebuild`, `xcrun simctl boot`, `xcrun simctl io <device> screenshot`); "
+                "How: for an iPhone or iPad app, build it and boot it in the matching "
+                "Simulator (`xcodebuild`, `xcrun simctl boot`, `xcrun simctl io <device> screenshot`); "
+                "for a macOS app, launch the built .app and capture its window with `screencapture`; "
                 "for a web app, use a headless-browser screenshot; for a CLI, capture the "
                 "terminal output. When you're done, run `xcrun simctl shutdown all` so no "
                 "simulator keeps burning the owner's CPU. NEVER fake, mock up, or hand-draw a screenshot — if you "
