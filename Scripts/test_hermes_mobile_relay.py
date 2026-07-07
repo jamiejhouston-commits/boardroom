@@ -325,6 +325,194 @@ class DemoAssetTests(unittest.TestCase):
         self.assertEqual(relay.demo_asset_names("nope"), [])
 
 
+class InitiativeFilesTests(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        root = Path(self.tmp.name)
+        self.original_state = relay.COMPANY_STATE_PATH
+        self.original_artifacts = relay.COMPANY_ARTIFACTS_ROOT
+        relay.COMPANY_STATE_PATH = root / "company.json"
+        relay.COMPANY_ARTIFACTS_ROOT = root / "Boardroom"
+        state = relay.company_module.new_state()
+        self.init = relay.company_module.new_initiative("Quake App", "p")
+        state["initiatives"] = [self.init]
+        relay.company_module.CompanyStore(relay.COMPANY_STATE_PATH).save(state)
+        self.artifacts = (relay.COMPANY_ARTIFACTS_ROOT
+                          / relay.company_module.initiative_dirname(self.init))
+        (self.artifacts / "Sources").mkdir(parents=True)
+        (self.artifacts / "Sources" / "Main.swift").write_text("print(1)")
+        (self.artifacts / "README.md").write_text("# app")
+        (self.artifacts / "icon.png").write_bytes(b"png-bytes")
+        # Junk that must never show up in the manifest:
+        (self.artifacts / ".git").mkdir()
+        (self.artifacts / ".git" / "config").write_text("secret")
+        (self.artifacts / "node_modules" / "pkg").mkdir(parents=True)
+        (self.artifacts / "node_modules" / "pkg" / "index.js").write_text("x")
+        (self.artifacts / ".DS_Store").write_bytes(b"junk")
+        (self.artifacts / "huge.bin").write_bytes(b"\0" * (relay.FILE_MAX_BYTES + 1))
+        # A file OUTSIDE the artifacts dir — the traversal target.
+        (relay.COMPANY_ARTIFACTS_ROOT / "outside.txt").write_text("secret")
+
+    def tearDown(self):
+        relay.COMPANY_STATE_PATH = self.original_state
+        relay.COMPANY_ARTIFACTS_ROOT = self.original_artifacts
+        self.tmp.cleanup()
+
+    def test_lists_files_recursively_sorted_with_sizes(self):
+        self.assertEqual(relay.initiative_files(self.init["id"]), [
+            {"path": "README.md", "size": 5},
+            {"path": "Sources/Main.swift", "size": 8},
+            {"path": "icon.png", "size": 9},
+        ])
+
+    def test_listing_caps_entries(self):
+        original = relay.FILE_LIST_CAP
+        relay.FILE_LIST_CAP = 2
+        try:
+            self.assertEqual(len(relay.initiative_files(self.init["id"])), 2)
+        finally:
+            relay.FILE_LIST_CAP = original
+
+    def test_unknown_initiative_is_none_and_missing_dir_is_empty(self):
+        self.assertIsNone(relay.initiative_files("nope"))
+        empty = relay.company_module.new_initiative("Fresh", "p")
+        store = relay.company_module.CompanyStore(relay.COMPANY_STATE_PATH)
+        state = store.load()
+        state["initiatives"].append(empty)
+        store.save(state)
+        self.assertEqual(relay.initiative_files(empty["id"]), [])
+
+    def test_serves_code_as_text_and_image_as_png(self):
+        self.assertEqual(relay.initiative_file(self.init["id"], "Sources/Main.swift"),
+                         (b"print(1)", "text/plain"))
+        self.assertEqual(relay.initiative_file(self.init["id"], "icon.png"),
+                         (b"png-bytes", "image/png"))
+
+    def test_unknown_suffix_is_octet_stream(self):
+        (self.artifacts / "blob.dat").write_bytes(b"\x01\x02")
+        self.assertEqual(relay.initiative_file(self.init["id"], "blob.dat"),
+                         (b"\x01\x02", "application/octet-stream"))
+
+    def test_rejects_traversal_out_of_artifacts_dir(self):
+        self.assertIsNone(relay.initiative_file(self.init["id"], "../outside.txt"))
+        self.assertIsNone(relay.initiative_file(self.init["id"], "Sources/../../outside.txt"))
+        self.assertIsNone(relay.initiative_file(self.init["id"], "/etc/passwd"))
+        self.assertIsNone(relay.initiative_file(self.init["id"], ""))
+
+    def test_rejects_oversized_missing_and_unknown(self):
+        self.assertEqual(relay.initiative_file(self.init["id"], "huge.bin"), "too_large")
+        self.assertIsNone(relay.initiative_file(self.init["id"], "nope.txt"))
+        self.assertIsNone(relay.initiative_file("nope", "README.md"))
+
+
+class ObsidianGraphTests(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        root = Path(self.tmp.name)
+        self.originals = (relay.COMPANY_VAULT_ROOT, relay.OBSIDIAN_CONFIG_PATH,
+                          relay.OBSIDIAN_ICLOUD_DOCS)
+        relay.COMPANY_VAULT_ROOT = root / "Boardroom-Vault"
+        relay.OBSIDIAN_CONFIG_PATH = root / "obsidian.json"
+        relay.OBSIDIAN_ICLOUD_DOCS = root / "no-icloud"
+        # Company brain: one meeting note linking an agent and an Obsidian note.
+        meetings = relay.COMPANY_VAULT_ROOT / "meetings"
+        meetings.mkdir(parents=True)
+        (meetings / "2026-07-01-standup.md").write_text("[[ceo]] and [[Growth]]")
+        # Obsidian brain ('vault'): nested note, wikilinks both ways, junk dirs.
+        self.vault = root / "vault"
+        (self.vault / "Ideas").mkdir(parents=True)
+        (self.vault / "Ideas" / "Growth.md").write_text(
+            "[[Roadmap]] [[2026-07-01-standup]] [[Nowhere]]")
+        (self.vault / "Roadmap.md").write_text("plain note")
+        (self.vault / ".obsidian").mkdir()
+        (self.vault / ".obsidian" / "workspace.md").write_text("junk")
+        (self.vault / ".trash").mkdir()
+        (self.vault / ".trash" / "Old.md").write_text("deleted")
+        relay.OBSIDIAN_CONFIG_PATH.write_text('{"vault_path": "%s"}' % self.vault)
+
+    def tearDown(self):
+        (relay.COMPANY_VAULT_ROOT, relay.OBSIDIAN_CONFIG_PATH,
+         relay.OBSIDIAN_ICLOUD_DOCS) = self.originals
+        self.tmp.cleanup()
+
+    def test_obsidian_notes_become_namespaced_nodes(self):
+        nodes = {n["id"]: n for n in relay.vault_graph()["nodes"]}
+        self.assertEqual(nodes["obsidian:Ideas/Growth"],
+                         {"id": "obsidian:Ideas/Growth", "label": "Growth", "type": "obsidian"})
+        self.assertIn("obsidian:Roadmap", nodes)
+        self.assertFalse(any(".obsidian" in nid or ".trash" in nid for nid in nodes))
+
+    def test_cross_vault_edges_both_directions(self):
+        edges = relay.vault_graph()["edges"]
+        self.assertIn({"source": "2026-07-01-standup", "target": "obsidian:Ideas/Growth"}, edges)
+        self.assertIn({"source": "obsidian:Ideas/Growth", "target": "2026-07-01-standup"}, edges)
+        self.assertIn({"source": "obsidian:Ideas/Growth", "target": "obsidian:Roadmap"}, edges)
+
+    def test_cap_keeps_most_recent_and_flags_truncated(self):
+        original = relay.OBSIDIAN_NOTE_CAP
+        relay.OBSIDIAN_NOTE_CAP = 1
+        try:
+            os.utime(self.vault / "Roadmap.md", (1, 1))   # oldest — dropped
+            graph = relay.vault_graph()
+            self.assertTrue(graph["truncated"])
+            kept, _ = relay.obsidian_notes(relay.obsidian_vault_root())
+            self.assertEqual([p.name for p in kept], ["Growth.md"])
+            self.assertIn("obsidian:Ideas/Growth", {n["id"] for n in graph["nodes"]})
+        finally:
+            relay.OBSIDIAN_NOTE_CAP = original
+
+    def test_missing_vault_degrades_to_company_only(self):
+        relay.OBSIDIAN_CONFIG_PATH.write_text('{"vault_path": "/nope/nowhere"}')
+        self.assertIsNone(relay.obsidian_vault_root())
+        graph = relay.vault_graph()
+        self.assertNotIn("truncated", graph)
+        self.assertFalse(any(n["type"] == "obsidian" for n in graph["nodes"]))
+        self.assertTrue(any(n["id"] == "2026-07-01-standup" for n in graph["nodes"]))
+
+    def test_garbage_config_falls_back_without_crashing(self):
+        relay.OBSIDIAN_CONFIG_PATH.write_text("not json{{{")
+        self.assertIsNone(relay.obsidian_vault_root())   # iCloud default absent too
+
+    def test_note_endpoint_serves_both_brains(self):
+        company = relay.vault_note("2026-07-01-standup")
+        self.assertEqual(company["source"], "company")
+        self.assertEqual(company["title"], "2026-07-01-standup")
+        self.assertIn("[[ceo]]", company["content"])
+        self.assertIsInstance(company["modified"], int)
+        obsidian = relay.vault_note("obsidian:Ideas/Growth")
+        self.assertEqual(obsidian["source"], "obsidian")
+        self.assertEqual(obsidian["title"], "Growth")
+        self.assertIn("[[Roadmap]]", obsidian["content"])
+
+    def test_note_rejects_traversal_and_unknown(self):
+        (Path(self.tmp.name) / "outside.md").write_text("secret")
+        self.assertIsNone(relay.vault_note("obsidian:../outside"))
+        self.assertIsNone(relay.vault_note("obsidian:.trash/Old"))
+        self.assertIsNone(relay.vault_note("obsidian:/etc/passwd"))
+        self.assertIsNone(relay.vault_note("obsidian:Nowhere"))
+        self.assertIsNone(relay.vault_note("no-such-company-note"))
+        self.assertIsNone(relay.vault_note(""))
+
+    def test_note_content_is_capped_with_marker(self):
+        original = relay.NOTE_CONTENT_CAP
+        relay.NOTE_CONTENT_CAP = 5
+        try:
+            note = relay.vault_note("obsidian:Roadmap")
+            self.assertTrue(note["content"].startswith("plain"))
+            self.assertTrue(note["content"].endswith("… (truncated)"))
+        finally:
+            relay.NOTE_CONTENT_CAP = original
+
+
+class WarmPoolWiringTests(unittest.TestCase):
+    def test_relay_warm_client_is_a_pool(self):
+        self.assertIsInstance(relay.WARM_CLIENT, relay.acp_module.AcpPool)
+        self.assertGreaterEqual(len(relay.WARM_CLIENT.clients), 1)
+        # /health fields keep working without a single process spawned.
+        self.assertFalse(relay.WARM_CLIENT.warm())
+        self.assertEqual(relay.WARM_CLIENT.warm_count(), 0)
+
+
 class RevenueTests(unittest.TestCase):
     def test_parse_revenuecat_metrics_maps_fields(self):
         payload = {"metrics": [

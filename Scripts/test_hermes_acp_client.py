@@ -152,5 +152,75 @@ class AcpClientTests(unittest.TestCase):
             list(client.prompt("key-A", "again"))
 
 
+class AcpPoolTests(unittest.TestCase):
+    def make_pool(self, size=2):
+        fakes = []
+        def spawn():
+            fake = FakeProcess(standard_responder)
+            fakes.append(fake)
+            return fake
+        return acp.AcpPool(size=size, spawn=spawn), fakes
+
+    def test_affinity_is_stable_and_crc32_based(self):
+        pool, _ = self.make_pool(size=3)
+        import zlib
+        for key in ("default:sess-1", "company:ceo-chat", "relay-prewarm-0"):
+            expected = pool.clients[zlib.crc32(key.encode("utf-8")) % 3]
+            self.assertIs(pool.client_for(key), expected)
+            self.assertIs(pool.client_for(key), pool.client_for(key))
+
+    def test_prompt_delegates_to_affine_client_only(self):
+        pool, fakes = self.make_pool(size=2)
+        self.assertEqual(list(pool.prompt("key-A", "hi")), ["Hello ", "there."])
+        # Only the affine client spawned a process; its sibling stayed cold.
+        self.assertEqual(len(fakes), 1)
+        self.assertEqual(pool.warm_count(), 1)
+        self.assertTrue(pool.warm())
+
+    def test_warm_reports_any_and_warm_count_all(self):
+        pool, _ = self.make_pool(size=2)
+        self.assertFalse(pool.warm())
+        self.assertEqual(pool.warm_count(), 0)
+        for index, client in enumerate(pool.clients):
+            list(client.prompt(f"relay-prewarm-{index}", "OK"))
+        self.assertTrue(pool.warm())
+        self.assertEqual(pool.warm_count(), 2)
+
+    def test_dead_affine_client_raises_while_pool_still_warm(self):
+        pool, fakes = self.make_pool(size=2)
+        for index, client in enumerate(pool.clients):
+            list(client.prompt(f"relay-prewarm-{index}", "OK"))
+        key = "key-A"
+        victim = pool.client_for(key)
+        fakes[pool.clients.index(victim)].kill()
+        self.assertTrue(pool.warm())          # the sibling is still up
+        with self.assertRaises(acp.WarmUnavailable):
+            list(pool.prompt(key, "again"))   # but this session's client is dead
+
+    def test_pool_size_env_override_and_floor(self):
+        import os
+        original = os.environ.get("HERMES_WARM_POOL")
+        try:
+            os.environ["HERMES_WARM_POOL"] = "4"
+            self.assertEqual(len(acp.AcpPool(spawn=lambda: FakeProcess(standard_responder)).clients), 4)
+            os.environ["HERMES_WARM_POOL"] = "0"
+            self.assertEqual(len(acp.AcpPool(spawn=lambda: FakeProcess(standard_responder)).clients), 1)
+            os.environ["HERMES_WARM_POOL"] = "junk"
+            self.assertEqual(len(acp.AcpPool(spawn=lambda: FakeProcess(standard_responder)).clients), 2)
+        finally:
+            if original is None:
+                os.environ.pop("HERMES_WARM_POOL", None)
+            else:
+                os.environ["HERMES_WARM_POOL"] = original
+
+    def test_shutdown_stops_every_client(self):
+        pool, fakes = self.make_pool(size=2)
+        for index, client in enumerate(pool.clients):
+            list(client.prompt(f"relay-prewarm-{index}", "OK"))
+        pool.shutdown()
+        self.assertFalse(pool.warm())
+        self.assertTrue(all(fake.poll() is not None for fake in fakes))
+
+
 if __name__ == "__main__":
     unittest.main()

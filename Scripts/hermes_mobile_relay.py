@@ -52,23 +52,29 @@ acp_module = importlib.util.module_from_spec(_ACP_SPEC)
 assert _ACP_SPEC.loader is not None
 _ACP_SPEC.loader.exec_module(acp_module)
 
-# One warm Hermes for all interactive chat — turns cost ~3s instead of the
-# 15-30s per-message cold start. Cold CLI remains the automatic fallback.
-WARM_CLIENT = acp_module.AcpClient()
+# A small pool of warm Hermes agents for all interactive chat — turns cost ~3s
+# instead of the 15-30s per-message cold start, and two conversations no longer
+# queue single-file behind one agent's lock. Cold CLI remains the fallback.
+WARM_CLIENT = acp_module.AcpPool()
 
 
 def prewarm_hermes() -> None:
     """Pay the agent warm-up at relay start, not on the owner's first message.
     Pre-warms the leadership sessions the app talks to (default:company-<role>)
     so even the FIRST chat with the CEO/CFO/etc. answers in ~3s, not ~18s."""
-    # Process warm-up first.
-    try:
-        for _ in WARM_CLIENT.prompt("relay-prewarm", "Reply with exactly: OK"):
-            pass
-        print("Warm Hermes: READY (turns now ~3s)", flush=True)
-    except Exception as error:  # noqa: BLE001 — cold path still works
-        print(f"Warm Hermes unavailable, using cold CLI: {error}", flush=True)
+    # Process warm-up first: boot EVERY client in the pool.
+    ready = 0
+    for index, client in enumerate(WARM_CLIENT.clients):
+        try:
+            for _ in client.prompt(f"relay-prewarm-{index}", "Reply with exactly: OK"):
+                pass
+            ready += 1
+        except Exception as error:  # noqa: BLE001 — cold path still works
+            print(f"Warm Hermes {index} unavailable, using cold CLI: {error}", flush=True)
+    if not ready:
         return
+    print(f"Warm Hermes: READY ({ready}/{len(WARM_CLIENT.clients)} agents, turns now ~3s)",
+          flush=True)
     # Then warm each leadership CHAT key the app uses — these are decoupled from
     # the autonomous engine's "company-<role>" sessions (see the chat handler),
     # so the owner's chats never collide with the running company.
@@ -88,14 +94,16 @@ def warm_keeper_loop() -> None:
     next relay restart. That was the core of 'the agents never reply'."""
     while True:
         time.sleep(60)
-        try:
-            if WARM_CLIENT.warm():
-                continue
-            for _ in WARM_CLIENT.prompt("relay-prewarm", "Reply with exactly: OK"):
-                pass
-            print("Warm Hermes: RECOVERED (turns ~3s again)", flush=True)
-        except Exception as error:  # noqa: BLE001 — keep trying every minute
-            print(f"Warm Hermes: rewarm failed, retrying in 60s: {error}", flush=True)
+        for index, client in enumerate(WARM_CLIENT.clients):
+            try:
+                if client.warm():
+                    continue
+                for _ in client.prompt(f"relay-prewarm-{index}", "Reply with exactly: OK"):
+                    pass
+                print(f"Warm Hermes {index}: RECOVERED (turns ~3s again)", flush=True)
+            except Exception as error:  # noqa: BLE001 — keep trying every minute
+                print(f"Warm Hermes {index}: rewarm failed, retrying in 60s: {error}",
+                      flush=True)
 
 
 COMPANY_STATE_PATH = Path.home() / ".hermes" / "mobile-company.json"
@@ -1102,7 +1110,9 @@ DEMO_SUFFIXES = {".png": "image/png", ".jpg": "image/jpeg", ".jpeg": "image/jpeg
                  ".gif": "image/gif", ".mp4": "video/mp4"}
 
 
-def demo_dir_for(initiative_id: str) -> Path | None:
+def artifacts_dir_for(initiative_id: str) -> Path | None:
+    """The initiative's deliverables folder under ~/Documents/Boardroom, or
+    None when no such initiative exists."""
     store = company_module.CompanyStore(COMPANY_STATE_PATH)
     with COMPANY_LOCK:
         state = store.load()
@@ -1110,7 +1120,12 @@ def demo_dir_for(initiative_id: str) -> Path | None:
         init = company_module.find_initiative(state, initiative_id)
     except KeyError:
         return None
-    return COMPANY_ARTIFACTS_ROOT / company_module.initiative_dirname(init) / ".demo"
+    return COMPANY_ARTIFACTS_ROOT / company_module.initiative_dirname(init)
+
+
+def demo_dir_for(initiative_id: str) -> Path | None:
+    base = artifacts_dir_for(initiative_id)
+    return None if base is None else base / ".demo"
 
 
 def demo_asset_names(initiative_id: str) -> list[str]:
@@ -1133,6 +1148,77 @@ def demo_asset(initiative_id: str, filename: str) -> tuple[bytes, str] | None:
     path = demo_dir / filename
     try:
         return path.read_bytes(), DEMO_SUFFIXES[path.suffix.lower()]
+    except OSError:
+        return None
+
+
+# ── Deliverables browser: the REAL work product an initiative produced,
+#    browsable from the phone (mirrors the Demo Day pattern above). ──
+
+FILE_SKIP_DIRS = {"node_modules", "__pycache__", "DerivedData", ".build"}
+FILE_MAX_BYTES = 5 * 1024 * 1024
+FILE_LIST_CAP = 500
+# Code/config suffixes served as text/plain (mimetypes calls .py text/x-python,
+# .swift nothing at all — the app just wants "renderable as text").
+FILE_TEXT_SUFFIXES = {
+    ".swift", ".py", ".js", ".ts", ".tsx", ".jsx", ".json", ".md", ".txt",
+    ".yml", ".yaml", ".toml", ".sh", ".html", ".css", ".xml", ".plist",
+    ".sql", ".c", ".h", ".m", ".cpp", ".rs", ".go", ".kt", ".java",
+    ".strings", ".entitlements", ".pbxproj", ".log", ".csv",
+}
+
+
+def file_content_type(path: Path) -> str:
+    suffix = path.suffix.lower()
+    if suffix in DEMO_SUFFIXES:
+        return DEMO_SUFFIXES[suffix]
+    if suffix in FILE_TEXT_SUFFIXES:
+        return "text/plain"
+    return "application/octet-stream"
+
+
+def initiative_files(initiative_id: str) -> list[dict] | None:
+    """Recursive manifest of the initiative's artifacts dir: sorted, capped at
+    FILE_LIST_CAP, skipping dot-entries, junk dirs and files over 5 MB.
+    None → unknown initiative (404); [] → nothing produced yet."""
+    root = artifacts_dir_for(initiative_id)
+    if root is None:
+        return None
+    files: list[dict] = []
+    if root.is_dir():
+        for dirpath, dirnames, filenames in os.walk(root):
+            dirnames[:] = [d for d in dirnames
+                           if not d.startswith(".") and d not in FILE_SKIP_DIRS]
+            for name in filenames:
+                if name.startswith("."):
+                    continue
+                path = Path(dirpath) / name
+                try:
+                    size = path.stat().st_size
+                except OSError:
+                    continue
+                if size > FILE_MAX_BYTES:
+                    continue
+                files.append({"path": str(path.relative_to(root)), "size": size})
+    files.sort(key=lambda entry: entry["path"])
+    return files[:FILE_LIST_CAP]
+
+
+def initiative_file(initiative_id: str, relpath: str):
+    """Bytes + MIME for one artifact file. Returns (bytes, mime), the string
+    'too_large', or None (unknown initiative / missing file / traversal).
+    The requested path is resolved and must stay INSIDE the artifacts dir."""
+    root = artifacts_dir_for(initiative_id)
+    if root is None:
+        return None
+    try:
+        root = root.resolve()
+        target = (root / relpath).resolve()
+        if not target.is_relative_to(root) or target == root or not target.is_file():
+            return None
+        if target.stat().st_size > FILE_MAX_BYTES:
+            return "too_large"
+        return target.read_bytes(), file_content_type(target)
     except OSError:
         return None
 
@@ -1336,12 +1422,59 @@ def vault_backfill() -> int:
     return count
 
 
+# ── The owner's Obsidian vault: the company's second brain, merged into the
+#    same knowledge graph as the Boardroom-Vault. ──
+
+OBSIDIAN_CONFIG_PATH = Path.home() / ".hermes" / "obsidian.json"
+OBSIDIAN_ICLOUD_DOCS = (Path.home() / "Library" / "Mobile Documents"
+                        / "iCloud~md~obsidian" / "Documents")
+OBSIDIAN_NOTE_CAP = 400
+NOTE_CONTENT_CAP = 256 * 1024
+
+
+def obsidian_vault_root() -> Path | None:
+    """The Obsidian vault path: ~/.hermes/obsidian.json {"vault_path": ...}
+    wins, else the first vault found in the iCloud Obsidian folder, else
+    None — the graph simply omits Obsidian nodes. A bad/missing config must
+    never break the graph."""
+    try:
+        if OBSIDIAN_CONFIG_PATH.exists():
+            configured = json.loads(OBSIDIAN_CONFIG_PATH.read_text()).get("vault_path", "")
+            if configured:
+                path = Path(configured).expanduser()
+                return path if path.is_dir() else None
+    except Exception:  # noqa: BLE001
+        pass
+    try:
+        vaults = sorted(p for p in OBSIDIAN_ICLOUD_DOCS.iterdir()
+                        if p.is_dir() and not p.name.startswith("."))
+        return vaults[0] if vaults else None
+    except OSError:
+        return None
+
+
+def obsidian_notes(root: Path) -> tuple[list[Path], bool]:
+    """All .md notes in the vault, skipping any dot component (.obsidian,
+    .trash, dotfiles). Over OBSIDIAN_NOTE_CAP → keep the most recently
+    modified and report truncated=True (never trim silently)."""
+    def mtime(path: Path) -> float:
+        try:
+            return path.stat().st_mtime
+        except OSError:
+            return 0.0
+    notes = [md for md in root.rglob("*.md")
+             if not any(part.startswith(".") for part in md.relative_to(root).parts)]
+    if len(notes) <= OBSIDIAN_NOTE_CAP:
+        return sorted(notes), False
+    notes.sort(key=mtime, reverse=True)
+    return notes[:OBSIDIAN_NOTE_CAP], True
+
+
 def vault_graph() -> dict:
-    """The vault as a graph: every note is a node, every [[wikilink]] an edge.
-    Powers the app's 3D/2D knowledge-graph view."""
+    """Both brains as ONE graph: every Boardroom-Vault note AND every Obsidian
+    note is a node, every [[wikilink]] an edge — including cross-vault links
+    (an Obsidian note naming a company note, or vice versa)."""
     root = COMPANY_VAULT_ROOT
-    if not root.exists():
-        return {"nodes": [], "edges": []}
     agent_ids = {"ceo", "cfo", "cto", "marketing", "research", "builder", "qa", "lena", "gm"}
     skip = {"Home", "Decision Log"}
 
@@ -1365,26 +1498,104 @@ def vault_graph() -> dict:
                 break
         return s.strip().title() or name.replace("-", " ").title()
 
-    nodes: dict[str, dict] = {}
-    edges: list[dict] = []
-    for md in root.rglob("*.md"):
-        nid = md.stem
-        if nid in skip:
-            continue
-        typ = kind(nid, md.parent.name)
-        nodes.setdefault(nid, {"id": nid, "label": label(nid, typ == "agent"), "type": typ})
+    def wikilinks(md: Path) -> list[str]:
         try:
             text = md.read_text(errors="ignore")
         except Exception:  # noqa: BLE001
-            continue
-        for raw in re.findall(r"\[\[([^\]]+)\]\]", text):
-            target = raw.split("|")[0].split("#")[0].strip()
-            if not target or target in skip:
-                continue
-            ttyp = kind(target, "")
-            nodes.setdefault(target, {"id": target, "label": label(target, ttyp == "agent"), "type": ttyp})
-            edges.append({"source": nid, "target": target})
-    return {"nodes": list(nodes.values()), "edges": edges}
+            return []
+        found = (raw.split("|")[0].split("#")[0].strip()
+                 for raw in re.findall(r"\[\[([^\]]+)\]\]", text))
+        return [t for t in found if t and t not in skip]
+
+    company_notes = ([md for md in root.rglob("*.md") if md.stem not in skip]
+                     if root.exists() else [])
+    company_names = {md.stem for md in company_notes}
+
+    ob_root = obsidian_vault_root()
+    ob_notes, truncated = obsidian_notes(ob_root) if ob_root is not None else ([], False)
+    ob_ids: dict[str, str] = {}   # note name → namespaced node id
+    for md in ob_notes:
+        ob_ids.setdefault(md.stem, "obsidian:" + str(md.relative_to(ob_root).with_suffix("")))
+
+    nodes: dict[str, dict] = {}
+    edges: list[dict] = []
+
+    def add_company(name: str) -> str:
+        typ = kind(name, "")
+        nodes.setdefault(name, {"id": name, "label": label(name, typ == "agent"), "type": typ})
+        return name
+
+    def add_obsidian(nid: str) -> str:
+        name = nid.removeprefix("obsidian:").rsplit("/", 1)[-1]
+        nodes.setdefault(nid, {"id": nid, "label": name, "type": "obsidian"})
+        return nid
+
+    for md in company_notes:
+        nid = md.stem
+        typ = kind(nid, md.parent.name)
+        nodes.setdefault(nid, {"id": nid, "label": label(nid, typ == "agent"), "type": typ})
+        for target in wikilinks(md):
+            # Same-vault names win; an Obsidian-only name is the cross-link.
+            if target in company_names or target not in ob_ids:
+                tid = add_company(target)
+            else:
+                tid = add_obsidian(ob_ids[target])
+            edges.append({"source": nid, "target": tid})
+
+    for md in ob_notes:
+        nid = add_obsidian("obsidian:" + str(md.relative_to(ob_root).with_suffix("")))
+        for target in wikilinks(md):
+            if target in ob_ids:
+                tid = add_obsidian(ob_ids[target])
+            elif target in company_names:
+                tid = add_company(target)   # the cross-link back into the company brain
+            else:
+                tid = add_obsidian("obsidian:" + target)   # phantom, same as company links
+            edges.append({"source": nid, "target": tid})
+
+    graph = {"nodes": list(nodes.values()), "edges": edges}
+    if truncated:
+        graph["truncated"] = True
+    return graph
+
+
+def vault_note(node_id: str) -> dict | None:
+    """Full markdown for one graph node, from whichever brain owns it.
+    Company ids are note stems (looked up by walking the vault — no path is
+    ever joined from the request, so traversal is impossible); obsidian: ids
+    are relative paths, resolved and verified to stay inside the vault."""
+    if not node_id:
+        return None
+    if node_id.startswith("obsidian:"):
+        root = obsidian_vault_root()
+        rel = node_id[len("obsidian:"):]
+        if root is None or not rel or any(part.startswith(".") for part in Path(rel).parts):
+            return None
+        try:
+            base = root.resolve()
+            path = (root / (rel + ".md")).resolve()
+            if not path.is_relative_to(base) or not path.is_file():
+                return None
+        except OSError:
+            return None
+        source = "obsidian"
+    else:
+        root = COMPANY_VAULT_ROOT
+        if not root.exists():
+            return None
+        path = next((p for p in root.rglob("*.md") if p.stem == node_id), None)
+        if path is None:
+            return None
+        source = "company"
+    try:
+        content = path.read_text(errors="ignore")
+        modified = int(path.stat().st_mtime)
+    except OSError:
+        return None
+    if len(content) > NOTE_CONTENT_CAP:
+        content = content[:NOTE_CONTENT_CAP] + "\n\n… (truncated)"
+    return {"id": node_id, "title": path.stem, "content": content,
+            "source": source, "modified": modified}
 
 
 def run_autonomous_meeting() -> None:
@@ -1862,6 +2073,7 @@ class RelayHandler(BaseHTTPRequestHandler):
                     "service": "hermes-mobile-relay",
                     "profiles": discover_profiles(),
                     "warm": WARM_CLIENT.warm(),
+                    "warm_count": WARM_CLIENT.warm_count(),
                     "tts": piper_available(),
                     "voices": available_voices(),
                     # Policy: internal voice is ALWAYS the free engine; the
@@ -1920,6 +2132,36 @@ class RelayHandler(BaseHTTPRequestHandler):
                 return
             initiative_id = self.path.split("/")[3]
             self.send_json({"files": demo_asset_names(initiative_id)})
+            return
+        if self.path.startswith("/company/file/"):
+            # /company/file/<initiative_id>/<relative/path...> → one deliverable's bytes.
+            if not self.is_authorized():
+                self.send_json({"error": "unauthorized"}, status=401)
+                return
+            parts = self.path.split("/", 4)   # ['', 'company', 'file', id, relpath]
+            if len(parts) != 5 or not parts[4]:
+                self.send_json({"error": "not_found"}, status=404)
+                return
+            result = initiative_file(parts[3], urllib.parse.unquote(parts[4]))
+            if result is None:
+                self.send_json({"error": "not_found"}, status=404)
+                return
+            if result == "too_large":
+                self.send_json({"error": "file_too_large",
+                                "max_bytes": FILE_MAX_BYTES}, status=413)
+                return
+            self.send_bytes(result[0], result[1])
+            return
+        if self.path.startswith("/company/initiative/") and self.path.endswith("/files"):
+            # The full deliverables manifest for one initiative.
+            if not self.is_authorized():
+                self.send_json({"error": "unauthorized"}, status=401)
+                return
+            files = initiative_files(self.path.split("/")[3])
+            if files is None:
+                self.send_json({"error": "not_found"}, status=404)
+                return
+            self.send_json({"files": files})
             return
         if self.path.startswith("/company/initiative/"):
             if not self.is_authorized():
@@ -1985,6 +2227,18 @@ class RelayHandler(BaseHTTPRequestHandler):
                 self.send_json({"error": "unauthorized"}, status=401)
                 return
             self.send_json(vault_graph())
+            return
+        if self.path.startswith("/company/vault/note"):
+            # /company/vault/note?id=<node-id> → one note's markdown.
+            if not self.is_authorized():
+                self.send_json({"error": "unauthorized"}, status=401)
+                return
+            query = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
+            note = vault_note(query.get("id", [""])[0])
+            if note is None:
+                self.send_json({"error": "not_found"}, status=404)
+                return
+            self.send_json(note)
             return
         if self.path == "/company/revenue":
             if not self.is_authorized():
@@ -2321,9 +2575,11 @@ class RelayHandler(BaseHTTPRequestHandler):
         self.end_headers()
         self.write_sse({"type": "start", "profile": profile, "session": mobile_session_key})
 
-        # Warm path first: ~3s/turn through the persistent agent. Any failure
+        # Warm path first: ~3s/turn through the persistent agent. Check the
+        # AFFINE client (the one this conversation is pinned to) — another
+        # pool member being warm doesn't help this session. Any failure
         # before completion falls through to the cold CLI below.
-        if message and WARM_CLIENT.warm():
+        if message and WARM_CLIENT.client_for(f"{profile}:{mobile_session_key}").warm():
             if self.stream_chat_warm(profile, mobile_session_key, message):
                 return
 

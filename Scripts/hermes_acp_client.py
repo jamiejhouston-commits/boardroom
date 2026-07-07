@@ -18,10 +18,12 @@ back to the cold CLI and a fresh warm process is started for the turn after.
 from __future__ import annotations
 
 import json
+import os
 import select
 import subprocess
 import threading
 import time
+import zlib
 from pathlib import Path
 from typing import Callable, Iterator
 
@@ -224,3 +226,37 @@ class AcpClient:
         self._process = None
         self._initialized = False
         self._sessions.clear()
+
+
+class AcpPool:
+    """N warm AcpClients so concurrent chats don't queue single-file behind one
+    per-client lock. A conversation key is pinned to ONE client (crc32 — stable
+    across restarts; Python's hash() is salted) because ACP sessions live inside
+    that specific child process. Pool size: HERMES_WARM_POOL env, default 2."""
+
+    def __init__(self, size: int | None = None, spawn: Callable = _default_spawn,
+                 turn_timeout: float = 240.0) -> None:
+        if size is None:
+            try:
+                size = int(os.environ.get("HERMES_WARM_POOL", "2"))
+            except ValueError:
+                size = 2
+        self.clients = [AcpClient(spawn=spawn, turn_timeout=turn_timeout)
+                        for _ in range(max(1, size))]
+
+    def client_for(self, conversation_key: str) -> AcpClient:
+        return self.clients[zlib.crc32(conversation_key.encode("utf-8")) % len(self.clients)]
+
+    def prompt(self, conversation_key: str, text: str) -> Iterator[str]:
+        return self.client_for(conversation_key).prompt(conversation_key, text)
+
+    def warm(self) -> bool:
+        """True if ANY client is warm (health signal; per-turn checks use client_for)."""
+        return any(client.warm() for client in self.clients)
+
+    def warm_count(self) -> int:
+        return sum(1 for client in self.clients if client.warm())
+
+    def shutdown(self) -> None:
+        for client in self.clients:
+            client.shutdown()
