@@ -26,6 +26,9 @@ struct CommandCenterView: View {
                     VStack(alignment: .leading, spacing: 18) {
                         topBar
                         tagline
+                        if !runtime.relayConfiguration.isConfigured {
+                            pairingCard
+                        }
                         briefingCard
                         boardroomCard
                         hero
@@ -110,6 +113,40 @@ struct CommandCenterView: View {
             .tracking(2)
             .foregroundStyle(HermesTheme.textSecondary)
             .frame(maxWidth: .infinity)
+    }
+
+    /// First-run front door: nothing in the app is live until the Mac relay
+    /// is paired, so say that plainly instead of hiding pairing in a menu.
+    private var pairingCard: some View {
+        Button { showGateway = true } label: {
+            HStack(spacing: 12) {
+                Image(systemName: "qrcode.viewfinder")
+                    .font(.title3)
+                    .foregroundStyle(HermesTheme.gold)
+                    .frame(width: 40, height: 40)
+                    .background(HermesTheme.gold.opacity(0.12), in: Circle())
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("Connect your Mac")
+                        .font(.subheadline.weight(.bold))
+                        .foregroundStyle(HermesTheme.textPrimary)
+                    Text("Pair the Hermes relay to bring your company to life")
+                        .font(.caption)
+                        .foregroundStyle(HermesTheme.textSecondary)
+                }
+                Spacer()
+                Text("PAIR")
+                    .font(.caption.weight(.bold))
+                    .foregroundStyle(.white)
+                    .padding(.horizontal, 10).padding(.vertical, 5)
+                    .background(HermesTheme.emerald, in: Capsule())
+            }
+            .hermesCard()
+            .overlay(
+                RoundedRectangle(cornerRadius: 16, style: .continuous)
+                    .strokeBorder(HermesTheme.gold.opacity(0.5), lineWidth: 1)
+            )
+        }
+        .buttonStyle(.plain)
     }
 
     /// The Secretary's daily opener — tap into the full briefing.
@@ -283,19 +320,13 @@ struct CommandCenterView: View {
                 actionLabel("Conference", "video.fill")
             }
             .buttonStyle(.plain)
-            NavigationLink {
-                EarthquakeReadyHomeView()
-            } label: {
-                actionLabel("Earthquake", "waveform.path.ecg.rectangle.fill")
-            }
-            .buttonStyle(.plain)
-            NavigationLink {
-                AirQualityWindowHomeView()
-            } label: {
-                actionLabel("Air Quality", "wind")
-            }
-            .buttonStyle(.plain)
             actionButton("War Room", "rectangle.3.group.fill") { router.go(.warRoom) }
+            NavigationLink {
+                LabsView()
+            } label: {
+                actionLabel("Labs", "flask.fill")
+            }
+            .buttonStyle(.plain)
         }
     }
 
@@ -333,7 +364,7 @@ struct CommandCenterView: View {
                 statTile(value: "\(org.managers.count)", label: "Departments", icon: "square.grid.2x2.fill", tint: HermesTheme.steel) { router.go(.agents) }
             }
             HStack(spacing: 10) {
-                statTile(value: "143", label: "Active Tasks", icon: "checklist", tint: HermesTheme.navy) { router.go(.meetings) }
+                statTile(value: "\(activeTaskCount)", label: "Active Tasks", icon: "checklist", tint: HermesTheme.navy) { router.go(.warRoom) }
                 missionTile
             }
         }
@@ -354,40 +385,71 @@ struct CommandCenterView: View {
         .buttonStyle(.plain)
     }
 
+    /// Honest relay status — paired & healthy, degraded, or not paired.
     private var missionTile: some View {
         HStack(spacing: 12) {
             ZStack {
                 Circle().stroke(HermesTheme.hairline, lineWidth: 5)
                 Circle()
-                    .trim(from: 0, to: ringProgress)
+                    .trim(from: 0, to: relayHealthy ? ringProgress : 0)
                     .stroke(HermesTheme.emerald, style: StrokeStyle(lineWidth: 5, lineCap: .round))
                     .rotationEffect(.degrees(-90))
-                Text("99%").font(.caption.weight(.bold)).foregroundStyle(HermesTheme.textPrimary)
+                Image(systemName: relayHealthy ? "checkmark" : "bolt.slash")
+                    .font(.caption.weight(.bold))
+                    .foregroundStyle(relayHealthy ? HermesTheme.emerald : HermesTheme.textSecondary)
             }
             .frame(width: 46, height: 46)
 
             VStack(alignment: .leading, spacing: 2) {
-                Text("SYSTEM HEALTH")
+                Text("MAC RELAY")
                     .font(.system(size: 9, weight: .semibold))
                     .tracking(1)
                     .foregroundStyle(HermesTheme.textSecondary)
-                Text("On Track").font(.subheadline.weight(.bold)).foregroundStyle(HermesTheme.emerald)
+                Text(relayStatusLabel)
+                    .font(.subheadline.weight(.bold))
+                    .foregroundStyle(relayHealthy ? HermesTheme.emerald : HermesTheme.textSecondary)
             }
             Spacer(minLength: 0)
         }
         .hermesCard()
     }
 
+    private var relayHealthy: Bool {
+        runtime.relayConfiguration.isConfigured && company.errorMessage == nil
+    }
+
+    private var relayStatusLabel: String {
+        if !runtime.relayConfiguration.isConfigured { return "Not paired" }
+        return company.errorMessage == nil ? "Connected" : "Unreachable"
+    }
+
+    private var activeTaskCount: Int {
+        let tasks = (company.state.tasks ?? []).filter { $0.status != "done" }.count
+        let building = company.state.initiatives.filter { !$0.isTerminal }.count
+        return tasks + building
+    }
+
     // MARK: Live feed
 
+    /// Real company activity — the same events the War Room shows.
     private var liveFeed: some View {
         VStack(alignment: .leading, spacing: 12) {
-            sectionHeader("LIVE FEED", actionTitle: "View all") { router.go(.agents) }
+            sectionHeader("LIVE FEED", actionTitle: "View all") { router.go(.warRoom) }
             VStack(spacing: 0) {
-                ForEach(Array(Self.feed.enumerated()), id: \.element.id) { index, item in
-                    feedRowLink(item)
-                    if index < Self.feed.count - 1 {
-                        Divider().overlay(HermesTheme.hairline)
+                let events = Array((company.state.events ?? []).suffix(5).reversed())
+                if events.isEmpty {
+                    Text(company.state.enabled
+                         ? "No activity yet — the feed fills as your company works."
+                         : "The company is idle — switch it on in the Boardroom.")
+                        .font(.caption)
+                        .foregroundStyle(HermesTheme.textSecondary)
+                        .padding(.vertical, 9)
+                } else {
+                    ForEach(Array(events.enumerated()), id: \.element.id) { index, event in
+                        feedRow(event)
+                        if index < events.count - 1 {
+                            Divider().overlay(HermesTheme.hairline)
+                        }
                     }
                 }
             }
@@ -395,29 +457,21 @@ struct CommandCenterView: View {
         }
     }
 
-    @ViewBuilder
-    private func feedRowLink(_ item: FeedItem) -> some View {
-        if let agent = matchedAgent(item.agent) {
-            NavigationLink { OrgAgentDetailView(agent: agent) } label: { feedRow(item) }
-                .buttonStyle(.plain)
-        } else {
-            feedRow(item)
-        }
-    }
-
-    private func feedRow(_ item: FeedItem) -> some View {
+    private func feedRow(_ event: CompanyEvent) -> some View {
         HStack(spacing: 12) {
-            Image(systemName: item.icon)
+            Image(systemName: "bolt.fill")
                 .font(.footnote)
-                .foregroundStyle(item.tint)
+                .foregroundStyle(HermesTheme.emerald)
                 .frame(width: 30, height: 30)
-                .background(item.tint.opacity(0.12), in: Circle())
-            VStack(alignment: .leading, spacing: 2) {
-                Text(item.agent).font(.subheadline.weight(.semibold)).foregroundStyle(HermesTheme.textPrimary)
-                Text(item.text).font(.caption).foregroundStyle(HermesTheme.textSecondary).lineLimit(1)
-            }
+                .background(HermesTheme.emerald.opacity(0.12), in: Circle())
+            Text(event.text)
+                .font(.caption)
+                .foregroundStyle(HermesTheme.textPrimary)
+                .lineLimit(2)
             Spacer(minLength: 8)
-            Text(item.time).font(.caption2).foregroundStyle(HermesTheme.textSecondary)
+            Text(event.date.formatted(.relative(presentation: .numeric, unitsStyle: .narrow)))
+                .font(.caption2)
+                .foregroundStyle(HermesTheme.textSecondary)
         }
         .padding(.vertical, 9)
         .contentShape(Rectangle())
@@ -425,31 +479,60 @@ struct CommandCenterView: View {
 
     // MARK: Upcoming
 
+    /// Real upcoming work: live meetings first, then enabled Cron schedules.
+    private struct UpcomingRow: Identifiable {
+        let id: String
+        let time: String
+        let title: String
+        let detail: String
+    }
+
+    private var upcomingRows: [UpcomingRow] {
+        var rows: [UpcomingRow] = (company.state.meetings ?? [])
+            .filter(\.isLive)
+            .map { UpcomingRow(id: "meeting-\($0.id)", time: "LIVE",
+                               title: $0.topic, detail: $0.attendees.joined(separator: " · ")) }
+        rows += (company.state.schedules ?? [])
+            .filter(\.enabled)
+            .map { UpcomingRow(id: "schedule-\($0.id)",
+                               time: String(format: "%d:%02d", $0.atHour, $0.atMinute),
+                               title: $0.title, detail: $0.cadenceSummary) }
+        return Array(rows.prefix(4))
+    }
+
     private var upcoming: some View {
         VStack(alignment: .leading, spacing: 12) {
             sectionHeader("UPCOMING", actionTitle: "Schedule") { router.go(.meetings) }
             VStack(spacing: 0) {
-                ForEach(Array(Self.events.enumerated()), id: \.element.id) { index, event in
-                    Button { router.go(.meetings) } label: {
-                        HStack(spacing: 12) {
-                            Text(event.time)
-                                .font(.caption.weight(.bold))
-                                .foregroundStyle(HermesTheme.emerald)
-                                .frame(width: 52, alignment: .leading)
-                            Rectangle().fill(HermesTheme.hairline).frame(width: 1, height: 26)
-                            VStack(alignment: .leading, spacing: 2) {
-                                Text(event.title).font(.subheadline.weight(.semibold)).foregroundStyle(HermesTheme.textPrimary)
-                                Text(event.detail).font(.caption).foregroundStyle(HermesTheme.textSecondary)
-                            }
-                            Spacer(minLength: 0)
-                            Image(systemName: "chevron.right").font(.caption2).foregroundStyle(HermesTheme.textSecondary)
-                        }
+                let rows = upcomingRows
+                if rows.isEmpty {
+                    Text("Nothing on the calendar — schedule a meeting or add a Cron.")
+                        .font(.caption)
+                        .foregroundStyle(HermesTheme.textSecondary)
                         .padding(.vertical, 9)
-                        .contentShape(Rectangle())
-                    }
-                    .buttonStyle(.plain)
-                    if index < Self.events.count - 1 {
-                        Divider().overlay(HermesTheme.hairline)
+                } else {
+                    ForEach(Array(rows.enumerated()), id: \.element.id) { index, event in
+                        Button { router.go(.meetings) } label: {
+                            HStack(spacing: 12) {
+                                Text(event.time)
+                                    .font(.caption.weight(.bold))
+                                    .foregroundStyle(HermesTheme.emerald)
+                                    .frame(width: 52, alignment: .leading)
+                                Rectangle().fill(HermesTheme.hairline).frame(width: 1, height: 26)
+                                VStack(alignment: .leading, spacing: 2) {
+                                    Text(event.title).font(.subheadline.weight(.semibold)).foregroundStyle(HermesTheme.textPrimary)
+                                    Text(event.detail).font(.caption).foregroundStyle(HermesTheme.textSecondary)
+                                }
+                                Spacer(minLength: 0)
+                                Image(systemName: "chevron.right").font(.caption2).foregroundStyle(HermesTheme.textSecondary)
+                            }
+                            .padding(.vertical, 9)
+                            .contentShape(Rectangle())
+                        }
+                        .buttonStyle(.plain)
+                        if index < rows.count - 1 {
+                            Divider().overlay(HermesTheme.hairline)
+                        }
                     }
                 }
             }
@@ -476,7 +559,9 @@ struct CommandCenterView: View {
                                         .frame(width: 46, height: 46)
                                         .background(HermesTheme.surface, in: RoundedRectangle(cornerRadius: 12, style: .continuous))
                                         .overlay(RoundedRectangle(cornerRadius: 12, style: .continuous).strokeBorder(HermesTheme.hairline, lineWidth: 1))
-                                    Circle().fill(HermesTheme.emerald).frame(width: 8, height: 8).offset(x: 3, y: -3)
+                                    if relayHealthy && company.state.enabled {
+                                        Circle().fill(HermesTheme.emerald).frame(width: 8, height: 8).offset(x: 3, y: -3)
+                                    }
                                 }
                                 Text(shortTitle(agent))
                                     .font(.system(size: 9, weight: .semibold))
@@ -495,36 +580,75 @@ struct CommandCenterView: View {
 
     // MARK: Signals (key metrics / priorities / alerts)
 
+    private var shippedCount: Int { company.state.initiatives.filter { $0.stage == "shipped" }.count }
+    private var inFlightCount: Int { company.state.initiatives.filter { !$0.isTerminal }.count }
+    private var tasksDoneCount: Int { (company.state.tasks ?? []).filter { $0.status == "done" }.count }
+
+    /// Top initiatives by pipeline progress — the company's real priorities.
+    private var topPriorities: [CompanyInitiative] {
+        Array(company.state.initiatives.filter { !$0.isTerminal }
+            .sorted { $0.progress > $1.progress }
+            .prefix(3))
+    }
+
     private var signals: some View {
         VStack(spacing: 12) {
             VStack(alignment: .leading, spacing: 10) {
                 cardTitle("KEY METRICS", icon: "chart.line.uptrend.xyaxis")
-                metricRow("Monthly ROI", "$245K", "+12%", HermesTheme.emerald)
+                metricRow("Products Shipped", "\(shippedCount)", "all time", HermesTheme.emerald)
                 Divider().overlay(HermesTheme.hairline)
-                metricRow("Active Agents", "\(org.agents.count)", "live", HermesTheme.steel)
+                metricRow("Initiatives In Flight", "\(inFlightCount)", "live", HermesTheme.steel)
                 Divider().overlay(HermesTheme.hairline)
-                metricRow("Hours Saved", "1,204", "this mo", HermesTheme.navy)
+                metricRow("Tasks Completed", "\(tasksDoneCount)", "board", HermesTheme.navy)
             }
             .hermesCard()
 
-            VStack(alignment: .leading, spacing: 10) {
-                cardTitle("TOP PRIORITIES", icon: "flag.fill")
-                priorityRowLink("Close Q2 financial review", "CFO Agent")
-                Divider().overlay(HermesTheme.hairline)
-                priorityRowLink("Ship onboarding flow", "CTO Agent")
-                Divider().overlay(HermesTheme.hairline)
-                priorityRowLink("Launch growth campaign", "Marketing Agent")
+            if !topPriorities.isEmpty {
+                VStack(alignment: .leading, spacing: 10) {
+                    cardTitle("TOP PRIORITIES", icon: "flag.fill")
+                    ForEach(Array(topPriorities.enumerated()), id: \.element.id) { index, initiative in
+                        NavigationLink { BoardroomView() } label: {
+                            priorityRow(initiative.title, initiative.stageLabel)
+                        }
+                        .buttonStyle(.plain)
+                        if index < topPriorities.count - 1 {
+                            Divider().overlay(HermesTheme.hairline)
+                        }
+                    }
+                }
+                .hermesCard()
             }
-            .hermesCard()
 
             VStack(alignment: .leading, spacing: 10) {
                 cardTitle("SYSTEM ALERTS", icon: "bell.badge.fill")
-                alertRow("All systems operational", HermesTheme.emerald, "checkmark.circle.fill")
-                Divider().overlay(HermesTheme.hairline)
-                alertRow("2 agents idle — capacity available", HermesTheme.silver, "moon.zzz.fill")
+                ForEach(Array(systemAlerts.enumerated()), id: \.offset) { index, alert in
+                    alertRow(alert.text, alert.tint, alert.icon)
+                    if index < systemAlerts.count - 1 {
+                        Divider().overlay(HermesTheme.hairline)
+                    }
+                }
             }
             .hermesCard()
         }
+    }
+
+    private var systemAlerts: [(text: String, tint: Color, icon: String)] {
+        var alerts: [(String, Color, String)] = []
+        if !runtime.relayConfiguration.isConfigured {
+            alerts.append(("Mac relay not paired — the company is offline", HermesTheme.gold, "bolt.slash.fill"))
+        } else if company.errorMessage != nil {
+            alerts.append(("Relay unreachable — check the Mac", HermesTheme.gold, "wifi.exclamationmark"))
+        }
+        if !company.pendingGates.isEmpty {
+            alerts.append(("\(company.pendingGates.count) decision\(company.pendingGates.count == 1 ? "" : "s") waiting in the Boardroom", HermesTheme.gold, "building.columns.fill"))
+        }
+        if runtime.relayConfiguration.isConfigured && !company.state.enabled {
+            alerts.append(("Company halted — agents are idle", HermesTheme.silver, "moon.zzz.fill"))
+        }
+        if alerts.isEmpty {
+            alerts.append(("All systems operational", HermesTheme.emerald, "checkmark.circle.fill"))
+        }
+        return alerts
     }
 
     private var footer: some View {
@@ -548,16 +672,6 @@ struct CommandCenterView: View {
                 .foregroundStyle(tint)
                 .padding(.horizontal, 6).padding(.vertical, 2)
                 .background(tint.opacity(0.12), in: Capsule())
-        }
-    }
-
-    @ViewBuilder
-    private func priorityRowLink(_ title: String, _ owner: String) -> some View {
-        if let agent = matchedAgent(owner) {
-            NavigationLink { OrgAgentDetailView(agent: agent) } label: { priorityRow(title, owner) }
-                .buttonStyle(.plain)
-        } else {
-            priorityRow(title, owner)
         }
     }
 
@@ -612,46 +726,27 @@ struct CommandCenterView: View {
         return name.count <= 10 ? name : agent.title
     }
 
-    /// Best-effort match of a feed/priority label to a real org agent.
-    private func matchedAgent(_ name: String) -> OrgAgent? {
-        let lower = name.lowercased()
-        if let exact = org.agents.first(where: { lower.contains($0.name.lowercased()) || $0.name.lowercased().contains(lower) }) {
-            return exact
+}
+
+/// Off-mission utilities, kept but out of the company's way.
+struct LabsView: View {
+    var body: some View {
+        List {
+            Section {
+                NavigationLink { EarthquakeReadyHomeView() } label: {
+                    Label("Earthquake Ready", systemImage: "waveform.path.ecg.rectangle.fill")
+                }
+                NavigationLink { AirQualityWindowHomeView() } label: {
+                    Label("Air Quality Window", systemImage: "wind")
+                }
+                NavigationLink { TravelPackingHomeView() } label: {
+                    Label("Travel Packing Lists", systemImage: "suitcase.fill")
+                }
+            } footer: {
+                Text("Standalone utilities that live outside the company.")
+            }
         }
-        let firstWord = lower.split(separator: " ").first.map(String.init) ?? lower
-        return org.agents.first(where: { $0.name.lowercased().contains(firstWord) }) ?? org.ceo
+        .navigationTitle("Labs")
+        .navigationBarTitleDisplayMode(.inline)
     }
-
-    // MARK: Seeded illustrative content (wired to real signals later)
-
-    private struct FeedItem: Identifiable {
-        let id = UUID()
-        let agent: String
-        let icon: String
-        let text: String
-        let time: String
-        let tint: Color
-    }
-
-    private static let feed: [FeedItem] = [
-        FeedItem(agent: "Marketing Agent", icon: "megaphone.fill", text: "Campaign analytics refreshed", time: "2m", tint: HermesTheme.emerald),
-        FeedItem(agent: "CFO Agent", icon: "dollarsign.circle.fill", text: "Monthly cash-flow reconciled", time: "11m", tint: HermesTheme.navy),
-        FeedItem(agent: "Operations Agent", icon: "gearshape.2.fill", text: "3 workflows completed", time: "24m", tint: HermesTheme.steel),
-        FeedItem(agent: "Builder Agent", icon: "cube.fill", text: "Pushed onboarding scaffold", time: "1h", tint: HermesTheme.emeraldSoft),
-        FeedItem(agent: "Legal Agent", icon: "building.columns.fill", text: "Reviewed vendor contract", time: "2h", tint: HermesTheme.silver)
-    ]
-
-    private struct EventItem: Identifiable {
-        let id = UUID()
-        let time: String
-        let title: String
-        let detail: String
-    }
-
-    private static let events: [EventItem] = [
-        EventItem(time: "9:00", title: "Executive Standup", detail: "GM · all department heads"),
-        EventItem(time: "11:30", title: "Strategy Review", detail: "Strategy · CFO · CPO"),
-        EventItem(time: "2:00", title: "Budget Review", detail: "CFO · Accounting"),
-        EventItem(time: "4:00", title: "Product Demo", detail: "CPO · Builder · QA")
-    ]
 }
