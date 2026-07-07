@@ -20,6 +20,8 @@ struct HeadquartersView: View {
     @State private var fullChatAgent: OrgAgent?
     @State private var roamControl = HQRoamControl()
     @State private var showGamesStudio = false
+    @State private var floor: HQFloor = .ground
+    @State private var divisionSheet: HQDivision?
 
     private enum BoardSheet: String, Identifiable {
         case warBoard, kanban, gates, production
@@ -41,11 +43,14 @@ struct HeadquartersView: View {
                 agents: org.agents,
                 companyState: company.state,
                 cameraMode: cameraMode,
+                floor: floor,
                 conversingAgentID: conversation?.agent.id,
                 roamControl: roamControl,
                 onSelectAgent: startConversation(with:),
                 onTapBoard: { boardSheet = BoardSheet($0) },
-                onEnterGamesStudio: { showGamesStudio = true }
+                onEnterGamesStudio: { showGamesStudio = true },
+                onTapDivision: { divisionSheet = $0 },
+                onFloorTravel: travel(to:)
             )
             .ignoresSafeArea()
 
@@ -83,8 +88,16 @@ struct HeadquartersView: View {
             }
         }
         .onDisappear { conversation?.stop() }
+        // The overview/orbit/inspect cameras frame the lobby — leaving roam
+        // brings you back downstairs so floor 2 never blocks their shot.
+        .onChange(of: cameraMode) { _, mode in
+            if mode != .roam { floor = .ground }
+        }
         .sheet(item: $boardSheet) { sheet in
             NavigationStack { boardContent(sheet) }
+        }
+        .sheet(item: $divisionSheet) { division in
+            NavigationStack { HQDivisionSheet(division: division) }
         }
         .sheet(item: $fullChatAgent) { agent in
             NavigationStack { AgentChatView(agent: agent) }
@@ -92,6 +105,16 @@ struct HeadquartersView: View {
         .fullScreenCover(isPresented: $showGamesStudio) {
             GamesRoomView()
         }
+    }
+
+    // MARK: Floor travel — walk into (or tap) an elevator, the lift teleports you
+
+    private func travel(to destination: HQFloor) {
+        guard destination != floor else { return }
+        floor = destination
+        // The lift drops you on your feet — the scene view respawns the roam
+        // rig at the destination's elevator when floor/mode change lands.
+        if cameraMode != .roam { cameraMode = .roam }
     }
 
     // MARK: Conversation flow — tap an agent, talk where they stand

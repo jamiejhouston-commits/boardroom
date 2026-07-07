@@ -79,6 +79,7 @@ enum HQSceneBuilder {
         addPerimeter(to: root)
         addGamesStudioPortal(to: root)
         addProductionBay(to: root)
+        HQDivisionsFloor.build(into: root)   // floor 2 + the elevator markers
         addCeiling(to: root)
         addLights(to: root)
         addLiveSurfaces(to: root)
@@ -723,14 +724,15 @@ enum HQSceneBuilder {
         parent.addChildNode(n)
     }
 
-    private static func placeAsset(_ name: String, height: CGFloat, accent: UIColor?,
-                                   at xz: (Float, Float), rotY: Float = 0, in parent: SCNNode) {
+    /// Internal: `HQDivisionsFloor` reuses the same asset-or-fallback placement.
+    static func placeAsset(_ name: String, height: CGFloat, accent: UIColor?,
+                           at xz: (Float, Float), rotY: Float = 0, in parent: SCNNode) {
         let node = HQAssetLibrary.node(named: name, height: height, recolorYellowTo: accent)
             ?? fallbackBox(w: height * 0.9, h: height, l: height * 0.6, color: surface)
         place(node, xz.0, xz.1, rotY: rotY, in: parent)
     }
 
-    private static func fallbackBox(w: CGFloat, h: CGFloat, l: CGFloat, color: UIColor) -> SCNNode {
+    static func fallbackBox(w: CGFloat, h: CGFloat, l: CGFloat, color: UIColor) -> SCNNode {
         let box = SCNBox(width: w, height: h, length: l, chamferRadius: 0.04)
         let m = SCNMaterial()
         m.lightingModel = .physicallyBased

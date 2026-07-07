@@ -11,17 +11,22 @@ struct HQSceneView: UIViewRepresentable {
     var agents: [OrgAgent]
     var companyState: CompanyState
     var cameraMode: HQCameraMode
+    var floor: HQFloor
     var conversingAgentID: String?
     let roamControl: HQRoamControl
     var onSelectAgent: (String) -> Void
     var onTapBoard: (HQLiveBoards.Kind) -> Void
     var onEnterGamesStudio: () -> Void
+    var onTapDivision: (HQDivision) -> Void
+    var onFloorTravel: @MainActor (HQFloor) -> Void
 
     func makeCoordinator() -> Coordinator {
         Coordinator(roamControl: roamControl,
                     onSelectAgent: onSelectAgent,
                     onTapBoard: onTapBoard,
-                    onEnterGamesStudio: onEnterGamesStudio)
+                    onEnterGamesStudio: onEnterGamesStudio,
+                    onTapDivision: onTapDivision,
+                    onFloorTravel: onFloorTravel)
     }
 
     func makeUIView(context: Context) -> SCNView {
@@ -76,10 +81,16 @@ struct HQSceneView: UIViewRepresentable {
             coordinator.agentNodes[placement.agent.id]?.applyStatus(status)
         }
 
-        // Camera — only re-apply when the mode actually changed.
-        if coordinator.lastMode != cameraMode {
+        // Camera — re-apply on mode change; a floor change respawns the roam
+        // rig at the destination's elevator (the "teleport" of the lift).
+        if coordinator.lastMode != cameraMode || coordinator.lastFloor != floor {
+            // Floor 2 is visible only while roaming it, so the overview/orbit
+            // cameras keep their proven ground-floor framing unobstructed.
+            uiView.scene?.rootNode
+                .childNode(withName: HQDivisionsFloor.floorNodeName, recursively: false)?
+                .isHidden = !(cameraMode == .roam && floor == .divisions)
             if cameraMode == .roam {
-                let start = HQRoamState()
+                let start = HQRoamState.spawn(on: floor)
                 roamControl.activate(from: start)
                 coordinator.camera?.enterRoam(start)
             } else {
@@ -87,6 +98,7 @@ struct HQSceneView: UIViewRepresentable {
                 coordinator.camera?.apply(cameraMode, agentNodes: coordinator.agentNodes)
             }
             coordinator.lastMode = cameraMode
+            coordinator.lastFloor = floor
         }
 
         // Face-to-face conversation — the tapped agent turns to the player.
@@ -104,24 +116,34 @@ struct HQSceneView: UIViewRepresentable {
         var camera: HQCameraController?
         weak var scnView: SCNView?
         var lastMode: HQCameraMode = .overview
+        var lastFloor: HQFloor = .ground
 
         private let roamControl: HQRoamControl
         private let onSelectAgent: (String) -> Void
         private let onTapBoard: (HQLiveBoards.Kind) -> Void
         private let onEnterGamesStudio: () -> Void
+        private let onTapDivision: (HQDivision) -> Void
+        private let onFloorTravel: @MainActor (HQFloor) -> Void
         private var boardsSignature = ""
         private var huddleIDs: Set<String> = []
         private var shippedIDs: Set<String>?
         private var conversingID: String?
+        // Render-thread only: one lift ride per elevator visit.
+        private var travelDispatched = false
+        private var lastRoamFloor: HQFloor = .ground
 
         init(roamControl: HQRoamControl,
              onSelectAgent: @escaping (String) -> Void,
              onTapBoard: @escaping (HQLiveBoards.Kind) -> Void,
-             onEnterGamesStudio: @escaping () -> Void) {
+             onEnterGamesStudio: @escaping () -> Void,
+             onTapDivision: @escaping (HQDivision) -> Void,
+             onFloorTravel: @escaping @MainActor (HQFloor) -> Void) {
             self.roamControl = roamControl
             self.onSelectAgent = onSelectAgent
             self.onTapBoard = onTapBoard
             self.onEnterGamesStudio = onEnterGamesStudio
+            self.onTapDivision = onTapDivision
+            self.onFloorTravel = onFloorTravel
         }
 
         // MARK: Roam render loop (render thread — keep it lean)
@@ -129,6 +151,19 @@ struct HQSceneView: UIViewRepresentable {
         nonisolated func renderer(_ renderer: SCNSceneRenderer, updateAtTime time: TimeInterval) {
             guard let state = roamControl.step(now: time) else { return }
             camera?.applyRoamPose(state)
+
+            // Walking into an elevator rides it — dispatched once per visit;
+            // the flag re-arms when the rig lands on the other floor.
+            if state.floor != lastRoamFloor {
+                lastRoamFloor = state.floor
+                travelDispatched = false
+            }
+            if !travelDispatched, HQRoamMath.inElevator(state) {
+                travelDispatched = true
+                let destination: HQFloor = state.floor == .ground ? .divisions : .ground
+                let travel = onFloorTravel
+                Task { @MainActor in travel(destination) }
+            }
         }
 
         // MARK: Gestures
@@ -157,6 +192,18 @@ struct HQSceneView: UIViewRepresentable {
                     }
                     if current.name == HQSceneBuilder.gamesStudioPortalName {
                         onEnterGamesStudio()
+                        return
+                    }
+                    if current.name == HQDivisionsFloor.elevatorUpName {
+                        onFloorTravel(.divisions)
+                        return
+                    }
+                    if current.name == HQDivisionsFloor.elevatorDownName {
+                        onFloorTravel(.ground)
+                        return
+                    }
+                    if let division = HQDivision.division(forNodeName: current.name) {
+                        onTapDivision(division)
                         return
                     }
                     if let kind = HQLiveBoards.kind(forNodeName: current.name) {
@@ -222,7 +269,8 @@ struct HQSceneView: UIViewRepresentable {
             for (index, id) in joining.sorted().enumerated() {
                 guard let node = agentNodes[id], !node.isExecutive else { continue }
                 // Huddle ring just inside the console circle, spread evenly.
-                let angle = Float(index) * (2 * .pi / Float(max(joining.count, 3))) - .pi / 3
+                let step: Float = (2 * Float.pi) / Float(max(joining.count, 3))
+                let angle: Float = Float(index) * step - Float.pi / 3
                 let seat = SCNVector3(sin(angle) * 2.9, 0.22, cos(angle) * 2.9)
                 node.joinMeeting(at: seat, facing: SCNVector3(0, 0.22, 0))
             }
