@@ -74,26 +74,16 @@ final class BriefingCenter: ObservableObject {
         Write the briefing from ONLY the real data above: 1) a one-line greeting, 2) today's schedule (say "nothing on the calendar" if none), 3) what actually came in overnight from the memo replies (say "a quiet night" if none), 4) "What needs your decision today" as short bullets drawn only from the real schedule and replies — if there isn't enough real signal, say so plainly. Do NOT invent department status, metrics, revenue, or any event that is not in the data above. Keep it under 200 words. Plain text, no markdown headers.
         """
 
-        var collected = ""
+        let cleaned: String
         do {
-            for try await event in HermesRelayClient(configuration: config).stream(payload, sessionKey: "hermes-mobile-briefing") {
-                switch event.type {
-                case .start: break
-                case .delta: collected += event.text ?? ""
-                case .done:
-                    if collected.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
-                       let reply = event.reply { collected = reply }
-                case .error:
-                    throw HermesRelayError.server(event.message ?? "Briefing failed.")
-                }
-            }
+            cleaned = try await HermesRelayClient(configuration: config)
+                .collect(payload, sessionKey: "hermes-mobile-briefing")
         } catch {
             lastError = error.localizedDescription
             return
         }
 
-        let cleaned = collected.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !cleaned.isEmpty else {
+        guard cleaned != HermesRelayClient.noResponseFallback else {
             // Empty/tool-only turn from the relay: show a visible, retryable
             // error and KEEP the previous briefing intact — never persist "".
             lastError = "Your secretary didn't return a briefing — please try again."

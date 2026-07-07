@@ -80,41 +80,24 @@ final class HQConversationModel: ObservableObject {
         let wantsVoiceReply = spoken
         streamTask = Task { [weak self] in
             guard let self else { return }
-            var collected = ""
+            let reply: String
             do {
                 // Voice turns use fast:true (single model turn — call latency);
                 // typed turns run the full agent loop like AgentChatView.
-                for try await event in HermesRelayClient(configuration: config)
-                    .stream(payload, sessionKey: routing.session, fast: wantsVoiceReply,
-                            skills: agent.skills) {
-                    if Task.isCancelled { return }
-                    switch event.type {
-                    case .start: break
-                    case .delta:
-                        collected += event.text ?? ""
-                        self.setText(collected, for: replyID)
-                    case .done:
-                        if collected.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
-                           let reply = event.reply {
-                            collected = reply
-                            self.setText(collected, for: replyID)
-                        }
-                    case .error:
-                        throw HermesRelayError.server(event.message ?? "Stream failed.")
+                reply = try await HermesRelayClient(configuration: config)
+                    .collect(payload, sessionKey: routing.session, fast: wantsVoiceReply,
+                             skills: agent.skills) { [weak self] text in
+                        guard !Task.isCancelled else { return }
+                        self?.setText(text, for: replyID)
                     }
-                }
             } catch {
                 self.dropIfEmpty(replyID)
                 self.errorText = error.localizedDescription
                 self.phase = .idle
                 return
             }
-            let reply = collected.trimmingCharacters(in: .whitespacesAndNewlines)
-            if reply.isEmpty {
-                self.setText("(no response — try again)", for: replyID)
-                self.phase = .idle
-                return
-            }
+            if Task.isCancelled { return }
+            self.setText(reply, for: replyID)
             if wantsVoiceReply {
                 self.phase = .speaking
                 await self.voice.speak(reply, seedFrom: self.agent.id,

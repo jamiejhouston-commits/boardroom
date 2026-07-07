@@ -243,22 +243,12 @@ private final class CallModel: ObservableObject {
         let ctx = context.isEmpty ? "" : context + "\n\n"
         let payload = ctx + "You are \(agent.name) in a multi-agent company, ON A VOICE CALL with the owner. Your remit: \(persona)\n\nThe owner just said: \"\(transcript)\"\n\nReply as \(agent.name) in natural spoken style — 1–3 sentences, under 50 words, no markdown, no lists."
 
-        var collected = ""
+        let reply: String
         do {
             // Same session as 1:1 chat AND the autonomous company.
             // fast: true = single model turn on the relay (~half the latency).
-            for try await event in HermesRelayClient(configuration: config)
-                .stream(payload, sessionKey: routing.session, fast: true, skills: agent.skills) {
-                switch event.type {
-                case .start: break
-                case .delta: collected += event.text ?? ""
-                case .done:
-                    if collected.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
-                       let reply = event.reply { collected = reply }
-                case .error:
-                    throw HermesRelayError.server(event.message ?? "Call failed.")
-                }
-            }
+            reply = try await HermesRelayClient(configuration: config)
+                .collect(payload, sessionKey: routing.session, fast: true, skills: agent.skills)
         } catch {
             voice.stop()
             state = .error(error.localizedDescription)
@@ -266,8 +256,7 @@ private final class CallModel: ObservableObject {
         }
         if Task.isCancelled { return }
 
-        let reply = collected.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !reply.isEmpty else {
+        guard reply != HermesRelayClient.noResponseFallback else {
             // Empty relay reply on a VOICE call — never leave the owner with a
             // silent "…". Give a visible + audible cue; .error is recoverable
             // (holding the mic starts the next turn).

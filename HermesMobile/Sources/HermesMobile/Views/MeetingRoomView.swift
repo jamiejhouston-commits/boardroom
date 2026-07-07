@@ -1054,21 +1054,17 @@ final class MeetingConversation: ObservableObject {
         Task {
             do {
                 // fast: false — a meeting reply is TEXT and runs the FULL agent
-                // loop. fast:true caps the CLI at 2 turns (voice-latency only);
-                // any tool use then truncates the reply to EMPTY → "(no response)"
-                // in the Conference Room. Matches AgentChatView / CompanyChatView.
-                for try await event in HermesRelayClient(configuration: config).stream(payload, sessionKey: session, fast: false) {
-                    switch event.type {
-                    case .start: break
-                    case .delta: appendTo(responseID, event.text ?? "")
-                    case .done:
-                        if let r = event.reply, currentText(responseID).isEmpty { appendTo(responseID, r) }
-                    case .error:
-                        throw HermesRelayError.server(event.message ?? "Hermes stream failed.")
+                // loop (fast:true is voice-latency only; it truncates tool use).
+                let replyText = try await HermesRelayClient(configuration: config)
+                    .collect(payload, sessionKey: session, fast: false) { [weak self] text in
+                        self?.setText(responseID, text)
                     }
-                }
-                if currentText(responseID).isEmpty { appendTo(responseID, "(no response)") }
+                setText(responseID, replyText)
             } catch {
+                if currentText(responseID).isEmpty,
+                   let idx = messages.firstIndex(where: { $0.id == responseID }) {
+                    messages.remove(at: idx)
+                }
                 messages.append(ChatMessage(author: .system, text: error.localizedDescription, date: Date()))
             }
             isSending = false
@@ -1087,9 +1083,9 @@ final class MeetingConversation: ObservableObject {
         return attendees.sorted { rank($0) < rank($1) }.first ?? attendees[0]
     }
 
-    private func appendTo(_ id: UUID, _ text: String) {
-        guard !text.isEmpty, let index = messages.firstIndex(where: { $0.id == id }) else { return }
-        messages[index].text += text
+    private func setText(_ id: UUID, _ text: String) {
+        guard let index = messages.firstIndex(where: { $0.id == id }) else { return }
+        messages[index].text = text
     }
     private func currentText(_ id: UUID) -> String {
         messages.first { $0.id == id }?.text.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""

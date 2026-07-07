@@ -413,17 +413,10 @@ final class NotificationPresenter: NSObject, UNUserNotificationCenterDelegate, @
         config.profile = routing.profile
         let payload = "You are Lena, the owner's personal assistant — warm, concise, and you "
             + "address him as \"sir\". Reply to his message:\n\n" + trimmed
-        var reply = ""
+        let reply: String
         do {
-            for try await event in HermesRelayClient(configuration: config)
-                .stream(payload, sessionKey: routing.session, fast: true) {
-                switch event.type {
-                case .delta: reply += event.text ?? ""
-                case .done: if reply.isEmpty, let r = event.reply { reply = r }
-                case .error: throw HermesRelayError.server(event.message ?? "failed")
-                case .start: break
-                }
-            }
+            reply = try await HermesRelayClient(configuration: config)
+                .collect(payload, sessionKey: routing.session, fast: true)
         } catch {
             postLenaMessage("Sorry sir, I didn't catch that — tap to try again.")
             return

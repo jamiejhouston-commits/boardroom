@@ -184,25 +184,14 @@ final class MeetingHub: ObservableObject {
 
             let session = "hermes-mobile-memo-\(agent.id)"
             Task { [weak self] in
-                var collected = ""
+                let text: String
                 do {
-                    for try await event in HermesRelayClient(configuration: config).stream(payload, sessionKey: session) {
-                        switch event.type {
-                        case .start: break
-                        case .delta: collected += event.text ?? ""
-                        case .done:
-                            if collected.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
-                               let reply = event.reply { collected = reply }
-                        case .error:
-                            throw HermesRelayError.server(event.message ?? "Memo delivery failed.")
-                        }
-                    }
+                    text = try await HermesRelayClient(configuration: config)
+                        .collect(payload, sessionKey: session)
                 } catch {
-                    collected = "⚠️ \(error.localizedDescription)"
+                    text = "⚠️ \(error.localizedDescription)"
                 }
-                let text = collected.trimmingCharacters(in: .whitespacesAndNewlines)
-                self?.appendReply(memoID: memo.id, agent: agent,
-                                  text: text.isEmpty ? "(no response)" : text)
+                self?.appendReply(memoID: memo.id, agent: agent, text: text)
             }
         }
         return memo

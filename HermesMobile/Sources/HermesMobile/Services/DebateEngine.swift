@@ -128,20 +128,8 @@ final class DebateEngine: ObservableObject {
         payload += "Speak as \(agent.name) in round \(round). 2–4 sentences, natural spoken style. No markdown, no lists, no stage directions."
 
         let session = "hermes-mobile-debate-\(agent.id)"
-        var collected = ""
-        for try await event in HermesRelayClient(configuration: config).stream(payload, sessionKey: session) {
-            switch event.type {
-            case .start: break
-            case .delta: collected += event.text ?? ""
-            case .done:
-                if collected.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
-                   let reply = event.reply { collected = reply }
-            case .error:
-                throw HermesRelayError.server(event.message ?? "Debate turn failed.")
-            }
-        }
-        let text = collected.trimmingCharacters(in: .whitespacesAndNewlines)
-        return text.isEmpty ? "(no response)" : text
+        return try await HermesRelayClient(configuration: config)
+            .collect(payload, sessionKey: session)
     }
 
     // MARK: Minutes
@@ -158,26 +146,17 @@ final class DebateEngine: ObservableObject {
         }
         payload += "\nWrite the minutes: 1) one-paragraph summary, 2) decisions or points of consensus, 3) open disagreements, 4) action items with owners. Be concise and plain."
 
-        var collected = ""
+        var collected: String
         do {
-            for try await event in HermesRelayClient(configuration: config).stream(payload, sessionKey: "hermes-mobile-minutes") {
-                switch event.type {
-                case .start: break
-                case .delta: collected += event.text ?? ""
-                case .done:
-                    if collected.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
-                       let reply = event.reply { collected = reply }
-                case .error:
-                    throw HermesRelayError.server(event.message ?? "Minutes failed.")
-                }
-            }
+            collected = try await HermesRelayClient(configuration: config)
+                .collect(payload, sessionKey: "hermes-mobile-minutes")
         } catch {
             collected = "Minutes unavailable: \(error.localizedDescription)\n\nTranscript:\n"
                 + turns.map { "\($0.agentName): \($0.text)" }.joined(separator: "\n")
         }
 
         hub.fileMinutes(subject: "Minutes — \(topic)",
-                        body: collected.trimmingCharacters(in: .whitespacesAndNewlines),
+                        body: collected,
                         recipients: attendees)
     }
 

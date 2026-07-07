@@ -68,8 +68,8 @@ struct HermesRuntimeCapability: Identifiable, Hashable {
     var isAvailableOnDevice: Bool
 }
 
-struct ChatMessage: Identifiable, Hashable {
-    enum Author: Hashable {
+struct ChatMessage: Identifiable, Hashable, Codable {
+    enum Author: String, Hashable, Codable {
         case user
         case hermes
         case system
@@ -85,8 +85,8 @@ struct ChatMessage: Identifiable, Hashable {
 }
 
 /// A photo or file the user attached to a chat message.
-struct ChatAttachment: Identifiable, Hashable {
-    enum Kind: Hashable { case image, file }
+struct ChatAttachment: Identifiable, Hashable, Codable {
+    enum Kind: String, Hashable, Codable { case image, file }
 
     var id = UUID()
     var kind: Kind

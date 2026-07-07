@@ -88,8 +88,12 @@ struct HermesRelayClient {
                     for try await line in bytes.lines {
                         guard line.hasPrefix("data: ") else { continue }
                         let payload = String(line.dropFirst(6))
-                        guard let data = payload.data(using: .utf8) else { continue }
-                        let event = try JSONDecoder().decode(RelayStreamEvent.self, from: data)
+                        guard let data = payload.data(using: .utf8),
+                              // Tolerant parse: a malformed frame (split JSON,
+                              // stray keepalive payload) is skipped, not fatal
+                              // to the whole reply.
+                              let event = try? JSONDecoder().decode(RelayStreamEvent.self, from: data)
+                        else { continue }
                         continuation.yield(event)
                         if event.type == .done || event.type == .error {
                             break
@@ -102,6 +106,73 @@ struct HermesRelayClient {
                 }
             }
         }
+    }
+
+    /// Consume a chat stream to completion — THE one place stream events are
+    /// interpreted. `onDelta` receives the growing text for live rendering;
+    /// the return value is the final reply, never empty. If the stream dies
+    /// before ANY text arrived, one automatic retry runs (safe: nothing was
+    /// shown yet). A relay `.error` event surfaces as a thrown error.
+    func collect(_ message: String,
+                 sessionKey: String? = nil,
+                 fast: Bool = false,
+                 skills: [String] = [],
+                 onDelta: @escaping @MainActor (String) -> Void = { _ in }) async throws -> String {
+        do {
+            return try await collectOnce(message, sessionKey: sessionKey, fast: fast,
+                                         skills: skills, onDelta: onDelta)
+        } catch is CollectRetryable {
+            // ponytail: single retry, only on a zero-byte transport failure
+            return try await collectOnce(message, sessionKey: sessionKey, fast: fast,
+                                         skills: skills, onDelta: onDelta)
+        }
+    }
+
+    /// What `collect` returns when a turn genuinely produced no text —
+    /// callers that must NOT persist a non-answer compare against this.
+    static let noResponseFallback = "(no response — try again)"
+
+    /// Wrapped cause for "stream failed before any text" — retried once.
+    private struct CollectRetryable: Error { let cause: Error }
+
+    private func collectOnce(_ message: String,
+                             sessionKey: String?,
+                             fast: Bool,
+                             skills: [String],
+                             onDelta: @escaping @MainActor (String) -> Void) async throws -> String {
+        var accumulated = ""
+        do {
+            for try await event in stream(message, sessionKey: sessionKey, fast: fast, skills: skills) {
+                switch event.type {
+                case .start:
+                    continue
+                case .delta:
+                    if let text = event.text, !text.isEmpty {
+                        accumulated += text
+                        let snapshot = accumulated
+                        await onDelta(snapshot)
+                    }
+                case .done:
+                    let final = event.reply?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+                    let body = final.isEmpty
+                        ? accumulated.trimmingCharacters(in: .whitespacesAndNewlines)
+                        : final
+                    return body.isEmpty ? Self.noResponseFallback : body
+                case .error:
+                    throw HermesRelayError.server(event.message ?? "The relay reported an error.")
+                }
+            }
+        } catch let error as HermesRelayError {
+            throw error   // relay-reported — real, do not retry
+        } catch where accumulated.isEmpty {
+            throw CollectRetryable(cause: error)   // transport died before any text
+        } catch {
+            // Transport died mid-reply: keep what arrived, say so honestly.
+            return accumulated + "\n\n⚠︎ Connection dropped mid-reply — ask me to continue."
+        }
+        // Stream ended without a done event — return what we have, honestly.
+        let body = accumulated.trimmingCharacters(in: .whitespacesAndNewlines)
+        return body.isEmpty ? Self.noResponseFallback : body
     }
 
     // MARK: Company engine (autonomous boardroom)
@@ -175,8 +246,47 @@ struct HermesRelayClient {
     }
 
     /// The company vault as a graph (notes + wikilinks) for the knowledge-graph view.
+    /// Includes the owner's Obsidian vault when the relay has one configured.
     func companyVaultGraph() async throws -> VaultGraph {
         try await companyGET(path: "company/vault/graph")
+    }
+
+    /// One vault note's markdown body (company vault or Obsidian) — the
+    /// second brain, readable from the phone.
+    func companyVaultNote(id: String) async throws -> VaultNoteContent {
+        guard let baseURL = configuration.baseURL else {
+            throw HermesRelayError.invalidURL
+        }
+        var components = URLComponents(url: baseURL.appending(path: "company/vault/note"),
+                                       resolvingAgainstBaseURL: false)
+        components?.queryItems = [URLQueryItem(name: "id", value: id)]
+        guard let url = components?.url else { throw HermesRelayError.invalidURL }
+        var request = URLRequest(url: url)
+        request.setValue("Bearer \(configuration.token)", forHTTPHeaderField: "Authorization")
+        let (data, response) = try await session.data(for: request)
+        try validate(response: response, data: data)
+        return try Self.companyDecoder.decode(VaultNoteContent.self, from: data)
+    }
+
+    // MARK: Deliverables — read the company's real work product
+
+    /// Relative paths + sizes of everything the team built for an initiative.
+    func companyDeliverableFiles(id: String) async throws -> [DeliverableFile] {
+        struct FileManifest: Codable { var files: [DeliverableFile] }
+        let manifest: FileManifest = try await companyGET(path: "company/initiative/\(id)/files")
+        return manifest.files
+    }
+
+    /// One deliverable file's bytes (auth-guarded raw fetch, not JSON).
+    func companyDeliverableData(id: String, path: String) async throws -> Data {
+        guard let baseURL = configuration.baseURL else {
+            throw HermesRelayError.invalidURL
+        }
+        var request = URLRequest(url: baseURL.appending(path: "company/file/\(id)/\(path)"))
+        request.setValue("Bearer \(configuration.token)", forHTTPHeaderField: "Authorization")
+        let (data, response) = try await session.data(for: request)
+        try validate(response: response, data: data)
+        return data
     }
 
     // MARK: Games Studio (the first Boardroom division)
@@ -351,6 +461,33 @@ struct RelayHealth: Codable, Equatable {
     var ok: Bool
     var service: String
     var profiles: [String]
+}
+
+/// One file the team built for an initiative, as listed by the relay.
+struct DeliverableFile: Codable, Equatable, Identifiable, Hashable {
+    var path: String
+    var size: Int
+
+    var id: String { path }
+    var filename: String { (path as NSString).lastPathComponent }
+
+    var isImage: Bool {
+        ["png", "jpg", "jpeg", "gif"].contains((path as NSString).pathExtension.lowercased())
+    }
+
+    var sizeLabel: String {
+        size >= 1_048_576 ? String(format: "%.1f MB", Double(size) / 1_048_576)
+            : size >= 1024 ? "\(size / 1024) KB" : "\(size) B"
+    }
+}
+
+/// One second-brain note's body (company vault or Obsidian).
+struct VaultNoteContent: Codable, Equatable {
+    var id: String
+    var title: String
+    var content: String
+    var source: String        // "company" | "obsidian"
+    var modified: Double?
 }
 
 /// What the shipped portfolio earns, fetched by the relay from RevenueCat.

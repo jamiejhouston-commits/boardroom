@@ -71,25 +71,11 @@ final class HermesRuntimeController: ObservableObject {
                 let responseID = UUID()
                 messages.append(ChatMessage(id: responseID, author: .hermes, text: "", date: Date()))
 
-                for try await event in HermesRelayClient(configuration: relayConfiguration).stream(trimmed) {
-                    switch event.type {
-                    case .start:
-                        state = .ready
-                    case .delta:
-                        appendToMessage(id: responseID, text: event.text ?? "")
-                    case .done:
-                        if let reply = event.reply, messageText(id: responseID).isEmpty {
-                            appendToMessage(id: responseID, text: reply)
-                        }
-                        state = .ready
-                    case .error:
-                        throw HermesRelayError.server(event.message ?? "Hermes stream failed.")
+                let reply = try await HermesRelayClient(configuration: relayConfiguration)
+                    .collect(trimmed) { [weak self] text in
+                        self?.setMessage(id: responseID, text: text)
                     }
-                }
-
-                if messageText(id: responseID).isEmpty {
-                    appendToMessage(id: responseID, text: "Hermes completed without text output.")
-                }
+                setMessage(id: responseID, text: reply)
                 state = .ready
             } catch HermesRelayError.unauthorized {
                 let guidance = HermesRelayError.unauthorized.localizedDescription
@@ -103,13 +89,9 @@ final class HermesRuntimeController: ObservableObject {
         }
     }
 
-    private func appendToMessage(id: UUID, text: String) {
-        guard !text.isEmpty, let index = messages.firstIndex(where: { $0.id == id }) else { return }
-        messages[index].text += text
-    }
-
-    private func messageText(id: UUID) -> String {
-        messages.first { $0.id == id }?.text.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+    private func setMessage(id: UUID, text: String) {
+        guard let index = messages.firstIndex(where: { $0.id == id }) else { return }
+        messages[index].text = text
     }
 
     func saveRelayConfiguration(_ configuration: HermesRelayConfiguration) {

@@ -409,9 +409,20 @@ final class AgentConversation: ObservableObject {
 
     init(agent: OrgAgent) {
         self.agent = agent
-        messages = [ChatMessage(author: .system,
-                                text: "Direct line to \(agent.name).",
-                                date: Date())]
+        // Resume where the relay-side session already is — history survives
+        // closing the view, and the persona intro is only ever sent once.
+        if let saved = ChatArchive.load(key: agent.chatRouting.session) {
+            messages = saved.messages
+            introSent = saved.introSent
+        } else {
+            messages = [ChatMessage(author: .system,
+                                    text: "Direct line to \(agent.name).",
+                                    date: Date())]
+        }
+    }
+
+    private func persist() {
+        ChatArchive.save(key: agent.chatRouting.session, messages: messages, introSent: introSent)
     }
 
     func send(_ text: String, attachments: [ChatAttachment] = [], relay base: HermesRelayConfiguration, context: String = "") {
@@ -456,21 +467,13 @@ final class AgentConversation: ObservableObject {
 
         Task {
             do {
-                // fast: false — TEXT chat runs the FULL agent loop. `fast`
-                // caps the CLI at 2 turns (built for voice-call latency); any
-                // tool use then truncates the reply to EMPTY, which the app
-                // showed as "(no response)" — the "agents never reply" bug.
-                for try await event in HermesRelayClient(configuration: config).stream(payload, sessionKey: session, fast: false, skills: agent.skills) {
-                    switch event.type {
-                    case .start: break
-                    case .delta: appendTo(responseID, event.text ?? "")
-                    case .done:
-                        if let reply = event.reply, currentText(responseID).isEmpty { appendTo(responseID, reply) }
-                    case .error:
-                        throw HermesRelayError.server(event.message ?? "Hermes stream failed.")
+                // fast: false — TEXT chat runs the FULL agent loop (fast caps
+                // the CLI at 2 turns, which truncates tool-using replies).
+                let reply = try await HermesRelayClient(configuration: config)
+                    .collect(payload, sessionKey: session, fast: false, skills: agent.skills) { [weak self] text in
+                        self?.setText(responseID, text)
                     }
-                }
-                if currentText(responseID).isEmpty { appendTo(responseID, "(no response)") }
+                setText(responseID, reply)
             } catch {
                 // The placeholder bubble never received a delta — drop it so it
                 // doesn't linger forever as a dead "…". (Partial replies kept.)
@@ -481,12 +484,13 @@ final class AgentConversation: ObservableObject {
                 messages.append(ChatMessage(author: .system, text: error.localizedDescription, date: Date()))
             }
             isSending = false
+            persist()
         }
     }
 
-    private func appendTo(_ id: UUID, _ text: String) {
-        guard !text.isEmpty, let index = messages.firstIndex(where: { $0.id == id }) else { return }
-        messages[index].text += text
+    private func setText(_ id: UUID, _ text: String) {
+        guard let index = messages.firstIndex(where: { $0.id == id }) else { return }
+        messages[index].text = text
     }
 
     private func currentText(_ id: UUID) -> String {

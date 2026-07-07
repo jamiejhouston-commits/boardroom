@@ -225,19 +225,10 @@ struct OrgGenesisView: View {
         Rules: EXACTLY one "ceo" tier agent (the orchestrator, parent null). Managers' parent is the ceo's id. Subs' parent is a manager's id. Tailor names/roles to THIS business — be specific, not generic.
         """
 
-        var collected = ""
+        let collected: String
         do {
-            for try await event in HermesRelayClient(configuration: config).stream(payload, sessionKey: "hermes-mobile-genesis") {
-                switch event.type {
-                case .start: break
-                case .delta: collected += event.text ?? ""
-                case .done:
-                    if collected.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
-                       let reply = event.reply { collected = reply }
-                case .error:
-                    throw HermesRelayError.server(event.message ?? "Generation failed.")
-                }
-            }
+            collected = try await HermesRelayClient(configuration: config)
+                .collect(payload, sessionKey: "hermes-mobile-genesis")
         } catch {
             stage = .failed(error.localizedDescription)
             return

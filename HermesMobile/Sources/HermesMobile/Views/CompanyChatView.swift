@@ -7,13 +7,24 @@ final class CompanyConversation: ObservableObject {
     @Published private(set) var messages: [ChatMessage] = []
     @Published private(set) var isSending = false
     private var introSent = Set<String>()
+    private static let archiveKey = "company-chat"
 
     init() {
-        messages = [ChatMessage(
-            author: .system,
-            text: "Company chat. Address a department — \"CFO, what's our runway?\" — and that agent answers. No name, and the CEO routes it.",
-            date: Date()
-        )]
+        if let saved = ChatArchive.load(key: Self.archiveKey) {
+            messages = saved.messages
+            introSent = Set(saved.introAgents ?? [])
+        } else {
+            messages = [ChatMessage(
+                author: .system,
+                text: "Company chat. Address a department — \"CFO, what's our runway?\" — and that agent answers. No name, and the CEO routes it.",
+                date: Date()
+            )]
+        }
+    }
+
+    private func persist() {
+        ChatArchive.save(key: Self.archiveKey, messages: messages,
+                         introSent: false, introAgents: Array(introSent))
     }
 
     func send(_ text: String, attachments: [ChatAttachment] = [], relay base: HermesRelayConfiguration, org: [OrgAgent], context: String = "") {
@@ -63,21 +74,20 @@ final class CompanyConversation: ObservableObject {
             do {
                 // fast: false — text chat needs the full agent loop; the
                 // 2-turn voice cap truncated tool-using replies to empty.
-                for try await event in HermesRelayClient(configuration: config).stream(payload, sessionKey: session, fast: false) {
-                    switch event.type {
-                    case .start: break
-                    case .delta: appendTo(responseID, event.text ?? "")
-                    case .done:
-                        if let r = event.reply, currentText(responseID).isEmpty { appendTo(responseID, r) }
-                    case .error:
-                        throw HermesRelayError.server(event.message ?? "Hermes stream failed.")
+                let replyText = try await HermesRelayClient(configuration: config)
+                    .collect(payload, sessionKey: session, fast: false) { [weak self] text in
+                        self?.setText(responseID, text)
                     }
-                }
-                if currentText(responseID).isEmpty { appendTo(responseID, "(no response)") }
+                setText(responseID, replyText)
             } catch {
+                if currentText(responseID).isEmpty,
+                   let idx = messages.firstIndex(where: { $0.id == responseID }) {
+                    messages.remove(at: idx)
+                }
                 messages.append(ChatMessage(author: .system, text: error.localizedDescription, date: Date()))
             }
             isSending = false
+            persist()
         }
     }
 
@@ -149,9 +159,9 @@ final class CompanyConversation: ObservableObject {
         return Array(keys)
     }
 
-    private func appendTo(_ id: UUID, _ text: String) {
-        guard !text.isEmpty, let index = messages.firstIndex(where: { $0.id == id }) else { return }
-        messages[index].text += text
+    private func setText(_ id: UUID, _ text: String) {
+        guard let index = messages.firstIndex(where: { $0.id == id }) else { return }
+        messages[index].text = text
     }
 
     private func currentText(_ id: UUID) -> String {
