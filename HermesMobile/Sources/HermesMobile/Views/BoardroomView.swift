@@ -666,11 +666,19 @@ struct InitiativeDetailView: View {
                     }
                 }
 
-                if !detail.artifacts.isEmpty {
-                    Section("Deliverables (on your Mac)") {
-                        ForEach(detail.artifacts, id: \.self) { path in
-                            Label((path as NSString).lastPathComponent, systemImage: "doc.fill")
-                                .font(.caption)
+                Section("Deliverables") {
+                    NavigationLink {
+                        DeliverablesBrowserView(initiativeID: initiativeID,
+                                                title: detail.title)
+                    } label: {
+                        Label("Browse the team's work", systemImage: "folder.fill")
+                            .font(.subheadline.weight(.semibold))
+                    }
+                    if let repoUrl = detail.repoUrl, !repoUrl.isEmpty,
+                       let url = URL(string: repoUrl) {
+                        Link(destination: url) {
+                            Label("Open the GitHub repo", systemImage: "arrow.up.forward.square")
+                                .font(.subheadline)
                         }
                     }
                 }
