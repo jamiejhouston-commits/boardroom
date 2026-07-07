@@ -43,6 +43,9 @@ enum GraphLayout {
         let ids = orderedIDs(graph)
         guard !ids.isEmpty else { return [:] }
         if !s.threeD { return solar(graph) }
+        // O(n²) per iteration — with an Obsidian vault merged in the node
+        // count can hit several hundred, so trade layout polish for frames.
+        let iterations = ids.count > 200 ? 24 : ids.count > 120 ? 40 : iterations
 
         // Seed evenly over a sphere, then keep every node pinned to the shell.
         // This makes 3D mode read as a real knowledge ball instead of a flat web.
@@ -141,8 +144,13 @@ enum GraphLayout {
 }
 
 private struct VaultNodeDetailSheet: View {
+    @EnvironmentObject private var runtime: HermesRuntimeController
     let node: VaultNode
     let degree: Int
+
+    @State private var note: VaultNoteContent?
+    @State private var noteError: String?
+    @State private var loadingNote = false
 
     var body: some View {
         NavigationStack {
@@ -168,6 +176,25 @@ private struct VaultNodeDetailSheet: View {
                     }
                 }
 
+                // The note itself — the second brain, readable in place.
+                if node.type != "agent" {
+                    Section("Note") {
+                        if let note {
+                            Text(LocalizedStringKey(note.content))
+                                .font(.subheadline)
+                                .textSelection(.enabled)
+                        } else if loadingNote {
+                            HStack(spacing: 8) {
+                                ProgressView().controlSize(.small)
+                                Text("Opening the note…").font(.caption).foregroundStyle(.secondary)
+                            }
+                        } else {
+                            Text(noteError ?? "This note isn't readable from the relay yet.")
+                                .font(.caption).foregroundStyle(.secondary)
+                        }
+                    }
+                }
+
                 Section("Graph position") {
                     LabeledContent("Connections", value: "\(degree)")
                     LabeledContent("Node ID", value: node.id)
@@ -176,6 +203,19 @@ private struct VaultNodeDetailSheet: View {
             }
             .navigationTitle("Graph Node")
             .navigationBarTitleDisplayMode(.inline)
+            .task { await loadNote() }
+        }
+    }
+
+    private func loadNote() async {
+        guard node.type != "agent", runtime.relayConfiguration.isConfigured else { return }
+        loadingNote = true
+        defer { loadingNote = false }
+        do {
+            note = try await HermesRelayClient(configuration: runtime.relayConfiguration)
+                .companyVaultNote(id: node.id)
+        } catch {
+            noteError = error.localizedDescription
         }
     }
 
@@ -185,6 +225,7 @@ private struct VaultNodeDetailSheet: View {
         case "meeting": return "Meeting"
         case "decision": return "Decision"
         case "note": return "Note"
+        case "obsidian": return "Obsidian Note"
         default: return node.type.capitalized
         }
     }
@@ -194,6 +235,7 @@ private struct VaultNodeDetailSheet: View {
         case "agent": return "person.crop.circle.badge.checkmark"
         case "meeting": return "person.3.fill"
         case "decision": return "checkmark.seal.fill"
+        case "obsidian": return "book.closed.fill"
         default: return "doc.text.fill"
         }
     }
@@ -203,6 +245,7 @@ private struct VaultNodeDetailSheet: View {
         case "agent": return HermesTheme.gold
         case "meeting": return .cyan
         case "decision": return HermesTheme.emerald
+        case "obsidian": return Color(red: 0.62, green: 0.54, blue: 0.92)
         default: return .blue
         }
     }
@@ -417,6 +460,7 @@ struct VaultGraphSceneView: UIViewRepresentable {
         case "agent": return UIColor(red: 1.0, green: 0.82, blue: 0.40, alpha: 1)
         case "meeting": return UIColor(red: 0.32, green: 0.86, blue: 0.96, alpha: 1)
         case "decision": return UIColor(red: 0.32, green: 0.95, blue: 0.60, alpha: 1)
+        case "obsidian": return UIColor(red: 0.62, green: 0.54, blue: 0.92, alpha: 1)
         default: return UIColor(red: 0.66, green: 0.73, blue: 0.84, alpha: 1)
         }
     }
@@ -599,16 +643,43 @@ struct VaultGraphView: View {
     @State private var error: String?
     @State private var showControls = false
     @State private var selectedNode: VaultNode?
+    @State private var searchText = ""
+
+    /// Search narrows the graph to matching notes plus their direct
+    /// neighbours — the Obsidian "local graph" behaviour.
+    private var visibleGraph: VaultGraph {
+        let query = searchText.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        guard !query.isEmpty else { return graph }
+        let matched = Set(graph.nodes.filter {
+            $0.label.lowercased().contains(query) || $0.id.lowercased().contains(query)
+        }.map(\.id))
+        guard !matched.isEmpty else { return .empty }
+        var kept = matched
+        for edge in graph.edges where matched.contains(edge.source) || matched.contains(edge.target) {
+            kept.insert(edge.source)
+            kept.insert(edge.target)
+        }
+        return VaultGraph(
+            nodes: graph.nodes.filter { kept.contains($0.id) },
+            edges: graph.edges.filter { kept.contains($0.source) && kept.contains($0.target) }
+        )
+    }
 
     var body: some View {
         ZStack {
             Color(red: 0.02, green: 0.035, blue: 0.06).ignoresSafeArea()
 
-            if !graph.nodes.isEmpty {
-                VaultGraphSceneView(graph: graph, settings: settings) { node in
+            if !visibleGraph.nodes.isEmpty {
+                VaultGraphSceneView(graph: visibleGraph, settings: settings) { node in
                     selectedNode = node
                 }
                     .ignoresSafeArea()
+            } else if !graph.nodes.isEmpty {
+                VStack(spacing: 12) {
+                    Image(systemName: "magnifyingglass").font(.largeTitle).foregroundStyle(HermesTheme.emerald)
+                    Text("No notes match “\(searchText)”.")
+                        .font(.subheadline).foregroundStyle(.white.opacity(0.7))
+                }
             } else {
                 VStack(spacing: 12) {
                     if loading {
@@ -629,8 +700,11 @@ struct VaultGraphView: View {
                     legendDot("Agents", Color(red: 1.0, green: 0.82, blue: 0.40))
                     legendDot("Meetings", Color(red: 0.32, green: 0.86, blue: 0.96))
                     legendDot("Decisions", Color(red: 0.32, green: 0.95, blue: 0.60))
+                    if graph.nodes.contains(where: { $0.type == "obsidian" }) {
+                        legendDot("Obsidian", Color(red: 0.62, green: 0.54, blue: 0.92))
+                    }
                     Spacer()
-                    Text("\(graph.nodes.count) notes · \(graph.edges.count) links · drag · pinch")
+                    Text("\(visibleGraph.nodes.count) notes · \(visibleGraph.edges.count) links · drag · pinch")
                         .font(.caption2).foregroundStyle(.white.opacity(0.5))
                 }
                 .padding(10)
@@ -640,10 +714,15 @@ struct VaultGraphView: View {
         }
         .navigationTitle("Knowledge Graph")
         .navigationBarTitleDisplayMode(.inline)
+        .searchable(text: $searchText, placement: .navigationBarDrawer(displayMode: .automatic),
+                    prompt: "Search your second brain")
         .toolbar {
             ToolbarItem(placement: .topBarTrailing) {
                 Picker("", selection: $settings.threeD) { Text("3D").tag(true); Text("2D").tag(false) }
                     .pickerStyle(.segmented).frame(width: 96)
+            }
+            ToolbarItem(placement: .topBarTrailing) {
+                Button { Task { await load() } } label: { Image(systemName: "arrow.clockwise") }
             }
             ToolbarItem(placement: .topBarTrailing) {
                 Button { showControls = true } label: { Image(systemName: "slider.horizontal.3") }
