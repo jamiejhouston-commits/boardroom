@@ -7,7 +7,10 @@ struct MeetingsView: View {
     @State private var showPicker = false
     @State private var showSchedule = false
     @State private var active: [OrgAgent] = []
-    @State private var elapsed = 32 * 60 + 47
+    @State private var radioMeeting: CompanyMeeting?
+    @State private var showConvene = false
+    @State private var conveneTopic = ""
+    @State private var now = Date()
 
     private let ticker = Timer.publish(every: 1, on: .main, in: .common).autoconnect()
     private let companyTicker = Timer.publish(every: 15, on: .main, in: .common).autoconnect()
@@ -21,8 +24,13 @@ struct MeetingsView: View {
         return Array(seeded.prefix(13))
     }
 
-    private var elapsedText: String {
-        String(format: "%02d:%02d", elapsed / 60, elapsed % 60)
+    /// Real elapsed time of the LIVE meeting — from its actual start stamp.
+    /// nil when nothing is in session (the room shows honest idle state).
+    private var liveElapsedText: String? {
+        guard let live = company.liveMeeting,
+              let start = CompanyMeeting.parseStarted(live.started) else { return nil }
+        let seconds = max(0, Int(now.timeIntervalSince(start)))
+        return String(format: "%02d:%02d", seconds / 60, seconds % 60)
     }
 
     var body: some View {
@@ -30,7 +38,9 @@ struct MeetingsView: View {
             ZStack {
                 Color.black.ignoresSafeArea()
 
-                MeetingRoomSceneView(attendees: roomAttendees)
+                MeetingRoomSceneView(attendees: roomAttendees,
+                                     stats: RoomStats.from(state: company.state,
+                                                           liveTopic: company.liveMeeting?.topic))
                     .ignoresSafeArea()
 
                 LinearGradient(
@@ -78,70 +88,127 @@ struct MeetingsView: View {
                 }
             }
             .sheet(isPresented: $showSchedule) { ScheduleMeetingView() }
-            .onReceive(ticker) { _ in elapsed += 1 }
+            .sheet(item: $radioMeeting) { MeetingRadioView(meeting: $0) }
+            .onReceive(ticker) { _ in now = Date() }
             .onReceive(companyTicker) { _ in
                 Task { await company.refresh(relay: runtime.relayConfiguration) }
             }
             .task { await company.refresh(relay: runtime.relayConfiguration) }
+            .alert("Convene a meeting now", isPresented: $showConvene) {
+                TextField("Topic (e.g. This week's priorities)", text: $conveneTopic)
+                Button("Convene") { convene() }
+                Button("Cancel", role: .cancel) {}
+            } message: {
+                Text("The leadership meets on your topic immediately — the room goes live within a minute.")
+            }
         }
     }
 
-    // The org's own meetings — live now (tap to listen in) or recent.
+    private func convene() {
+        let topic = conveneTopic.trimmingCharacters(in: .whitespaces)
+        guard !topic.isEmpty, runtime.relayConfiguration.isConfigured else { return }
+        conveneTopic = ""
+        Task {
+            try? await HermesRelayClient(configuration: runtime.relayConfiguration)
+                .conveneMeeting(topic: topic)
+            await company.refresh(relay: runtime.relayConfiguration)
+        }
+    }
+
+    // The org's own meetings — live now (walk into the room) or recent.
     @ViewBuilder
     private var autonomousMeetingBanner: some View {
         if let live = company.liveMeeting {
-            NavigationLink {
-                MeetingTranscriptView(meetingID: live.id, topic: live.topic)
-            } label: {
-                HStack(spacing: 12) {
-                    Circle().fill(.green).frame(width: 9, height: 9).shadow(color: .green, radius: 6)
-                    VStack(alignment: .leading, spacing: 2) {
-                        Text("Your team is meeting now")
-                            .font(.subheadline.weight(.bold)).foregroundStyle(.white)
-                        Text(live.topic).font(.caption).foregroundStyle(.white.opacity(0.7)).lineLimit(1)
+            HStack(spacing: 12) {
+                NavigationLink {
+                    LiveMeetingRoomView(meetingID: live.id, topic: live.topic)
+                } label: {
+                    HStack(spacing: 12) {
+                        Circle().fill(HermesTheme.emerald).frame(width: 9, height: 9)
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text("Your team is meeting now")
+                                .font(.subheadline.weight(.bold)).foregroundStyle(.white)
+                            Text(live.topic).font(.caption).foregroundStyle(.white.opacity(0.7)).lineLimit(1)
+                        }
+                        Spacer(minLength: 8)
+                        Image(systemName: "chevron.right").font(.caption).foregroundStyle(.white.opacity(0.6))
                     }
-                    Spacer()
-                    Text("Listen in").font(.caption.weight(.bold)).foregroundStyle(.green)
-                    Image(systemName: "chevron.right").font(.caption).foregroundStyle(.white.opacity(0.6))
                 }
-                .padding(14)
-                .background(.black.opacity(0.55), in: RoundedRectangle(cornerRadius: 14))
-                .overlay(RoundedRectangle(cornerRadius: 14).stroke(.green.opacity(0.4), lineWidth: 1))
-            }
-            .buttonStyle(.plain)
-        } else if let recent = company.meetings.first {
-            NavigationLink {
-                MeetingTranscriptView(meetingID: recent.id, topic: recent.topic)
-            } label: {
-                HStack(spacing: 12) {
-                    Image(systemName: "person.2.wave.2.fill").foregroundStyle(.cyan)
-                    VStack(alignment: .leading, spacing: 2) {
-                        Text("Last team meeting").font(.caption).foregroundStyle(.white.opacity(0.6))
-                        Text(recent.topic).font(.subheadline.weight(.semibold)).foregroundStyle(.white).lineLimit(1)
+                .buttonStyle(.plain)
+
+                // The Meeting Radio — spoken turns, hands-free, screen-locked.
+                Button { radioMeeting = live } label: {
+                    HStack(spacing: 5) {
+                        Image(systemName: "radio.fill")
+                        Text("Listen")
                     }
-                    Spacer()
-                    Image(systemName: "chevron.right").font(.caption).foregroundStyle(.white.opacity(0.6))
+                    .font(.caption.weight(.bold))
+                    .foregroundStyle(HermesTheme.emerald)
+                    .padding(.horizontal, 12).padding(.vertical, 7)
+                    .background(HermesTheme.emerald.opacity(0.16), in: Capsule())
+                    .overlay(Capsule().stroke(HermesTheme.emerald.opacity(0.4), lineWidth: 1))
                 }
-                .padding(14)
-                .background(.black.opacity(0.5), in: RoundedRectangle(cornerRadius: 14))
-                .overlay(RoundedRectangle(cornerRadius: 14).stroke(.white.opacity(0.1), lineWidth: 1))
+                .buttonStyle(.plain)
             }
-            .buttonStyle(.plain)
+            .padding(14)
+            .background(.black.opacity(0.55), in: RoundedRectangle(cornerRadius: 14))
+            .overlay(RoundedRectangle(cornerRadius: 14).stroke(HermesTheme.emerald.opacity(0.4), lineWidth: 1))
+        } else {
+            HStack(spacing: 12) {
+                if let recent = company.meetings.first {
+                    NavigationLink {
+                        MeetingTranscriptView(meetingID: recent.id, topic: recent.topic)
+                    } label: {
+                        HStack(spacing: 12) {
+                            Image(systemName: "person.2.wave.2.fill").foregroundStyle(HermesTheme.emerald)
+                            VStack(alignment: .leading, spacing: 2) {
+                                Text("Last team meeting").font(.caption).foregroundStyle(.white.opacity(0.6))
+                                Text(recent.topic).font(.subheadline.weight(.semibold)).foregroundStyle(.white).lineLimit(1)
+                            }
+                            Spacer(minLength: 8)
+                            Image(systemName: "chevron.right").font(.caption).foregroundStyle(.white.opacity(0.6))
+                        }
+                    }
+                    .buttonStyle(.plain)
+                } else {
+                    Text("No meetings yet — your team convenes on its own once the company is on.")
+                        .font(.caption).foregroundStyle(.white.opacity(0.6))
+                    Spacer(minLength: 8)
+                }
+
+                // Convene now — the org meets on YOUR topic immediately.
+                Button { showConvene = true } label: {
+                    HStack(spacing: 5) {
+                        Image(systemName: "person.3.fill")
+                        Text("Convene")
+                    }
+                    .font(.caption.weight(.bold))
+                    .foregroundStyle(HermesTheme.emerald)
+                    .padding(.horizontal, 12).padding(.vertical, 7)
+                    .background(HermesTheme.emerald.opacity(0.16), in: Capsule())
+                    .overlay(Capsule().stroke(HermesTheme.emerald.opacity(0.4), lineWidth: 1))
+                }
+                .buttonStyle(.plain)
+            }
+            .padding(14)
+            .background(.black.opacity(0.5), in: RoundedRectangle(cornerRadius: 14))
+            .overlay(RoundedRectangle(cornerRadius: 14).stroke(.white.opacity(0.1), lineWidth: 1))
         }
     }
 
     private var topChrome: some View {
         HStack {
+            // Attendee picker — a people icon, not a back chevron (that read
+            // as "go back" and surprised everyone who tapped it).
             Button {
                 showPicker = true
             } label: {
-                Image(systemName: "chevron.left")
-                    .font(.title2.weight(.semibold))
+                Image(systemName: "person.3.fill")
+                    .font(.body.weight(.semibold))
                     .foregroundStyle(.white)
-                    .frame(width: 64, height: 64)
+                    .frame(width: 44, height: 44)
                     .background(.black.opacity(0.44), in: Circle())
                     .overlay(Circle().stroke(.white.opacity(0.08), lineWidth: 1))
-                    .shadow(color: .black.opacity(0.45), radius: 18, y: 10)
             }
             .accessibilityLabel("Change attendees")
 
@@ -155,6 +222,19 @@ struct MeetingsView: View {
             Spacer()
 
             HStack(spacing: 10) {
+                // All meetings — live, scheduled, and history with minutes.
+                NavigationLink {
+                    MeetingsListView()
+                } label: {
+                    Image(systemName: "list.bullet.rectangle")
+                        .font(.body.weight(.semibold))
+                        .foregroundStyle(.white)
+                        .frame(width: 44, height: 44)
+                        .background(.black.opacity(0.44), in: Circle())
+                        .overlay(Circle().stroke(.white.opacity(0.08), lineWidth: 1))
+                }
+                .accessibilityLabel("All meetings")
+
                 // Schedule a meeting → Apple Calendar + 15-min alert + prep memo.
                 Button { showSchedule = true } label: {
                     Image(systemName: "calendar.badge.plus")
@@ -182,14 +262,15 @@ struct MeetingsView: View {
         }
     }
 
+    // HONEST status: green + "Meeting in progress" ONLY while the org is
+    // actually in session; otherwise the room says it's idle.
     private var statusStrip: some View {
         HStack(spacing: 14) {
             HStack(spacing: 9) {
                 Circle()
-                    .fill(Color(red: 0.0, green: 0.92, blue: 0.68))
+                    .fill(company.liveMeeting != nil ? HermesTheme.emerald : Color.white.opacity(0.3))
                     .frame(width: 8, height: 8)
-                    .shadow(color: .mint, radius: 8)
-                Text("Meeting in Progress")
+                Text(company.liveMeeting != nil ? "Meeting in progress" : "Room idle")
                     .lineLimit(1)
                     .minimumScaleFactor(0.75)
             }
@@ -213,33 +294,24 @@ struct MeetingsView: View {
         .padding(.horizontal, 17)
         .frame(height: 42)
         .background(.black.opacity(0.42), in: Capsule())
-        .overlay(
-            Capsule()
-                .stroke(
-                    LinearGradient(
-                        colors: [.cyan.opacity(0.45), .white.opacity(0.10), .cyan.opacity(0.22)],
-                        startPoint: .leading,
-                        endPoint: .trailing
-                    ),
-                    lineWidth: 1
-                )
-        )
-        .shadow(color: .cyan.opacity(0.14), radius: 14)
+        .overlay(Capsule().stroke(.white.opacity(0.12), lineWidth: 1))
     }
 
+    // HONEST panel: the live topic + real elapsed time, or the truth that
+    // nothing is in session (the fake "Q2 Strategy Review" at 32:47 is gone).
     private var meetingStatsPanel: some View {
         HStack(spacing: 18) {
             HStack(spacing: 14) {
                 Image(systemName: "chart.bar.fill")
                     .font(.title2.weight(.bold))
-                    .foregroundStyle(.cyan)
+                    .foregroundStyle(HermesTheme.emerald)
                     .frame(width: 32)
 
                 VStack(alignment: .leading, spacing: 3) {
-                    Text("Current Topic")
+                    Text(company.liveMeeting != nil ? "Current Topic" : "Walk-in Room")
                         .font(.caption)
                         .foregroundStyle(.white.opacity(0.64))
-                    Text("Q2 Strategy Review")
+                    Text(company.liveMeeting?.topic ?? "No meeting right now")
                         .font(.subheadline.weight(.semibold))
                         .foregroundStyle(.white)
                         .lineLimit(1)
@@ -254,14 +326,14 @@ struct MeetingsView: View {
             HStack(spacing: 12) {
                 Image(systemName: "clock")
                     .font(.title2.weight(.semibold))
-                    .foregroundStyle(.cyan)
+                    .foregroundStyle(HermesTheme.emerald)
                     .frame(width: 30)
 
                 VStack(alignment: .leading, spacing: 3) {
                     Text("Time Elapsed")
                         .font(.caption)
                         .foregroundStyle(.white.opacity(0.64))
-                    Text(elapsedText)
+                    Text(liveElapsedText ?? "—")
                         .font(.subheadline.weight(.semibold))
                         .foregroundStyle(.white)
                         .monospacedDigit()
@@ -271,19 +343,8 @@ struct MeetingsView: View {
         .padding(.horizontal, 18)
         .frame(height: 72)
         .background(.black.opacity(0.58), in: RoundedRectangle(cornerRadius: 18))
-        .overlay(
-            RoundedRectangle(cornerRadius: 18)
-                .stroke(
-                    LinearGradient(
-                        colors: [.cyan.opacity(0.52), .white.opacity(0.10), .cyan.opacity(0.25)],
-                        startPoint: .leading,
-                        endPoint: .trailing
-                    ),
-                    lineWidth: 1
-                )
-        )
+        .overlay(RoundedRectangle(cornerRadius: 18).stroke(.white.opacity(0.14), lineWidth: 1))
         .shadow(color: .black.opacity(0.45), radius: 18, y: 10)
-        .shadow(color: .cyan.opacity(0.12), radius: 10)
     }
 }
 
@@ -300,6 +361,7 @@ struct MeetingTranscriptView: View {
     @State private var speaking = false
     @State private var draft = ""
     @State private var sending = false
+    @State private var actionsRequested = false
     @FocusState private var focused: Bool
     private let voice = AgentVoice()
     private let refresh = Timer.publish(every: 6, on: .main, in: .common).autoconnect()
@@ -342,6 +404,25 @@ struct MeetingTranscriptView: View {
         .navigationTitle(topic)
         .navigationBarTitleDisplayMode(.inline)
         .keepScreenAwake()
+        .toolbar {
+            // Talk becomes tracked work: the CEO distills a finished meeting
+            // into Kanban action items.
+            if meeting?.isLive == false, !(meeting?.turns ?? []).isEmpty {
+                ToolbarItem(placement: .primaryAction) {
+                    Button {
+                        actionsRequested = true
+                        Task {
+                            try? await HermesRelayClient(configuration: runtime.relayConfiguration)
+                                .meetingActions(id: meetingID)
+                        }
+                    } label: {
+                        Label("Turn into tasks", systemImage: "checklist")
+                    }
+                    .disabled(actionsRequested)
+                    .accessibilityLabel("Turn this meeting into action items")
+                }
+            }
+        }
         // Speak into the meeting — the team responds to your steer.
         .safeAreaInset(edge: .bottom) {
             HStack(spacing: 8) {

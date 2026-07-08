@@ -16,6 +16,8 @@ struct CommandCenterView: View {
     @State private var showSettings = false
     @State private var showGateway = false
     @State private var showBriefing = false
+    @State private var showBrainDump = false
+    @State private var divisions: [DivisionInfo] = []
 
     var body: some View {
         NavigationStack {
@@ -37,6 +39,7 @@ struct CommandCenterView: View {
                         liveFeed
                         upcoming
                         departmentStatus
+                        divisionsStrip
                         signals
                         footer
                     }
@@ -49,6 +52,7 @@ struct CommandCenterView: View {
             .sheet(isPresented: $showSettings) { SettingsView() }
             .sheet(isPresented: $showGateway) { GatewayView() }
             .sheet(isPresented: $showBriefing) { BriefingView() }
+            .sheet(isPresented: $showBrainDump) { BrainDumpView() }
             .onAppear {
                 withAnimation(.easeOut(duration: 1.1)) { ringProgress = 0.992 }
             }
@@ -321,6 +325,7 @@ struct CommandCenterView: View {
             }
             .buttonStyle(.plain)
             actionButton("War Room", "rectangle.3.group.fill") { router.go(.warRoom) }
+            actionButton("Brain Dump", "brain.head.profile") { showBrainDump = true }
             NavigationLink {
                 LabsView()
             } label: {
@@ -575,6 +580,74 @@ struct CommandCenterView: View {
                 }
                 .padding(.horizontal, 2)
             }
+        }
+    }
+
+    // MARK: Divisions — the holding company's bays
+
+    /// Compact strip of division rollups; taps open the holding dashboard.
+    /// Empty until the relay's `/company/divisions` upgrade lands — then it
+    /// fills on its own.
+    private var divisionsStrip: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            sectionHeader("DIVISIONS", actionTitle: nil, action: nil)
+            if divisions.isEmpty {
+                NavigationLink {
+                    HoldingDashboardView()
+                } label: {
+                    Text("Divisions report in once the relay upgrade lands.")
+                        .font(.caption)
+                        .foregroundStyle(HermesTheme.textSecondary)
+                        .hermesCard()
+                }
+                .buttonStyle(.plain)
+            } else {
+                ScrollView(.horizontal, showsIndicators: false) {
+                    HStack(spacing: 10) {
+                        ForEach(divisions) { division in
+                            NavigationLink {
+                                HoldingDashboardView()
+                            } label: {
+                                divisionChip(division)
+                            }
+                            .buttonStyle(.plain)
+                        }
+                    }
+                    .padding(.horizontal, 2)
+                }
+            }
+        }
+        .task { await loadDivisions() }
+    }
+
+    private func divisionChip(_ division: DivisionInfo) -> some View {
+        VStack(alignment: .leading, spacing: 4) {
+            HStack(spacing: 5) {
+                Text(division.name)
+                    .font(.caption.weight(.bold))
+                    .foregroundStyle(HermesTheme.textPrimary)
+                    .lineLimit(1)
+                if !division.liveUrls.isEmpty {
+                    Circle().fill(HermesTheme.emerald).frame(width: 6, height: 6)
+                }
+            }
+            Text("\(division.active) active · \(division.shipped) shipped")
+                .font(.system(size: 9, weight: .semibold))
+                .foregroundStyle(HermesTheme.textSecondary)
+        }
+        .padding(.horizontal, 12)
+        .padding(.vertical, 10)
+        .background(HermesTheme.surface, in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+        .overlay(RoundedRectangle(cornerRadius: 12, style: .continuous).strokeBorder(HermesTheme.hairline, lineWidth: 1))
+    }
+
+    /// A relay without the endpoint yet just leaves the strip in its honest
+    /// empty state — no error banner for a planned upgrade.
+    private func loadDivisions() async {
+        guard runtime.relayConfiguration.isConfigured else { return }
+        if let fresh = try? await HermesRelayClient(configuration: runtime.relayConfiguration)
+            .companyDivisions() {
+            divisions = fresh
         }
     }
 

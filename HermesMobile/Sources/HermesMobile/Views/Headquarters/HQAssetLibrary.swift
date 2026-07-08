@@ -170,19 +170,28 @@ enum HQAssetLibrary {
 
     /// The character USDZs carry all their skeletal clips and SceneKit plays
     /// every one at once on load. Keep only the clip whose key contains
-    /// `match` (e.g. "Idle", "Walking"); stop the rest. Safe no-op when the
-    /// asset carries no animations.
+    /// `match` (e.g. "Idle", "Walking"); stop the rest.
+    ///
+    /// If NO clip matches, fall back to Idle: the bundled Robot rig ships
+    /// only an Idle clip today, and its rest pose is the exporter's exploded
+    /// part layout — stopping every player mid-walk collapsed agents into
+    /// that mess (the "walking backwards" report). Idle must never stop.
     static func playAnimation(matching match: String, under node: SCNNode) {
+        var matched = false
         node.enumerateHierarchy { n, _ in
             for key in n.animationKeys {
                 guard let player = n.animationPlayer(forKey: key) else { continue }
                 if key.localizedCaseInsensitiveContains(match) {
                     player.animation.usesSceneTimeBase = false
                     player.play()
+                    matched = true
                 } else {
                     player.stop()
                 }
             }
+        }
+        if !matched, match.caseInsensitiveCompare("Idle") != .orderedSame {
+            playAnimation(matching: "Idle", under: node)
         }
     }
 }

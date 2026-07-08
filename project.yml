@@ -51,7 +51,8 @@ targets:
             CFBundleURLSchemes: [boardroom]
         NSSupportsLiveActivities: true
         NSBonjourServices: [_hermes-relay._tcp]
-        UIBackgroundModes: [fetch]
+        # voip = PushKit incoming calls; audio = keep a call alive backgrounded.
+        UIBackgroundModes: [fetch, voip, audio]
         BGTaskSchedulerPermittedIdentifiers: [com.jamiehouston.boardroom.companyRefresh]
         NSLocalNetworkUsageDescription: Connect to the Hermes Mobile relay running on your Mac.
         NSCameraUsageDescription: Scan relay pairing codes and place your Hermes headquarters in augmented reality.

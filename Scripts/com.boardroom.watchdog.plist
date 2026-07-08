@@ -1,0 +1,38 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- Boardroom relay watchdog — LaunchAgent template.
+     __HOME__ is a placeholder so this file carries no personal path.
+     Install (fills in your home dir, then loads it):
+
+        sed "s|__HOME__|$HOME|g" Scripts/com.boardroom.watchdog.plist \
+          > ~/Library/LaunchAgents/com.boardroom.watchdog.plist
+        launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.boardroom.watchdog.plist
+
+     Adjust the python path on line below if your Hermes venv lives elsewhere. -->
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.boardroom.watchdog</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>__HOME__/.hermes/hermes-agent/venv/bin/python</string>
+        <string>-u</string>
+        <string>__HOME__/Documents/hermes ios/Scripts/hermes_watchdog.py</string>
+    </array>
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>PATH</key>
+        <string>/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+        <key>HOME</key>
+        <string>__HOME__</string>
+    </dict>
+    <key>StartInterval</key>
+    <integer>300</integer>
+    <key>RunAtLoad</key>
+    <true/>
+    <key>StandardOutPath</key>
+    <string>__HOME__/Library/Logs/boardroom-watchdog.log</string>
+    <key>StandardErrorPath</key>
+    <string>__HOME__/Library/Logs/boardroom-watchdog.log</string>
+</dict>
+</plist>

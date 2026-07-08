@@ -4,6 +4,8 @@ struct RootView: View {
     @EnvironmentObject private var store: AgentProfileStore
     @EnvironmentObject private var runtime: HermesRuntimeController
     @EnvironmentObject private var router: AppRouter
+    @EnvironmentObject private var org: OrgStore
+    @EnvironmentObject private var callCoordinator: CallCoordinator
     @AppStorage("appearanceMode") private var appearanceRaw = AppearanceMode.system.rawValue
 
     @State private var showLena = false
@@ -43,9 +45,23 @@ struct RootView: View {
         .sheet(isPresented: $showLena) {
             NavigationStack { AgentChatView(agent: .lena) }
         }
+        // An answered CallKit ring drops you straight into the voice call.
+        // Dismissing the call (hang up / swipe) ends the CallKit call too.
+        .fullScreenCover(item: $callCoordinator.activeCall,
+                         onDismiss: { callCoordinator.endActiveCall() }) { call in
+            AgentCallView(agent: agent(calling: call.caller))
+        }
         .onOpenURL { url in
             if url.host == "lena" || url.absoluteString.contains("lena") { showLena = true }
         }
+    }
+
+    /// Resolve who's calling to a real agent: Lena, then an org-chart name
+    /// match, then the CEO (someone always picks up the line).
+    private func agent(calling caller: String) -> OrgAgent {
+        if OrgAgent.lena.name.caseInsensitiveCompare(caller) == .orderedSame { return .lena }
+        return org.agents.first { $0.name.localizedCaseInsensitiveContains(caller) }
+            ?? org.ceo ?? .lena
     }
 
     /// Lena, your assistant — always one tap away, on every tab.

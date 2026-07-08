@@ -29,6 +29,8 @@ struct HermesMobileApp: App {
     @StateObject private var company = CompanyStore()
     @StateObject private var packingStore = TravelPackingStore()
     @StateObject private var archive = ArchiveStore()
+    // Rings the phone with the native incoming-call UI when the company calls.
+    @StateObject private var callCoordinator = CallCoordinator()
 
     var body: some Scene {
         WindowGroup {
@@ -42,10 +44,13 @@ struct HermesMobileApp: App {
                 .environmentObject(company)
                 .environmentObject(packingStore)
                 .environmentObject(archive)
+                .environmentObject(callCoordinator)
                 .task {
                     store.load()
                     runtime.boot()
                     PushRegistrar.registerForPush()
+                    callCoordinator.registerForVoIPPush()
+                    callCoordinator.startPolling()   // no-ops until the relay is configured
                 }
         }
         .onChange(of: scenePhase) { _, phase in

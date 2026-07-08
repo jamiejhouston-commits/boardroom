@@ -2,63 +2,72 @@ import SceneKit
 import SwiftUI
 import UIKit
 
-// MARK: - The six divisions
+// MARK: - The seven divisions
 
 /// The client-services divisions housed on the Divisions Floor (floor 2).
 /// Each owns a production bay upstairs; tapping a bay's board opens the
 /// division sheet — mission, honest status, and a commission field that
 /// routes through the same directive flow the Boardroom uses.
+/// Raw values match the relay's `division` tags on initiatives.
 enum HQDivision: String, CaseIterable, Identifiable {
-    case webapps, saas, ecommerce, workflow, consulting, accounting
+    case webapps, saas, ecommerce, automations, consulting, accounting, legal, growth
 
     var id: String { rawValue }
 
     var name: String {
         switch self {
-        case .webapps:    "Webapps"
-        case .saas:       "SaaS"
-        case .ecommerce:  "E-Commerce"
-        case .workflow:   "Workflow Automations"
-        case .consulting: "Business Consulting"
-        case .accounting: "Accounting"
+        case .webapps:     "Webapps"
+        case .saas:        "SaaS"
+        case .ecommerce:   "E-Commerce"
+        case .automations: "Workflow Automations"
+        case .consulting:  "Business Consulting"
+        case .accounting:  "Accounting"
+        case .legal:       "Legal"
+        case .growth:      "Growth"
         }
     }
 
     /// One-line mission shown at the top of the bay sheet.
     var mission: String {
         switch self {
-        case .webapps:    "Ship polished web apps clients can put in front of customers on day one."
-        case .saas:       "Build subscription products that earn recurring revenue while we sleep."
-        case .ecommerce:  "Stand up storefronts that turn browsers into buyers."
-        case .workflow:   "Automate the repetitive work out of a client's week."
-        case .consulting: "Turn a founder's fog into a plan with numbers attached."
-        case .accounting: "Keep the books clean, the taxes filed, and the cash visible."
+        case .webapps:     "Ship polished web apps clients can put in front of customers on day one."
+        case .saas:        "Build subscription products that earn recurring revenue while we sleep."
+        case .ecommerce:   "Stand up storefronts that turn browsers into buyers."
+        case .automations: "Automate the repetitive work out of a client's week."
+        case .consulting:  "Turn a founder's fog into a plan with numbers attached."
+        case .accounting:  "Keep the books clean, the taxes filed, and the cash visible."
+        case .legal:       "Write the privacy policies, terms, and compliance docs our own products ship with."
+        case .growth:      "Build the launch kits that sell what we ship — copy, landing pages, post drafts you approve."
         }
     }
 
     /// Glyph plate beside the bay sign (same treatment as the 🎮 downstairs).
     var glyph: String {
         switch self {
-        case .webapps:    "🌐"
-        case .saas:       "☁️"
-        case .ecommerce:  "🛒"
-        case .workflow:   "⚙️"
-        case .consulting: "📈"
-        case .accounting: "🧾"
+        case .webapps:     "🌐"
+        case .saas:        "☁️"
+        case .ecommerce:   "🛒"
+        case .automations: "⚙️"
+        case .consulting:  "📈"
+        case .accounting:  "🧾"
+        case .legal:       "⚖️"
+        case .growth:      "📣"
         }
     }
 
     /// Lowercased fragments that count an initiative as this division's work.
     /// ponytail: substring match on title+pitch — the honest, cheap heuristic;
-    /// upgrade to relay-side tagging if divisions ever need real ownership.
+    /// only claims LEGACY initiatives the relay never tagged (see `owns`).
     var keywords: [String] {
         switch self {
-        case .webapps:    ["webapp", "web app", "website", "web site", "web-app"]
-        case .saas:       ["saas", "subscription"]
-        case .ecommerce:  ["e-commerce", "ecommerce", "storefront", "online store", "shopify", "online shop"]
-        case .workflow:   ["workflow", "automation", "automate"]
-        case .consulting: ["consulting", "consultan", "advisory"]
-        case .accounting: ["accounting", "bookkeep", "ledger", "payroll"]
+        case .webapps:     ["webapp", "web app", "website", "web site", "web-app"]
+        case .saas:        ["saas", "subscription"]
+        case .ecommerce:   ["e-commerce", "ecommerce", "storefront", "online store", "shopify", "online shop"]
+        case .automations: ["workflow", "automation", "automate"]
+        case .consulting:  ["consulting", "consultan", "advisory"]
+        case .accounting:  ["accounting", "bookkeep", "ledger", "payroll"]
+        case .legal:       ["legal", "privacy", "terms", "policy", "compliance", "license"]
+        case .growth:      ["launch kit", "marketing", "app store copy", "landing page", "aso"]
         }
     }
 
@@ -66,6 +75,15 @@ enum HQDivision: String, CaseIterable, Identifiable {
     func matches(_ initiative: CompanyInitiative) -> Bool {
         let haystack = (initiative.title + " " + initiative.pitch).lowercased()
         return keywords.contains { haystack.contains($0) }
+    }
+
+    /// Real ownership: the relay's `division` tag wins; the keyword heuristic
+    /// is the fallback only for legacy initiatives that were never tagged.
+    func owns(_ initiative: CompanyInitiative) -> Bool {
+        if let tagged = initiative.division, !tagged.isEmpty {
+            return tagged == rawValue
+        }
+        return matches(initiative)
     }
 
     // MARK: Tap routing
@@ -112,18 +130,20 @@ enum HQDivisionsFloor {
         addElevator(to: storey, name: elevatorDownName, label: "LOBBY ↓",
                     at: SCNVector3(down.x, 0, down.z))
 
-        // Six bays: three against each long wall, fronts (local +Z, like the
-        // Production Bay's) turned toward the center aisle.
-        let north: [HQDivision] = [.webapps, .saas, .ecommerce]
-        let south: [HQDivision] = [.workflow, .consulting, .accounting]
-        let accents: [UIColor] = [HQSceneBuilder.emerald, HQSceneBuilder.steel, HQSceneBuilder.emerald]
+        // Eight bays: four against the north wall, four against the south,
+        // fronts (local +Z, like the Production Bay's) turned toward the
+        // center aisle. Accents alternate emerald/steel down each wall.
+        let north: [HQDivision] = [.webapps, .saas, .ecommerce, .automations]
+        let south: [HQDivision] = [.consulting, .accounting, .legal, .growth]
         for (i, division) in north.enumerated() {
-            addBay(division, at: Float(i - 1) * 10.4, z: -10.55, yaw: 0,
-                   accent: accents[i], to: storey)
+            addBay(division, at: (Float(i) - 1.5) * 8.0, z: -10.55, yaw: 0,
+                   accent: i.isMultiple(of: 2) ? HQSceneBuilder.emerald : HQSceneBuilder.steel,
+                   to: storey)
         }
         for (i, division) in south.enumerated() {
-            addBay(division, at: Float(i - 1) * 10.4, z: 10.55, yaw: .pi,
-                   accent: accents[i], to: storey)
+            addBay(division, at: (Float(i) - 1.5) * 8.0, z: 10.55, yaw: .pi,
+                   accent: i.isMultiple(of: 2) ? HQSceneBuilder.emerald : HQSceneBuilder.steel,
+                   to: storey)
         }
     }
 
@@ -442,7 +462,7 @@ enum HQDivisionsFloor {
                 crate.eulerAngles.y = Float(i) * 0.5
                 bay.addChildNode(crate)
             }
-        case .workflow:
+        case .automations:
             // A slowly turning cog ring — the line, always in motion.
             let cog = SCNTorus(ringRadius: 0.5, pipeRadius: 0.09)
             let cm = SCNMaterial()
@@ -462,6 +482,42 @@ enum HQDivisionsFloor {
         case .accounting:
             HQSceneBuilder.placeAsset("BookcaseBooks", height: 2.0, accent: nil,
                                       at: (2.7, 0.6), in: bay)
+        case .legal:
+            // A courthouse column with a square capital — muted stone, no glow.
+            let stone = UIColor(red: 0.42, green: 0.44, blue: 0.48, alpha: 1)
+            let column = SCNCylinder(radius: 0.22, height: 1.6)
+            let cm = SCNMaterial()
+            cm.lightingModel = .physicallyBased
+            cm.diffuse.contents = stone
+            cm.metalness.contents = 0.1
+            cm.roughness.contents = 0.55
+            column.materials = [cm]
+            let columnNode = SCNNode(geometry: column)
+            columnNode.position = SCNVector3(2.4, 0.8, 1.2)
+            bay.addChildNode(columnNode)
+            let cap = HQSceneBuilder.fallbackBox(w: 0.62, h: 0.14, l: 0.62, color: stone)
+            cap.position = SCNVector3(2.4, 1.6, 1.2)
+            bay.addChildNode(cap)
+        case .growth:
+            // A megaphone read as pure geometry: a tilted cone on a stand —
+            // muted brass, no glow (palette rule).
+            let brass = UIColor(red: 0.45, green: 0.38, blue: 0.24, alpha: 1)
+            let horn = SCNCone(topRadius: 0.3, bottomRadius: 0.06, height: 0.7)
+            let hm = SCNMaterial()
+            hm.lightingModel = .physicallyBased
+            hm.diffuse.contents = brass
+            hm.metalness.contents = 0.55
+            hm.roughness.contents = 0.4
+            horn.materials = [hm]
+            let hornNode = SCNNode(geometry: horn)
+            hornNode.position = SCNVector3(2.4, 1.15, 1.2)
+            hornNode.eulerAngles.z = -.pi / 3
+            bay.addChildNode(hornNode)
+            let stand = HQSceneBuilder.fallbackBox(
+                w: 0.5, h: 0.8, l: 0.5,
+                color: UIColor(red: 0.09, green: 0.10, blue: 0.13, alpha: 1))
+            stand.position = SCNVector3(2.4, 0.4, 1.2)
+            bay.addChildNode(stand)
         }
     }
 }
@@ -482,7 +538,7 @@ struct HQDivisionSheet: View {
     @State private var sending = false
 
     private var matching: [CompanyInitiative] {
-        company.state.initiatives.filter(division.matches)
+        company.state.initiatives.filter(division.owns)
     }
 
     var body: some View {
@@ -497,7 +553,7 @@ struct HQDivisionSheet: View {
                     Text("No work commissioned yet")
                         .foregroundStyle(.secondary)
                 } else {
-                    Text("\(matching.count) initiative\(matching.count == 1 ? "" : "s") mention this division")
+                    Text("\(matching.count) initiative\(matching.count == 1 ? "" : "s") in this division")
                         .font(.caption)
                         .foregroundStyle(.secondary)
                     ForEach(matching) { initiative in
@@ -508,6 +564,22 @@ struct HQDivisionSheet: View {
                                 .font(.caption)
                                 .foregroundStyle(initiative.isAwaitingDecision
                                                  ? HermesTheme.gold : .secondary)
+                            if let live = initiative.liveUrl, !live.isEmpty,
+                               let url = URL(string: live) {
+                                Link(destination: url) {
+                                    HStack(spacing: 5) {
+                                        Circle().fill(HermesTheme.emerald)
+                                            .frame(width: 6, height: 6)
+                                        Text("LIVE")
+                                            .font(.caption2.weight(.bold))
+                                        Text(live)
+                                            .font(.caption2)
+                                            .lineLimit(1)
+                                            .truncationMode(.middle)
+                                    }
+                                    .foregroundStyle(HermesTheme.emerald)
+                                }
+                            }
                         }
                         .padding(.vertical, 2)
                     }

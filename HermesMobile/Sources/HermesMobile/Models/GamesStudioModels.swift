@@ -97,6 +97,7 @@ struct StudioGame: Codable, Equatable, Identifiable {
         case "fun_gate":     0.78
         case "distribution": 0.9
         case "shipped":      1.0
+        case "paused":       0.5   // out of budget, waiting on the owner
         default:             0.0   // shelved
         }
     }
@@ -111,6 +112,7 @@ struct StudioGame: Codable, Equatable, Identifiable {
         case "distribution": isAssetPack ? "Listing for Sale" : "Distributing"
         case "shipped":      isAssetPack ? "On Sale" : "Shipped"
         case "shelved":      "Shelved"
+        case "paused":       "Paused — needs you"
         default:             stage
         }
     }

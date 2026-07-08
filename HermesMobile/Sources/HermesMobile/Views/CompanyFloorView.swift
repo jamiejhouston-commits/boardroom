@@ -191,9 +191,11 @@ private enum RoomDioramaBuilder {
         let an = SCNNode(); an.light = ambient
         scene.rootNode.addChildNode(an)
 
+        // 600/300 (was 820/420): the old sum clipped every light surface —
+        // including the white robot, which vanished against the washed walls.
         let key = SCNLight()
         key.type = .omni
-        key.intensity = 820
+        key.intensity = 600
         // The CEO's office is lit warm; everyone else neutral.
         key.color = role == .executive
             ? UIColor(red: 1.0, green: 0.92, blue: 0.78, alpha: 1)
@@ -204,7 +206,7 @@ private enum RoomDioramaBuilder {
 
         let fill = SCNLight()
         fill.type = .omni
-        fill.intensity = 420
+        fill.intensity = 300
         fill.color = UIColor(white: 0.85, alpha: 1)
         let fn = SCNNode(); fn.light = fill
         fn.position = SCNVector3(-1.5, 1.6, 1.0)
@@ -391,9 +393,10 @@ private enum RoomDioramaBuilder {
         }
         station.addChildNode(chair)
 
-        // Robot seated: lowered onto the seat, legs tucked behind the desk.
+        // Robot at the desk. 0.62, not 0.5: the rigged character is slimmer
+        // than the old chunky primitive — at 0.5 it hid behind the furniture.
         let robot = AgentRobot.node(for: agent, color: accent)
-        robot.scale = SCNVector3(0.5, 0.5, 0.5)
+        robot.scale = SCNVector3(0.62, 0.62, 0.62)
         robot.position = SCNVector3(0, 0.14, -0.28)
         station.addChildNode(robot)
 

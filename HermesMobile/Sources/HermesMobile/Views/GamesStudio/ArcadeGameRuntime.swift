@@ -8,10 +8,15 @@ import WebKit
 /// This is the payoff of the whole room: walk to the cabinet, tap PLAY, and the
 /// real game the studio shipped runs full-screen inside an arcade bezel.
 
+/// Where the cabinet loads a game from: the app bundle (flagship) or the
+/// Mac relay (agent-built games served from `/games/artifact/<id>/`).
+enum ArcadeGameSource: Equatable {
+    case bundled(file: String)
+    case relay(url: URL, token: String)
+}
+
 struct ArcadeGameWebView: UIViewRepresentable {
-    /// Bundled HTML filename, e.g. "SkylineStack.html". Loaded from the
-    /// GamesStudio resources folder (falls back to a flat bundle lookup).
-    let runtimeFile: String
+    let source: ArcadeGameSource
     /// Called on the main actor whenever the game reports a run: (event, score, best).
     var onScore: (String, Int, Int) -> Void
 
@@ -34,10 +39,19 @@ struct ArcadeGameWebView: UIViewRepresentable {
         if #available(iOS 16.4, *) { web.isInspectable = true }
         #endif
 
-        if let url = Self.runtimeURL(runtimeFile) {
-            web.loadFileURL(url, allowingReadAccessTo: url.deletingLastPathComponent())
-        } else {
-            web.loadHTMLString(Self.missingRuntimeHTML, baseURL: nil)
+        switch source {
+        case .bundled(let file):
+            if let url = Self.runtimeURL(file) {
+                web.loadFileURL(url, allowingReadAccessTo: url.deletingLastPathComponent())
+            } else {
+                web.loadHTMLString(Self.missingRuntimeHTML, baseURL: nil)
+            }
+        case .relay(let url, let token):
+            // Agent-built games are single-file HTML, so the bearer header on
+            // the main document request is all the auth the load needs.
+            var request = URLRequest(url: url)
+            request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
+            web.load(request)
         }
         return web
     }
@@ -90,6 +104,7 @@ struct ArcadeGameWebView: UIViewRepresentable {
 /// game, a glowing marquee, and an exit button.
 struct ArcadeCabinetPlayView: View {
     let game: StudioGame
+    let source: ArcadeGameSource
     var onScore: (String, Int, Int) -> Void
     var onClose: () -> Void
 
@@ -102,7 +117,7 @@ struct ArcadeCabinetPlayView: View {
             VStack(spacing: 0) {
                 marquee
                 // The screen, framed by a chunky bezel.
-                ArcadeGameWebView(runtimeFile: game.runtime.isEmpty ? "SkylineStack.html" : game.runtime,
+                ArcadeGameWebView(source: source,
                                   onScore: { event, score, best in
                     lastScore = score
                     onScore(event, score, best)

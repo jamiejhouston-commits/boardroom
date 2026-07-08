@@ -50,6 +50,13 @@ struct BoardroomView: View {
             }
             if !runningInitiatives.isEmpty {
                 Section("In motion") {
+                    NavigationLink {
+                        LiveFeedView()
+                    } label: {
+                        Label("Watch the team work — live", systemImage: "dot.radiowaves.left.and.right")
+                            .font(.subheadline.weight(.semibold))
+                            .foregroundStyle(HermesTheme.emerald)
+                    }
                     ForEach(runningInitiatives) { initiative in
                         initiativeCard(initiative)
                             .swipeActions(edge: .trailing) {
@@ -585,6 +592,11 @@ struct InitiativeDetailView: View {
     @State private var showIterate = false
     @State private var iterateText = ""
     @State private var demoShots: [DemoShot] = []
+    @State private var install: InstallStatus?
+    @State private var installPolling = false
+    @State private var submit: SubmitStatus?
+    @State private var submitPolling = false
+    @Environment(\.openURL) private var openURL
 
     struct DemoShot: Identifiable {
         let id: String        // filename, e.g. "01-home.png"
@@ -611,6 +623,14 @@ struct InitiativeDetailView: View {
                 Section("Brief") {
                     VStack(alignment: .leading, spacing: 6) {
                         Text(detail.title).font(.headline)
+                        if let division = detail.division, !division.isEmpty {
+                            Text(division.uppercased())
+                                .font(.caption2.weight(.bold))
+                                .padding(.horizontal, 8)
+                                .padding(.vertical, 3)
+                                .background(HermesTheme.emerald.opacity(0.12), in: Capsule())
+                                .foregroundStyle(HermesTheme.emerald)
+                        }
                         if !detail.pitch.isEmpty {
                             Text(detail.pitch).font(.subheadline).foregroundStyle(.secondary)
                         }
@@ -667,6 +687,14 @@ struct InitiativeDetailView: View {
                 }
 
                 Section("Deliverables") {
+                    if let live = detail.liveUrl, !live.isEmpty,
+                       let url = URL(string: live) {
+                        Link(destination: url) {
+                            Label("Open the live app", systemImage: "safari.fill")
+                                .font(.subheadline.weight(.semibold))
+                                .foregroundStyle(HermesTheme.emerald)
+                        }
+                    }
                     NavigationLink {
                         DeliverablesBrowserView(initiativeID: initiativeID,
                                                 title: detail.title)
@@ -680,6 +708,10 @@ struct InitiativeDetailView: View {
                             Label("Open the GitHub repo", systemImage: "arrow.up.forward.square")
                                 .font(.subheadline)
                         }
+                    }
+                    if detail.stage == "shipped" {
+                        installRow
+                        testflightRow
                     }
                 }
 
@@ -772,12 +804,123 @@ struct InitiativeDetailView: View {
         }
     }
 
+    /// Install Day: kick the ad-hoc export, poll until ready, then hand the
+    /// itms-services link to iOS — the agent-built app installs on this phone.
+    @ViewBuilder
+    private var installRow: some View {
+        let status = install?.status
+        if let url = install?.installUrl.flatMap(URL.init(string:)), status == "ready" {
+            Button {
+                openURL(url)
+            } label: {
+                Label("Install on my iPhone", systemImage: "iphone.and.arrow.forward")
+                    .font(.subheadline.weight(.semibold))
+                    .foregroundStyle(HermesTheme.emerald)
+            }
+        } else if installPolling || status == "exporting" {
+            HStack(spacing: 8) {
+                ProgressView().controlSize(.small)
+                Text("Packaging for your iPhone… (a few minutes)")
+                    .font(.caption).foregroundStyle(.secondary)
+            }
+        } else if let note = install?.note, install?.available == false || status == "failed" {
+            Label(note, systemImage: "info.circle")
+                .font(.caption).foregroundStyle(.secondary)
+        } else {
+            Button {
+                Task { await startInstall() }
+            } label: {
+                Label("Put it on my iPhone", systemImage: "iphone.and.arrow.forward")
+                    .font(.subheadline.weight(.semibold))
+            }
+        }
+    }
+
+    /// TestFlight: the company ships to Apple itself — but ONLY on this
+    /// owner-pressed button. Mirrors the Install Day flow.
+    @ViewBuilder
+    private var testflightRow: some View {
+        let status = submit?.status
+        if status == "submitted" {
+            Label(submit?.note ?? "Uploaded to App Store Connect.",
+                  systemImage: "checkmark.seal.fill")
+                .font(.caption).foregroundStyle(HermesTheme.emerald)
+        } else if submitPolling || status == "submitting" {
+            HStack(spacing: 8) {
+                ProgressView().controlSize(.small)
+                Text("Archiving + uploading to Apple… (several minutes)")
+                    .font(.caption).foregroundStyle(.secondary)
+            }
+        } else if let note = submit?.note, submit?.available == false || status == "failed" {
+            Label(note, systemImage: "info.circle")
+                .font(.caption).foregroundStyle(.secondary)
+        } else {
+            Button {
+                Task { await startSubmit() }
+            } label: {
+                Label("Send to TestFlight", systemImage: "paperplane.fill")
+                    .font(.subheadline.weight(.semibold))
+            }
+        }
+    }
+
+    private func startSubmit() async {
+        let client = HermesRelayClient(configuration: runtime.relayConfiguration)
+        submitPolling = true
+        defer { submitPolling = false }
+        do {
+            submit = try await client.submitTestFlight(id: initiativeID)
+            guard submit?.available == true else { return }
+            for _ in 0..<60 {
+                try await Task.sleep(for: .seconds(10))
+                let status = try await client.submitStatus(id: initiativeID)
+                submit = status
+                if status.status == "submitted" || status.status == "failed" || !status.available {
+                    return
+                }
+            }
+            submit = SubmitStatus(available: false, status: "failed",
+                                  note: "Upload timed out — check the relay log.")
+        } catch {
+            submit = SubmitStatus(available: false, status: "failed",
+                                  note: error.localizedDescription)
+        }
+    }
+
+    private func startInstall() async {
+        let client = HermesRelayClient(configuration: runtime.relayConfiguration)
+        installPolling = true
+        defer { installPolling = false }
+        do {
+            try await client.installExport(id: initiativeID)
+            // Poll until the export lands (archive + export takes minutes).
+            for _ in 0..<60 {
+                try await Task.sleep(for: .seconds(10))
+                let status = try await client.installStatus(id: initiativeID)
+                install = status
+                if status.status == "ready" || status.status == "failed" || !status.available {
+                    return
+                }
+            }
+            install = InstallStatus(available: false, status: "failed", installUrl: nil,
+                                    note: "Export timed out — check the relay log.")
+        } catch {
+            install = InstallStatus(available: false, status: "failed", installUrl: nil,
+                                    note: error.localizedDescription)
+        }
+    }
+
     private func load() async {
         loadError = nil
         if let fresh = await company.initiativeDetail(id: initiativeID,
                                                       relay: runtime.relayConfiguration) {
             detail = fresh
             await loadDemoShots(stage: fresh.stage)
+            if fresh.stage == "shipped", install == nil {
+                let client = HermesRelayClient(configuration: runtime.relayConfiguration)
+                install = try? await client.installStatus(id: initiativeID)
+                submit = try? await client.submitStatus(id: initiativeID)
+            }
         } else if detail == nil {
             loadError = "Couldn't load this initiative — check your relay connection."
         }

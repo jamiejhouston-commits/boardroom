@@ -4,6 +4,7 @@ struct WarRoomView: View {
     @EnvironmentObject private var company: CompanyStore
     @EnvironmentObject private var runtime: HermesRuntimeController
     @State private var showHQ = false
+    @State private var showFlythrough = false
     private let feedTicker = Timer.publish(every: 15, on: .main, in: .common).autoconnect()
 
     var body: some View {
@@ -35,6 +36,23 @@ struct WarRoomView: View {
                                 .foregroundStyle(HermesTheme.emerald)
                         }
                         .hermesCard()
+                    }
+                    .buttonStyle(.plain)
+
+                    // Cinematic ~21s camera pass of the HQ → shareable .mp4.
+                    Button { showFlythrough = true } label: {
+                        HStack(spacing: 8) {
+                            Image(systemName: "video.circle.fill")
+                                .foregroundStyle(HermesTheme.emerald)
+                            Text("Record flythrough")
+                                .font(.subheadline.weight(.semibold))
+                                .foregroundStyle(HermesTheme.textPrimary)
+                            Spacer()
+                            Image(systemName: "square.and.arrow.up")
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                        }
+                        .hermesCard(padding: 12, radius: 12)
                     }
                     .buttonStyle(.plain)
 
@@ -76,6 +94,9 @@ struct WarRoomView: View {
             }
             .fullScreenCover(isPresented: $showHQ) {
                 HeadquartersView()
+            }
+            .fullScreenCover(isPresented: $showFlythrough) {
+                HQFlythroughRecorderView()
             }
         }
     }

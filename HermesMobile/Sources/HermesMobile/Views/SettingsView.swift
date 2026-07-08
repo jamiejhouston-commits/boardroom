@@ -35,6 +35,7 @@ enum AppearanceMode: String, CaseIterable, Identifiable {
 struct SettingsView: View {
     @EnvironmentObject private var runtime: HermesRuntimeController
     @AppStorage("appearanceMode") private var appearanceRaw = AppearanceMode.system.rawValue
+    @State private var testCallStatus: String?
 
     var body: some View {
         NavigationStack {
@@ -79,6 +80,34 @@ struct SettingsView: View {
                     } label: {
                         Label("Agent voices & voice costs", systemImage: "waveform")
                     }
+                }
+
+                Section {
+                    Button {
+                        testCallStatus = "Asking the relay to ring you…"
+                        Task {
+                            do {
+                                try await HermesRelayClient(configuration: runtime.relayConfiguration)
+                                    .requestCall(caller: "Lena",
+                                                 reason: "You asked me to test the line, sir.")
+                                testCallStatus = "Requested — your phone should ring within ~10 seconds."
+                            } catch {
+                                testCallStatus = error.localizedDescription
+                            }
+                        }
+                    } label: {
+                        Label("Test: have Lena call me", systemImage: "phone.arrow.down.left.fill")
+                    }
+                    .disabled(!runtime.relayConfiguration.isConfigured)
+                    if let testCallStatus {
+                        Text(testCallStatus)
+                            .font(.footnote)
+                            .foregroundStyle(.secondary)
+                    }
+                } header: {
+                    Text("Incoming calls")
+                } footer: {
+                    Text("Rings this phone with the native incoming-call screen. Keep the app open — instant ringing with the app closed needs APNs keys on the Mac relay.")
                 }
 
                 Section("About") {

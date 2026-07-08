@@ -27,9 +27,9 @@ From the repository root:
 
 ```bash
 python docs/architecture/generate_boardroom_drawio.py
-python C:/Users/andre/AppData/Local/hermes/skills/design/drawio-skill/scripts/validate.py --strict docs/architecture/boardroom-architecture.drawio
+python <drawio-skill>/scripts/validate.py --strict docs/architecture/boardroom-architecture.drawio
 python docs/architecture/render_drawio_preview.py
-python C:/Users/andre/AppData/Local/hermes/skills/design/drawio-skill/scripts/encode_drawio_url.py --edit docs/architecture/boardroom-architecture.drawio > docs/architecture/boardroom-architecture-diagrams-net-edit-url.txt
+python <drawio-skill>/scripts/encode_drawio_url.py --edit docs/architecture/boardroom-architecture.drawio > docs/architecture/boardroom-architecture-diagrams-net-edit-url.txt
 ```
 
 If Draw.io desktop is installed, export a native editable PNG/SVG from the `.drawio` file using the `drawio-skill` workflow.

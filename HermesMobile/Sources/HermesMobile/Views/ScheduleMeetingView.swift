@@ -96,15 +96,24 @@ struct ScheduleMeetingView: View {
 
     private func schedule() async {
         scheduling = true
+        let cleanTopic = topic.trimmingCharacters(in: .whitespaces)
         let attendees = org.agents.filter { selected.contains($0.id) }
         let outcome = await hub.schedule(
-            topic: topic.trimmingCharacters(in: .whitespaces),
+            topic: cleanTopic,
             date: date,
             attendees: attendees,
             memoSubject: sendBrief ? topic : nil,
             memoBody: sendBrief ? briefBody : nil,
             relay: runtime.relayConfiguration
         )
+        // The part that makes the meeting REAL: a one-shot relay schedule so
+        // the org actually convenes at that time (calendar + memo alone left
+        // the owner walking into an empty room).
+        var convenes = false
+        if runtime.relayConfiguration.isConfigured {
+            convenes = (try? await HermesRelayClient(configuration: runtime.relayConfiguration)
+                .companyAddOneShotMeeting(topic: cleanTopic, at: date)) != nil
+        }
         scheduling = false
         // Only claim the memo went out if it actually could: relay connected.
         let memoNote: String
@@ -115,13 +124,17 @@ struct ScheduleMeetingView: View {
         } else {
             memoNote = ""
         }
+        // Honest about whether the org will actually meet, not just alarm.
+        let conveneNote = convenes
+            ? " The team convenes on this topic at that time — the room goes live."
+            : " NOTE: the relay isn't connected, so the team won't actually convene — you'll get the alarm only."
         switch outcome {
         case .added:
-            resultMessage = "Added to your calendar with a 15-minute alert." + memoNote
+            resultMessage = "Added to your calendar with a 15-minute alert." + conveneNote + memoNote
         case .denied:
-            resultMessage = "Calendar access was declined — the meeting is saved in Hermes and you'll still get the 15-minute notification." + memoNote
+            resultMessage = "Calendar access was declined — the meeting is saved in Hermes and you'll still get the 15-minute notification." + conveneNote + memoNote
         case .failed(let why):
-            resultMessage = "Saved in Hermes, but the calendar event failed: \(why)" + memoNote
+            resultMessage = "Saved in Hermes, but the calendar event failed: \(why)" + conveneNote + memoNote
         }
     }
 }

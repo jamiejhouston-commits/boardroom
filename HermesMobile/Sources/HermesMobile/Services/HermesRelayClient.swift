@@ -319,6 +319,19 @@ struct HermesRelayClient {
                                   json: ["id": id, "score": score] as [String: Any])
     }
 
+    /// Resume a paused game — the studio gets a fresh budget on the same title.
+    func gamesResume(id: String) async throws -> GamesStudioState {
+        try await companyPOSTJSON(path: "games/resume", json: ["id": id] as [String: Any])
+    }
+
+    /// Per-division rollup for the holding dashboard (relay pass B — 404s
+    /// until it lands; callers show a graceful empty state).
+    func companyDivisions() async throws -> [DivisionInfo] {
+        struct Manifest: Codable { var divisions: [DivisionInfo] }
+        let manifest: Manifest = try await companyGET(path: "company/divisions")
+        return manifest.divisions
+    }
+
     /// Live portfolio metrics (RevenueCat via the relay) — what the shipped
     /// products actually earn. `configured == false` means no key on the Mac.
     func companyRevenue() async throws -> RevenueSummary {
@@ -358,6 +371,81 @@ struct HermesRelayClient {
                                                   body: ["token": token])
     }
 
+    // MARK: Install Day — put an agent-built app on the owner's phone
+
+    /// Ask the relay to archive + ad-hoc-export the initiative's app.
+    func installExport(id: String) async throws {
+        let _: CompanyAck = try await companyPOST(path: "company/initiative/\(id)/export-ipa",
+                                                  body: [:])
+    }
+
+    /// Export status; `installUrl` is an itms-services link when ready.
+    func installStatus(id: String) async throws -> InstallStatus {
+        try await companyGET(path: "company/initiative/\(id)/install")
+    }
+
+    // MARK: TestFlight — the company ships to Apple (owner-pressed only)
+
+    /// Kick the archive + App Store upload for a shipped initiative.
+    func submitTestFlight(id: String) async throws -> SubmitStatus {
+        try await companyPOST(path: "company/initiative/\(id)/submit-testflight",
+                              body: [:])
+    }
+
+    /// TestFlight submit status: submitting/submitted/failed, or an honest
+    /// `available: false` naming the missing credential.
+    func submitStatus(id: String) async throws -> SubmitStatus {
+        try await companyGET(path: "company/initiative/\(id)/testflight")
+    }
+
+    // MARK: Watch the team work
+
+    /// The last thing each working initiative's agent produced — the honest
+    /// over-the-shoulder feed behind "watch them work".
+    func companyLive() async throws -> [LiveWorkEntry] {
+        struct Manifest: Codable { var working: [LiveWorkEntry] }
+        let manifest: Manifest = try await companyGET(path: "company/live")
+        return manifest.working
+    }
+
+    // MARK: Portfolio adoption — existing apps join the company
+
+    /// Bring one of the owner's existing apps (a folder on the Mac) under
+    /// company maintenance. The relay validates the path.
+    func adoptPortfolio(path: String, name: String = "",
+                        division: String = "") async throws {
+        let _: CompanyAck = try await companyPOST(
+            path: "company/portfolio/adopt",
+            body: ["path": path, "name": name, "division": division])
+    }
+
+    // MARK: Incoming calls — the company calls YOU
+
+    /// The relay's current pending call, if any (`{}` when the line is quiet,
+    /// hence every field optional).
+    func callPending() async throws -> PendingCall {
+        try await companyGET(path: "call/pending")
+    }
+
+    /// Tell the relay how the owner handled the ring: "answered" | "declined".
+    func callAck(id: String, status: String) async throws {
+        let _: CompanyAck = try await companyPOST(path: "call/ack",
+                                                  body: ["id": id, "status": status])
+    }
+
+    /// PushKit VoIP token — lets the relay ring the phone even when the app
+    /// is closed (dormant until APNs keys exist on the Mac).
+    func registerVoIPPushToken(_ token: String) async throws {
+        let _: CompanyAck = try await companyPOST(path: "push/register-voip",
+                                                  body: ["token": token])
+    }
+
+    /// Owner-triggered test ring (Settings → "Test: have Lena call me").
+    func requestCall(caller: String, reason: String) async throws {
+        let _: CompanyAck = try await companyPOST(path: "call/request",
+                                                  body: ["caller": caller, "reason": reason])
+    }
+
     // MARK: Schedules (the Cron)
 
     func companyAddSchedule(title: String, kind: String, text: String, cadence: String,
@@ -365,6 +453,26 @@ struct HermesRelayClient {
         try await companyPOSTJSON(path: "company/schedules", json: [
             "title": title, "kind": kind, "text": text, "cadence": cadence,
             "at_hour": atHour, "at_minute": atMinute, "weekday": weekday] as [String: Any])
+    }
+
+    /// One-shot office-hours meeting at a real calendar time — makes a
+    /// scheduled meeting actually CONVENE instead of just alarming.
+    func companyAddOneShotMeeting(topic: String, at date: Date) async throws -> CompanyState {
+        try await companyPOSTJSON(path: "company/schedules", json: [
+            "title": topic, "kind": "meeting", "text": topic,
+            "cadence": "once", "at_ts": date.timeIntervalSince1970] as [String: Any])
+    }
+
+    /// Convene the leadership on a topic right now.
+    func conveneMeeting(topic: String) async throws {
+        let _: CompanyAck = try await companyPOST(path: "company/meeting/convene",
+                                                  body: ["topic": topic])
+    }
+
+    /// Distill a finished meeting into Kanban action items (background on the Mac).
+    func meetingActions(id: String) async throws {
+        let _: CompanyAck = try await companyPOST(path: "company/meeting/\(id)/actions",
+                                                  body: [:])
     }
 
     func companyDeleteSchedule(id: String) async throws -> CompanyState {
@@ -481,6 +589,15 @@ struct DeliverableFile: Codable, Equatable, Identifiable, Hashable {
     }
 }
 
+/// A call the relay wants to place to the owner. `{}` = no pending call.
+struct PendingCall: Codable, Equatable {
+    var id: String?
+    var caller: String?
+    var reason: String?
+    var created: Double?
+    var status: String?    // "ringing" while it should ring
+}
+
 /// One second-brain note's body (company vault or Obsidian).
 struct VaultNoteContent: Codable, Equatable {
     var id: String
@@ -488,6 +605,33 @@ struct VaultNoteContent: Codable, Equatable {
     var content: String
     var source: String        // "company" | "obsidian"
     var modified: Double?
+}
+
+/// Install Day export state for one initiative.
+struct InstallStatus: Codable, Equatable {
+    var available: Bool
+    var status: String?       // "exporting" | "ready" | "failed"
+    var installUrl: String?   // itms-services://… when ready
+    var note: String?
+}
+
+/// TestFlight submit state for one initiative.
+struct SubmitStatus: Codable, Equatable {
+    var available: Bool
+    var status: String?       // "submitting" | "submitted" | "failed"
+    var note: String?
+}
+
+/// One working initiative's latest agent output (`GET /company/live`).
+struct LiveWorkEntry: Codable, Equatable, Identifiable {
+    var id: String
+    var title: String
+    var stage: String
+    var phase: String?
+    var role: String?         // who's at the desk right now
+    var ts: String?
+    var text: String?         // the tail of their last turn
+    var callsUsed: Int?
 }
 
 /// What the shipped portfolio earns, fetched by the relay from RevenueCat.

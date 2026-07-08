@@ -5,9 +5,64 @@ import UIKit
 // MARK: - 3D conference room — cinematic boardroom (round holo-table, skyline
 // glass, live dashboard wall) modeled on the user's reference render.
 
+/// REAL numbers for the boardroom's wall screens, computed from live company
+/// state by whoever presents the room. Zeros render honestly as zeros — the
+/// invented "79% ON TRACK" era is over.
+struct RoomStats: Equatable {
+    struct Bar: Equatable {
+        var label: String
+        var value: Int
+    }
+
+    var headline = "BOARDROOM"          // live meeting topic, or the honest default
+    var live = false                    // a meeting is actually in session
+    var shipped = 0
+    var active = 0
+    var gates = 0
+    var tasksDone = 0
+    var tasksTotal = 0
+    var divisionBars: [Bar] = []        // shipped per division
+    var activeRows: [String] = []       // initiatives in motion + stage
+    var eventRows: [String] = []        // latest real activity
+
+    static func from(state: CompanyState, liveTopic: String? = nil) -> RoomStats {
+        var stats = RoomStats()
+        if let liveTopic, !liveTopic.isEmpty {
+            stats.headline = String(liveTopic.uppercased().prefix(34))
+            stats.live = true
+        }
+        let initiatives = state.initiatives
+        stats.shipped = initiatives.filter { $0.stage == "shipped" }.count
+        stats.active = initiatives.filter { !$0.isTerminal }.count
+        stats.gates = initiatives.filter(\.isAwaitingDecision).count
+        let tasks = state.tasks ?? []
+        stats.tasksDone = tasks.filter { $0.status == "done" }.count
+        stats.tasksTotal = tasks.count
+        var byDivision: [String: Int] = [:]
+        for item in initiatives where item.stage == "shipped" {
+            let division = item.division ?? ""
+            let label = HQDivision(rawValue: division)?.name ?? "General"
+            byDivision[label, default: 0] += 1
+        }
+        stats.divisionBars = byDivision
+            .sorted { $0.value > $1.value }
+            .prefix(5)
+            .map { Bar(label: $0.key, value: $0.value) }
+        stats.activeRows = initiatives
+            .filter { !$0.isTerminal && !$0.isAwaitingDecision }
+            .prefix(3)
+            .map { "\($0.title) — \($0.stage)" }
+        stats.eventRows = (state.events ?? []).suffix(3).reversed().map(\.text)
+        return stats
+    }
+}
+
 struct MeetingRoomSceneView: UIViewRepresentable {
     var attendees: [OrgAgent]
     var avatar: UserAvatar = .default
+    // ponytail: the wall screens render the stats from when you walked in;
+    // live-updating them would rebuild the scene and fight the camera.
+    var stats = RoomStats()
     var onSelectAgent: (String) -> Void = { _ in }
     var onSelectScreen: (String) -> Void = { _ in }
 
@@ -19,7 +74,7 @@ struct MeetingRoomSceneView: UIViewRepresentable {
         view.antialiasingMode = .multisampling4X
         view.allowsCameraControl = true
         view.isPlaying = true
-        view.scene = MeetingSceneBuilder.scene(attendees: attendees, avatar: avatar)
+        view.scene = MeetingSceneBuilder.scene(attendees: attendees, avatar: avatar, stats: stats)
         context.coordinator.avatar = avatar
         context.coordinator.onSelectScreen = onSelectScreen
         context.coordinator.attach(to: view, ids: attendees.map(\.id), onSelect: onSelectAgent)
@@ -32,7 +87,7 @@ struct MeetingRoomSceneView: UIViewRepresentable {
         // The avatar changed (customized) → rebuild so "you" update at the table.
         if avatar != context.coordinator.avatar {
             context.coordinator.avatar = avatar
-            uiView.scene = MeetingSceneBuilder.scene(attendees: attendees, avatar: avatar)
+            uiView.scene = MeetingSceneBuilder.scene(attendees: attendees, avatar: avatar, stats: stats)
             context.coordinator.attach(to: uiView, ids: attendees.map(\.id), onSelect: onSelectAgent)
             return
         }
@@ -187,11 +242,13 @@ struct MeetingRoomSceneView: UIViewRepresentable {
 
 private enum MeetingSceneBuilder {
 
-    // The room's signature teal — bright enough to read as light, not paint.
-    private static let teal = UIColor(red: 0.16, green: 0.78, blue: 0.84, alpha: 1)
-    private static let emerald = UIColor(red: 0.18, green: 0.78, blue: 0.55, alpha: 1)
+    // The room's signature accent — muted sea-glass, per the palette rule
+    // (no neon): one constant recolors the ring, screens, and edge lights.
+    private static let teal = UIColor(red: 0.22, green: 0.58, blue: 0.52, alpha: 1)
+    private static let emerald = UIColor(red: 0.20, green: 0.62, blue: 0.47, alpha: 1)
 
-    static func scene(attendees: [OrgAgent], avatar: UserAvatar) -> SCNScene {
+    static func scene(attendees: [OrgAgent], avatar: UserAvatar,
+                      stats: RoomStats = RoomStats()) -> SCNScene {
         let scene = SCNScene()
 
         scene.lightingEnvironment.contents = environmentMap()
@@ -205,7 +262,7 @@ private enum MeetingSceneBuilder {
         addLights(to: scene)
         addFloor(to: scene)
         addCeiling(to: scene)
-        addBackWall(to: scene)
+        addBackWall(to: scene, stats: stats)
         addSideWindows(to: scene)
         addDoor(to: scene)
         addTable(to: scene)
@@ -241,9 +298,11 @@ private enum MeetingSceneBuilder {
         let camera = SCNCamera()
         camera.fieldOfView = 46
         camera.wantsHDR = true
-        camera.bloomIntensity = 0.55          // tasteful cinematic glow
-        camera.bloomThreshold = 0.5
-        camera.bloomBlurRadius = 6
+        // HQ-proven bloom: threshold 0.85 — at 0.5 the agents' bright bodies
+        // bloomed into cyan blobs (the "glowing agents" report).
+        camera.bloomIntensity = 0.5
+        camera.bloomThreshold = 0.85
+        camera.bloomBlurRadius = 16
         camera.wantsExposureAdaptation = false
         camera.zFar = 90
 
@@ -266,9 +325,11 @@ private enum MeetingSceneBuilder {
         scene.rootNode.addChildNode(an)
 
         // White spot straight down over the table — the hero light.
+        // 700, not 1000: SceneKit spots concentrate lumens into the cone, so
+        // the seated agents inside it were lit past saturation (bench-measured).
         let spot = SCNLight()
         spot.type = .spot
-        spot.intensity = 1000
+        spot.intensity = 700
         spot.color = UIColor(white: 0.95, alpha: 1)
         spot.spotInnerAngle = 30
         spot.spotOuterAngle = 75
@@ -281,7 +342,7 @@ private enum MeetingSceneBuilder {
         scene.rootNode.addChildNode(sn)
 
         // Cool teal washes from the dashboard wall and the windows.
-        for (pos, intensity) in [(SCNVector3(0, 2.2, -3.4), 220.0), (SCNVector3(-3.8, 2.0, 0), 160.0), (SCNVector3(3.8, 2.0, 0), 160.0)] {
+        for (pos, intensity) in [(SCNVector3(0, 2.2, -3.4), 176.0), (SCNVector3(-3.8, 2.0, 0), 128.0), (SCNVector3(3.8, 2.0, 0), 128.0)] {
             let wash = SCNLight()
             wash.type = .omni
             wash.intensity = CGFloat(intensity)
@@ -342,7 +403,7 @@ private enum MeetingSceneBuilder {
 
     // MARK: Back wall — the live dashboard screens
 
-    private static func addBackWall(to scene: SCNScene) {
+    private static func addBackWall(to scene: SCNScene, stats: RoomStats) {
         let wall = SCNNode(geometry: SCNPlane(width: 11, height: 3.8))
         wall.position = SCNVector3(0, 1.85, -4.1)
         wall.geometry?.firstMaterial = pbr(diffuse: UIColor(red: 0.02, green: 0.032, blue: 0.05, alpha: 1),
@@ -355,12 +416,30 @@ private enum MeetingSceneBuilder {
         base.geometry?.firstMaterial = glow(teal.withAlphaComponent(0.6))
         scene.rootNode.addChildNode(base)
 
-        // Two big dashboard screens with REAL drawn content — tap to open the
-        // Decision Vault (left) or live Meeting Minutes (right).
-        addScreen(to: scene, texture: dashboardTexture(title: "Q2 STRATEGY REVIEW", style: .strategy),
+        // Two big dashboard screens drawn from REAL company state — the LIVE
+        // badge only appears when a meeting is actually in session. Tap to
+        // open the Meeting Minutes (right) or the Decision Vault (left).
+        let donutLabel = stats.tasksTotal > 0
+            ? "\(Int((CGFloat(stats.tasksDone) / CGFloat(stats.tasksTotal) * 100).rounded()))%"
+            : "—"
+        let pulse = ScreenSpec(
+            title: stats.headline,
+            badge: stats.live ? "● LIVE" : "",
+            rows: stats.activeRows.isEmpty ? ["Nothing in motion right now"] : stats.activeRows,
+            donut: (fraction: stats.tasksTotal > 0
+                        ? CGFloat(stats.tasksDone) / CGFloat(stats.tasksTotal) : 0,
+                    label: donutLabel, sub: "TASKS DONE"))
+        let ops = ScreenSpec(
+            title: "OPERATIONS PULSE",
+            rows: stats.eventRows.isEmpty ? ["No activity yet"] : stats.eventRows,
+            bars: stats.divisionBars,
+            bigStats: [("SHIPPED", "\(stats.shipped)"),
+                       ("ACTIVE", "\(stats.active)"),
+                       ("GATES", "\(stats.gates)")])
+        addScreen(to: scene, texture: dashboardTexture(pulse),
                   center: SCNVector3(1.55, 2.05, -4.04), size: CGSize(width: 2.7, height: 1.55),
                   tapName: "screen-minutes")
-        addScreen(to: scene, texture: dashboardTexture(title: "OPERATIONS PULSE", style: .operations),
+        addScreen(to: scene, texture: dashboardTexture(ops),
                   center: SCNVector3(-1.55, 2.05, -4.04), size: CGSize(width: 2.7, height: 1.55),
                   tapName: "screen-vault")
     }
@@ -702,9 +781,17 @@ private enum MeetingSceneBuilder {
 
     // MARK: Drawn textures — what makes the screens/skyline look real
 
-    private enum DashboardStyle { case strategy, operations }
+    /// What one wall screen shows — every field comes from real state.
+    private struct ScreenSpec {
+        var title: String
+        var badge = ""                  // "● LIVE" only during a real session
+        var rows: [String] = []
+        var bars: [RoomStats.Bar] = []
+        var donut: (fraction: CGFloat, label: String, sub: String)?
+        var bigStats: [(String, String)] = []
+    }
 
-    private static func dashboardTexture(title: String, style: DashboardStyle) -> UIImage {
+    private static func dashboardTexture(_ spec: ScreenSpec) -> UIImage {
         let size = CGSize(width: 1024, height: 590)
         return UIGraphicsImageRenderer(size: size).image { ctx in
             let c = ctx.cgContext
@@ -724,43 +811,50 @@ private enum MeetingSceneBuilder {
                 .foregroundColor: UIColor(red: 0.75, green: 0.95, blue: 1, alpha: 1),
                 .kern: 6
             ]
-            (title as NSString).draw(at: CGPoint(x: 40, y: 30), withAttributes: titleAttrs)
-            c.setFillColor(emerald.withAlphaComponent(0.25).cgColor)
-            let pill = CGRect(x: size.width - 170, y: 32, width: 130, height: 42)
-            c.addPath(UIBezierPath(roundedRect: pill, cornerRadius: 21).cgPath); c.fillPath()
-            ("● LIVE" as NSString).draw(at: CGPoint(x: pill.minX + 26, y: pill.minY + 9), withAttributes: [
-                .font: UIFont.systemFont(ofSize: 20, weight: .bold),
-                .foregroundColor: UIColor(red: 0.4, green: 0.95, blue: 0.65, alpha: 1)
-            ])
+            (spec.title as NSString).draw(at: CGPoint(x: 40, y: 30), withAttributes: titleAttrs)
+            if !spec.badge.isEmpty {
+                c.setFillColor(emerald.withAlphaComponent(0.25).cgColor)
+                let pill = CGRect(x: size.width - 170, y: 32, width: 130, height: 42)
+                c.addPath(UIBezierPath(roundedRect: pill, cornerRadius: 21).cgPath); c.fillPath()
+                (spec.badge as NSString).draw(at: CGPoint(x: pill.minX + 26, y: pill.minY + 9), withAttributes: [
+                    .font: UIFont.systemFont(ofSize: 20, weight: .bold),
+                    .foregroundColor: UIColor(red: 0.4, green: 0.95, blue: 0.65, alpha: 1)
+                ])
+            }
             c.setStrokeColor(teal.withAlphaComponent(0.35).cgColor)
             c.setLineWidth(2)
             c.move(to: CGPoint(x: 40, y: 95)); c.addLine(to: CGPoint(x: size.width - 40, y: 95)); c.strokePath()
 
-            switch style {
-            case .strategy:
-                drawDonut(c, center: CGPoint(x: 820, y: 240), radius: 80, fraction: 0.79, label: "79%")
-                drawLineChart(c, in: CGRect(x: 40, y: 130, width: 560, height: 230))
-                drawRows(c, in: CGRect(x: 40, y: 400, width: 560, height: 150), rows: 3)
-                drawBars(c, in: CGRect(x: 680, y: 380, width: 290, height: 170))
-            case .operations:
-                drawBars(c, in: CGRect(x: 40, y: 140, width: 420, height: 220))
-                drawDonut(c, center: CGPoint(x: 600, y: 240), radius: 75, fraction: 0.92, label: "92%")
-                drawRows(c, in: CGRect(x: 40, y: 400, width: 930, height: 150), rows: 3)
-                drawLineChart(c, in: CGRect(x: 720, y: 130, width: 260, height: 220))
+            let rowsWidth: CGFloat = spec.donut != nil ? 620 : 930
+            drawRows(c, in: CGRect(x: 40, y: 130, width: rowsWidth, height: 230), rows: spec.rows)
+            if let donut = spec.donut {
+                drawDonut(c, center: CGPoint(x: 830, y: 240), radius: 80,
+                          fraction: donut.fraction, label: donut.label, sub: donut.sub)
+            }
+            if !spec.bars.isEmpty {
+                drawBars(c, in: CGRect(x: 40, y: 410, width: 560, height: 150), bars: spec.bars)
+            }
+            if !spec.bigStats.isEmpty {
+                drawBigStats(c, in: CGRect(x: spec.bars.isEmpty ? 40 : 680, y: 410,
+                                           width: spec.bars.isEmpty ? 930 : 290, height: 150),
+                             stats: spec.bigStats)
             }
         }
     }
 
-    private static func drawDonut(_ c: CGContext, center: CGPoint, radius: CGFloat, fraction: CGFloat, label: String) {
+    private static func drawDonut(_ c: CGContext, center: CGPoint, radius: CGFloat,
+                                  fraction: CGFloat, label: String, sub: String) {
         c.setStrokeColor(UIColor(white: 0.18, alpha: 1).cgColor)
         c.setLineWidth(20)
         c.addArc(center: center, radius: radius, startAngle: 0, endAngle: .pi * 2, clockwise: false)
         c.strokePath()
-        c.setStrokeColor(emerald.cgColor)
-        c.setLineCap(.round)
-        c.addArc(center: center, radius: radius,
-                 startAngle: -.pi / 2, endAngle: -.pi / 2 + .pi * 2 * fraction, clockwise: false)
-        c.strokePath()
+        if fraction > 0 {
+            c.setStrokeColor(emerald.cgColor)
+            c.setLineCap(.round)
+            c.addArc(center: center, radius: radius,
+                     startAngle: -.pi / 2, endAngle: -.pi / 2 + .pi * 2 * min(fraction, 1), clockwise: false)
+            c.strokePath()
+        }
         let attrs: [NSAttributedString.Key: Any] = [
             .font: UIFont.systemFont(ofSize: 40, weight: .heavy),
             .foregroundColor: UIColor.white
@@ -768,67 +862,63 @@ private enum MeetingSceneBuilder {
         let s = label as NSString
         let sz = s.size(withAttributes: attrs)
         s.draw(at: CGPoint(x: center.x - sz.width / 2, y: center.y - sz.height / 2), withAttributes: attrs)
-        ("ON TRACK" as NSString).draw(at: CGPoint(x: center.x - 44, y: center.y + radius + 26), withAttributes: [
+        let subAttrs: [NSAttributedString.Key: Any] = [
             .font: UIFont.systemFont(ofSize: 18, weight: .semibold),
             .foregroundColor: UIColor(red: 0.5, green: 0.85, blue: 0.9, alpha: 1), .kern: 2
-        ])
+        ]
+        let subSize = (sub as NSString).size(withAttributes: subAttrs)
+        (sub as NSString).draw(at: CGPoint(x: center.x - subSize.width / 2, y: center.y + radius + 26),
+                               withAttributes: subAttrs)
     }
 
-    private static func drawLineChart(_ c: CGContext, in rect: CGRect) {
-        // Grid.
-        c.setStrokeColor(UIColor(white: 1, alpha: 0.07).cgColor)
-        c.setLineWidth(1)
-        for i in 0...4 {
-            let y = rect.minY + rect.height * CGFloat(i) / 4
-            c.move(to: CGPoint(x: rect.minX, y: y)); c.addLine(to: CGPoint(x: rect.maxX, y: y))
-        }
-        c.strokePath()
-
-        // Polyline.
-        let values: [CGFloat] = [0.62, 0.5, 0.66, 0.58, 0.74, 0.68, 0.84, 0.8, 0.92]
-        let pts = values.enumerated().map { i, v in
-            CGPoint(x: rect.minX + rect.width * CGFloat(i) / CGFloat(values.count - 1),
-                    y: rect.maxY - rect.height * v)
-        }
-        // Area fill.
-        c.setFillColor(teal.withAlphaComponent(0.12).cgColor)
-        c.move(to: CGPoint(x: rect.minX, y: rect.maxY))
-        pts.forEach { c.addLine(to: $0) }
-        c.addLine(to: CGPoint(x: rect.maxX, y: rect.maxY))
-        c.closePath(); c.fillPath()
-        // Line.
-        c.setStrokeColor(teal.cgColor)
-        c.setLineWidth(5)
-        c.setLineJoin(.round)
-        c.move(to: pts[0]); pts.dropFirst().forEach { c.addLine(to: $0) }
-        c.strokePath()
-        // Dots.
-        c.setFillColor(UIColor.white.cgColor)
-        for p in pts {
-            c.fillEllipse(in: CGRect(x: p.x - 5, y: p.y - 5, width: 10, height: 10))
+    /// Three big honest numbers (SHIPPED / ACTIVE / GATES).
+    private static func drawBigStats(_ c: CGContext, in rect: CGRect, stats: [(String, String)]) {
+        let slot = rect.width / CGFloat(max(stats.count, 1))
+        for (i, stat) in stats.enumerated() {
+            let x = rect.minX + slot * CGFloat(i)
+            let valueAttrs: [NSAttributedString.Key: Any] = [
+                .font: UIFont.systemFont(ofSize: 58, weight: .black),
+                .foregroundColor: UIColor.white
+            ]
+            (stat.1 as NSString).draw(at: CGPoint(x: x, y: rect.minY + 10), withAttributes: valueAttrs)
+            (stat.0 as NSString).draw(at: CGPoint(x: x, y: rect.minY + 82), withAttributes: [
+                .font: UIFont.systemFont(ofSize: 18, weight: .semibold),
+                .foregroundColor: UIColor(red: 0.5, green: 0.85, blue: 0.9, alpha: 1), .kern: 2
+            ])
         }
     }
 
-    private static func drawBars(_ c: CGContext, in rect: CGRect) {
-        let values: [CGFloat] = [0.45, 0.7, 0.55, 0.85, 0.65]
-        let barW = rect.width / CGFloat(values.count) * 0.55
-        for (i, v) in values.enumerated() {
-            let x = rect.minX + rect.width * CGFloat(i) / CGFloat(values.count) + barW * 0.4
-            let h = rect.height * v
+    /// Labeled bars from real values (shipped per division).
+    private static func drawBars(_ c: CGContext, in rect: CGRect, bars: [RoomStats.Bar]) {
+        let peak = CGFloat(max(bars.map(\.value).max() ?? 1, 1))
+        let chartHeight = rect.height - 34   // room for the labels underneath
+        let barW = rect.width / CGFloat(bars.count) * 0.55
+        for (i, bar) in bars.enumerated() {
+            let x = rect.minX + rect.width * CGFloat(i) / CGFloat(bars.count) + barW * 0.4
+            let h = max(chartHeight * CGFloat(bar.value) / peak, 8)
             c.setFillColor(emerald.withAlphaComponent(0.85).cgColor)
-            let bar = CGRect(x: x, y: rect.maxY - h, width: barW, height: h)
-            c.addPath(UIBezierPath(roundedRect: bar, cornerRadius: 6).cgPath)
+            let barRect = CGRect(x: x, y: rect.minY + chartHeight - h, width: barW, height: h)
+            c.addPath(UIBezierPath(roundedRect: barRect, cornerRadius: 6).cgPath)
             c.fillPath()
+            ("\(bar.value)" as NSString).draw(
+                at: CGPoint(x: x + 4, y: rect.minY + chartHeight - h - 28),
+                withAttributes: [.font: UIFont.systemFont(ofSize: 22, weight: .bold),
+                                 .foregroundColor: UIColor.white])
+            (String(bar.label.prefix(10)) as NSString).draw(
+                at: CGPoint(x: x - 6, y: rect.minY + chartHeight + 8),
+                withAttributes: [.font: UIFont.systemFont(ofSize: 17, weight: .medium),
+                                 .foregroundColor: UIColor(white: 0.7, alpha: 1)])
         }
     }
 
-    private static func drawRows(_ c: CGContext, in rect: CGRect, rows: Int) {
-        let labels = ["Initiative Alpha — expansion", "Pipeline review — capital", "Agent throughput — weekly"]
-        for i in 0..<rows {
-            let y = rect.minY + CGFloat(i) * (rect.height / CGFloat(rows))
+    /// Real text rows (initiatives in motion / latest activity).
+    private static func drawRows(_ c: CGContext, in rect: CGRect, rows: [String]) {
+        let shown = rows.prefix(3)
+        for (i, label) in shown.enumerated() {
+            let y = rect.minY + CGFloat(i) * (rect.height / CGFloat(max(shown.count, 1)))
             c.setFillColor(teal.withAlphaComponent(0.85).cgColor)
             c.fillEllipse(in: CGRect(x: rect.minX, y: y + 10, width: 12, height: 12))
-            (labels[i % labels.count] as NSString).draw(at: CGPoint(x: rect.minX + 28, y: y), withAttributes: [
+            (String(label.prefix(52)) as NSString).draw(at: CGPoint(x: rect.minX + 28, y: y), withAttributes: [
                 .font: UIFont.systemFont(ofSize: 22, weight: .medium),
                 .foregroundColor: UIColor(white: 0.85, alpha: 1)
             ])
@@ -1127,6 +1217,8 @@ struct MeetingRoomView: View {
                 MeetingRoomSceneView(
                     attendees: attendees,
                     avatar: avatarStore.avatar,
+                    stats: RoomStats.from(state: company.state,
+                                          liveTopic: company.liveMeeting?.topic),
                     onSelectAgent: { id in
                         if let agent = attendees.first(where: { $0.id == id }) {
                             convo.direct(to: agent)

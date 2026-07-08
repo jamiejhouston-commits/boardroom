@@ -73,6 +73,14 @@ final class HQDivisionsFloorTests: XCTestCase {
                           note: "", repoUrl: nil, origin: nil, minutes: nil)
     }
 
+    func testSevenBaysWithRelayMatchingIDs() {
+        XCTAssertEqual(HQDivision.allCases.count, 7)
+        // Bay ids must equal the relay's `division` tags exactly.
+        XCTAssertEqual(HQDivision.allCases.map(\.id),
+                       ["webapps", "saas", "ecommerce", "automations",
+                        "consulting", "accounting", "legal"])
+    }
+
     func testDivisionKeywordMatchIsHonest() {
         let saas = initiative(title: "Launch a SaaS metrics dashboard", pitch: "")
         XCTAssertTrue(HQDivision.saas.matches(saas))
@@ -84,6 +92,19 @@ final class HQDivisionsFloorTests: XCTestCase {
         let unrelated = initiative(title: "Untitled", pitch: "A mystery")
         XCTAssertTrue(HQDivision.allCases.allSatisfy { !$0.matches(unrelated) },
                       "no division may claim work that never mentions it")
+    }
+
+    func testRealDivisionTagBeatsTheKeywordHeuristic() {
+        var tagged = initiative(title: "SaaS privacy policy generator", pitch: "")
+        tagged.division = "legal"
+        XCTAssertTrue(HQDivision.legal.owns(tagged))
+        XCTAssertFalse(HQDivision.saas.owns(tagged),
+                       "a relay tag must beat keyword matches on other bays")
+
+        // Untagged (legacy) initiatives still fall back to keywords.
+        let legacy = initiative(title: "Launch a SaaS metrics dashboard", pitch: "")
+        XCTAssertTrue(HQDivision.saas.owns(legacy))
+        XCTAssertFalse(HQDivision.legal.owns(legacy))
     }
 
     func testDivisionTapRoutingRoundTrips() {

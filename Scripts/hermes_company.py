@@ -13,6 +13,9 @@ import json
 import os
 import re
 import secrets
+import shutil
+import signal
+import subprocess
 import time
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -37,6 +40,13 @@ DEFAULT_CONFIG = {
     "scout_sources": "Hacker News, Product Hunt, GitHub trending, App Store charts, Reddit",
     "meeting_gap_minutes": 90,   # how often the org holds an internal standup
     "platform": "ios",   # production line target: ios | ipados | macos
+    # P&L calibration knob: rough $ per agent call for the dashboard's honest
+    # "estimated spend" — tune when real billing data says otherwise.
+    "cost_per_call": 0.15,
+    # WIP cap: how many initiatives advance per heartbeat when several are
+    # active at once (owner directives can stack). Bounds spend per tick;
+    # the rotation cursor keeps it fair.
+    "max_turns_per_tick": 2,
 }
 
 # What the production line builds. The owner switches this from the HQ's
@@ -65,6 +75,648 @@ def platform_directive(state: dict) -> str:
     key = (state.get("config") or {}).get("platform") or "ios"
     return PLATFORM_DIRECTIVES.get(key, PLATFORM_DIRECTIVES["ios"])
 
+
+# ───────────────────────── Division Charters ─────────────────────────
+# The seven bays on the HQ's Divisions Floor. An initiative tagged with a
+# division runs that division's charter: its toolkit rides the build prompts
+# and its specialist gate judges the deliverables before Demo Day (the
+# generalization of the games studio's proven Fun Gate + iteration loop).
+# division == "" (legacy/none) → the generic pipeline, completely unchanged.
+# Display names mirror HQDivision.name in the app — both parse as prefixes.
+DIVISION_NAMES = {
+    "webapps": "Webapps",
+    "saas": "SaaS",
+    "ecommerce": "E-Commerce",
+    "automations": "Workflow Automations",
+    "consulting": "Business Consulting",
+    "accounting": "Accounting",
+    "legal": "Legal",
+    "growth": "Growth",
+}
+
+# How many division-gate rejections before an initiative is blocked for the
+# owner (mirror of the games studio's MAX_REJECTIONS).
+MAX_DIVISION_REJECTIONS = 3
+
+# The disclaimer every Legal-division document must carry. The toolkit dictates
+# it and check_legal_banner greps for it — one constant so they can never drift.
+LEGAL_BANNER = ("Drafted by AI — not legal advice. Have a licensed attorney "
+                "review before relying on this.")
+
+
+def _deliverable_files(outdir: Path) -> list[Path]:
+    """Non-hidden files under an initiative dir (skips .demo etc.)."""
+    outdir = Path(outdir)
+    return [p for p in sorted(outdir.rglob("*"))
+            if p.is_file()
+            and not any(part.startswith(".")
+                        for part in p.relative_to(outdir).parts)]
+
+
+def check_legal_banner(outdir: Path) -> str:
+    """Hard code-side floor for the Counsel Gate: every legal document must
+    carry the AI-drafted disclaimer banner. '' when clean, else the reason."""
+    docs = [p for p in _deliverable_files(outdir)
+            if p.suffix.lower() in (".md", ".txt", ".html")]
+    if not docs:
+        return "no legal documents found in the deliverables"
+    missing = [p.name for p in docs
+               if LEGAL_BANNER not in p.read_text(errors="replace")]
+    if missing:
+        return ("missing the required AI-drafted disclaimer banner: "
+                + ", ".join(missing[:5]))
+    return ""
+
+
+_MD_TABLE_RE = re.compile(r"^\s*\|.+\|", re.M)
+
+
+def check_accounting_data(outdir: Path) -> str:
+    """Hard code-side floor for the Accuracy Gate: a financial deliverable
+    needs a verifiable data artifact — a .csv/.xlsx file, or a markdown file
+    containing a table. '' when found."""
+    for p in _deliverable_files(outdir):
+        suffix = p.suffix.lower()
+        if suffix in (".csv", ".xlsx"):
+            return ""
+        if suffix == ".md" and _MD_TABLE_RE.search(p.read_text(errors="replace")):
+            return ""
+    return "no verifiable data artifact"
+
+
+# A shortish line (optionally a heading) reading "Sources"/"References".
+_SOURCES_RE = re.compile(r"(?im)^\s*#{0,6}\s*(sources|references)\b.{0,60}$")
+
+
+def check_consulting_sources(outdir: Path) -> str:
+    """Hard code-side floor for the Evidence Gate: the main report must have a
+    Sources/References section. '' when present."""
+    reports = [p for p in _deliverable_files(outdir) if p.suffix.lower() == ".md"]
+    if not reports:
+        return "no report found in the deliverables"
+    # ponytail: the biggest markdown file is "the main deliverable" — good
+    # enough until reports grow a manifest.
+    main = max(reports, key=lambda p: p.stat().st_size)
+    if _SOURCES_RE.search(main.read_text(errors="replace")):
+        return ""
+    return f"no Sources/References section in the main deliverable ({main.name})"
+
+
+# Adding a division's charter is DATA, not code: give it a name, an output
+# line, a toolkit block (appended to build prompts), a gate (specialist judge
+# with the GATE: APPROVED/REJECTED contract), a deliverable hint, set
+# deploy=True if the artifacts dir ships to Vercel after the gate approves,
+# and optionally a check(outdir) -> reason — a hard code-side floor that
+# auto-REJECTS (without buying a judge turn) when it returns a reason.
+DIVISION_CHARTERS = {
+    "webapps": {
+        "name": "Webapps",
+        "output": "Polished, deployable web apps that go live on a real URL.",
+        "toolkit": (
+            "DIVISION TOOLKIT — Webapps:\n"
+            "This initiative belongs to the Webapps division: the deliverable IS "
+            "a deployable web app, not a native app. Build it in the project dir "
+            "as either a static site (an index.html at the project ROOT that "
+            "opens and works as-is — plain HTML/CSS/JS, no build step) or a "
+            "Next.js app (package.json at the root, `npm install && npm run "
+            "build` verified green). After the division gate approves, the "
+            "project dir is deployed to Vercel EXACTLY as-is with `vercel "
+            "deploy` — so keep the root clean and deployable: no missing "
+            "dependencies, no local absolute paths, no server the deploy can't "
+            "run. Make it mobile-responsive with real logic and real persistence "
+            "(localStorage is fine for a client-only app), and open it yourself "
+            "to verify it renders before you report."),
+        "gate": {
+            "role": "webapps_gate",
+            "title": "Ship Gate",
+            "prompt_intro": (
+                "You are the Webapps division's Ship Gate — the specialist judge "
+                "who decides whether this web app may go LIVE on a public URL "
+                "under the Chairman's name. Judge it like a paying visitor "
+                "landing cold: does the entry file load and work as-is, is every "
+                "visible control wired (no dead buttons, stubs, TODOs, or "
+                "placeholder text), does it hold up on a phone-sized screen, and "
+                "does it look professional enough that a stranger would trust "
+                "it? A web app that would embarrass the owner in public is a "
+                "rejection — be specific about why."),
+        },
+        "deliverable_hint": ("a deployable web app: a static index.html at the "
+                             "project root, or a Next.js app with package.json"),
+        "deploy": True,
+    },
+    "saas": {
+        "name": "SaaS",
+        "output": "Subscription-shaped web products that earn recurring revenue.",
+        "toolkit": (
+            "DIVISION TOOLKIT — SaaS:\n"
+            "This initiative belongs to the SaaS division: the deliverable is a "
+            "deployable subscription-shaped web product — a Next.js app "
+            "(package.json at the project root, `npm run build` verified green) "
+            "or a static index.html app. After the division gate approves, the "
+            "project dir is deployed to Vercel exactly as-is, so the root must "
+            "be deployable with no missing dependencies. Supabase is available "
+            "via MCP for auth and database — use it for accounts and user data "
+            "when it works; if it is unreachable or unconfigured, DEGRADE "
+            "HONESTLY to local storage and say so plainly in your summary — "
+            "never fake a backend. Design around recurring value: accounts (or "
+            "honest local profiles), persistent user data, and a clear "
+            "free-vs-paid seam a payment provider can slot into later."),
+        "gate": {
+            "role": "saas_gate",
+            "title": "Launch Gate",
+            "prompt_intro": (
+                "You are the SaaS division's Launch Gate — the specialist judge "
+                "who decides whether this product is ready to run as a live "
+                "subscription-shaped service. Beyond basic polish, judge the "
+                "SaaS fundamentals: do accounts and data actually persist "
+                "(Supabase wired, or an HONEST local fallback that admits it), "
+                "does the core value work end-to-end on a fresh visit, is there "
+                "a coherent free-vs-paid seam, and is nothing faked — a mocked "
+                "backend dressed up as real is an automatic rejection."),
+        },
+        "deliverable_hint": ("a deployable web product with working accounts/"
+                             "data (Supabase or an honest local fallback) and a "
+                             "clear free-vs-paid seam"),
+        "deploy": True,
+    },
+    "automations": {
+        "name": "Workflow Automations",
+        "output": "Working automations a client can run — scripts, watchers, scheduled jobs.",
+        "toolkit": (
+            "DIVISION TOOLKIT — Workflow Automations:\n"
+            "This initiative belongs to the Automations division: the "
+            "deliverable is a working automation a client can run — a script, "
+            "watcher, scheduled job, or small pipeline (Python or shell "
+            "preferred; keep dependencies minimal). It must be genuinely "
+            "runnable on this Mac: include a README with setup + run "
+            "instructions, an example config, and sample input/output. RUN it "
+            "yourself end-to-end on the sample data before you report — an "
+            "automation that was never executed is not done. Fail loudly (clear "
+            "errors, non-zero exit codes), never silently."),
+        "gate": {
+            "role": "automations_gate",
+            "title": "Reliability Gate",
+            "prompt_intro": (
+                "You are the Automations division's Reliability Gate — the "
+                "specialist judge who decides whether a client could run this "
+                "automation unattended. Judge it like an ops engineer: does the "
+                "README get a stranger from zero to a successful run, does the "
+                "automation actually execute against the sample data (run it "
+                "yourself), does it fail loudly with clear errors instead of "
+                "silently, and are the moving parts — config, credentials, "
+                "schedules — documented honestly? An automation that was never "
+                "executed, or that hides failure, is a rejection."),
+        },
+        "deliverable_hint": ("a runnable automation: script(s), a README with "
+                             "setup + run instructions, an example config, and "
+                             "sample input/output proven by a real run"),
+        "deploy": False,
+    },
+    "ecommerce": {
+        # ponytail: parked — charter shell only, so the bay tags initiatives and
+        # the structure is ready; a real toolkit/gate lands when the division opens.
+        "name": "E-Commerce",
+        "output": ("Storefronts that turn browsers into buyers. (parked — "
+                   "minimal charter until this division opens)"),
+        "toolkit": "",
+        "gate": None,
+        "deliverable_hint": "a storefront web app (parked — generic pipeline for now)",
+        "deploy": False,
+        "parked": True,
+    },
+    "consulting": {
+        "name": "Business Consulting",
+        "output": "Cited research reports the Chairman can act on with real money.",
+        "toolkit": (
+            "DIVISION TOOLKIT — Business Consulting:\n"
+            "This initiative belongs to the Consulting division: the deliverable "
+            "is a cited research report in markdown. Every factual claim needs a "
+            "numbered citation [1], [2], … resolving to a mandatory \"Sources\" "
+            "section that lists real URLs — a report without its Sources section "
+            "is automatically rejected. The deep-research tooling on this Mac "
+            "(web search / fetch skills) may be used to gather evidence — use it "
+            "rather than writing from memory. Numbers, named competitors, and "
+            "market claims all need a source; a recommendation is only as good "
+            "as its evidence."),
+        "gate": {
+            "role": "evidence_gate",
+            "title": "Evidence Gate",
+            "prompt_intro": (
+                "You are the Consulting division's Evidence Gate — the "
+                "fact-checker between the team and the Chairman. Spot-check the "
+                "report: pick the load-bearing claims (the numbers and facts the "
+                "recommendation stands on) and verify each maps to a listed "
+                "source that plausibly supports it. An uncited load-bearing "
+                "claim, a citation that does not support its claim, or a "
+                "missing/padded Sources section is a rejection — the Chairman "
+                "acts on these reports with real money."),
+        },
+        "deliverable_hint": ("a cited markdown research report: numbered "
+                             "citations on every factual claim and a Sources "
+                             "section listing real URLs"),
+        "deploy": False,
+        "check": check_consulting_sources,
+    },
+    "accounting": {
+        "name": "Accounting",
+        "output": "Financial workbooks and reports built ONLY from real, sourced inputs.",
+        "toolkit": (
+            "DIVISION TOOLKIT — Accounting:\n"
+            "This initiative belongs to the Accounting division: the deliverable "
+            "is a financial workbook or report — a real .xlsx or .csv data file "
+            "PLUS a markdown summary. Build ONLY from real inputs that exist in "
+            "the artifacts dir or the company's actual state — NEVER invent, "
+            "estimate, or fabricate a figure; a made-up number is worse than no "
+            "number. Every report MUST contain an \"INPUTS\" section listing "
+            "exactly where each figure came from (file, state field, or "
+            "owner-provided value). If the real inputs don't exist, say so "
+            "honestly and ship the workbook structure with the inputs marked as "
+            "needed from the owner — never fill a gap with plausible-looking "
+            "numbers."),
+        "gate": {
+            "role": "accuracy_gate",
+            "title": "Accuracy Gate",
+            "prompt_intro": (
+                "You are the Accounting division's Accuracy Gate — an auditor, "
+                "not a proofreader. Take the stated inputs in the report's "
+                "INPUTS section and independently RE-COMPUTE the headline totals "
+                "yourself; any mismatch between your arithmetic and the report's "
+                "figures is a rejection. Any figure with no stated source is a "
+                "rejection. A report built on invented or untraceable numbers is "
+                "worthless to the Chairman — verify, don't trust."),
+        },
+        "deliverable_hint": ("a financial workbook (.xlsx or .csv) plus a "
+                             "markdown summary with an INPUTS section sourcing "
+                             "every figure"),
+        "deploy": False,
+        "check": check_accounting_data,
+    },
+    "growth": {
+        "name": "Growth",
+        "output": ("Launch kits that SELL shipped products — App Store copy, "
+                   "landing pages, and post drafts the owner approves."),
+        "toolkit": (
+            "DIVISION TOOLKIT — Growth:\n"
+            "This initiative belongs to the Growth division: the deliverable is "
+            "a LAUNCH KIT for one of the company's shipped products —\n"
+            "• appstore.md: App Store title, subtitle, keywords, and description "
+            "copy tuned for search and conversion;\n"
+            "• a landing page (index.html at the project root, deployable as-is "
+            "— it goes to Vercel after the gate approves);\n"
+            "• social.md: launch posts for X/Reddit/etc., every one headed "
+            "'DRAFT — owner posts this'.\n"
+            "IRON RULE — you NEVER post, publish, or submit anything to any "
+            "platform yourself; every outward-facing word is a DRAFT the owner "
+            "sends under his own hand. And every claim must be TRUE of the "
+            "actual product as built — no invented testimonials, download "
+            "numbers, review quotes, or features it doesn't have. Read the "
+            "actual product's deliverables before you write a word about it."),
+        "gate": {
+            "role": "conversion_gate",
+            "title": "Conversion Gate",
+            "prompt_intro": (
+                "You are the Growth division's Conversion Gate — the truth "
+                "filter between the company's marketing and the public. Check "
+                "every claim in the kit against the ACTUAL product: an invented "
+                "testimonial, download figure, review quote, or feature the "
+                "product doesn't have is an automatic rejection — dishonest "
+                "marketing under the Chairman's name is worse than none. Then "
+                "judge conversion craft: would the App Store copy make a "
+                "stranger tap Get, does the landing page load and sell as-is, "
+                "and is every social post clearly marked as a DRAFT for the "
+                "owner (anything written as if already posted is a rejection)?"),
+        },
+        "deliverable_hint": ("a launch kit: appstore.md copy, a deployable "
+                             "landing page, and DRAFT-marked social posts — all "
+                             "claims true of the actual product"),
+        "deploy": True,
+    },
+    "legal": {
+        "name": "Legal",
+        "output": ("Legal documents for the company's OWN products — policies, "
+                   "terms, compliance checklists, license and claim reviews."),
+        "toolkit": (
+            "DIVISION TOOLKIT — Legal:\n"
+            "This initiative belongs to the Legal division: the deliverables are "
+            "legal documents for the COMPANY'S OWN products — privacy policies, "
+            "terms of use, App Store compliance checklists, license reviews, and "
+            "marketing-claim risk flags. These are INTERNAL documents for the "
+            "Chairman's portfolio, NEVER client-facing work — we do not practice "
+            "law for others. Write them as markdown files in the project dir. "
+            "EVERY document MUST begin with this exact visible banner as its "
+            f"first body line:\n\"{LEGAL_BANNER}\"\n"
+            "A document without that banner is automatically rejected. Be "
+            "specific to the actual product (name, data it collects, contact "
+            "email, jurisdiction) — never leave [PLACEHOLDER] blanks, and flag "
+            "plainly anything that needs the owner's input."),
+        "gate": {
+            "role": "counsel_gate",
+            "title": "Counsel Gate",
+            "prompt_intro": (
+                "You are the Legal division's Counsel Gate — a second counsel "
+                "reviewing the first draft. Check every document for: risky or "
+                "overreaching claims (warranties, guarantees, 'fully compliant' "
+                "assertions we cannot back); missing mandatory clauses — data "
+                "collection disclosure, user contact information, governing "
+                "jurisdiction; and the required AI-drafted disclaimer banner at "
+                "the top of EVERY document — any document missing it is an "
+                "automatic rejection. These are internal documents for the "
+                "company's own products; anything that reads like advice to a "
+                "third-party client is also a rejection."),
+        },
+        "deliverable_hint": ("internal legal documents in markdown, each opening "
+                             "with the AI-drafted disclaimer banner"),
+        "deploy": False,
+        "check": check_legal_banner,
+    },
+}
+
+# "[Webapps division] build X" / "[Business Consulting division] …" → division.
+# Accepts bay display names AND ids, case-insensitive.
+_DIVISION_ALIASES = {div_id: div_id for div_id in DIVISION_NAMES}
+_DIVISION_ALIASES.update({name.lower(): div_id for div_id, name in DIVISION_NAMES.items()})
+
+_DIVISION_PREFIX_RE = re.compile(r"^\s*\[\s*([^\]]+?)\s+division\s*\]\s*", re.IGNORECASE)
+
+
+def parse_division_prefix(text: str) -> tuple[str, str]:
+    """'[Webapps division] build a tip calculator' → ('webapps', 'build a tip
+    calculator'). No prefix, or an unknown bay name → ('', text unchanged)."""
+    text = (text or "").strip()
+    match = _DIVISION_PREFIX_RE.match(text)
+    if not match:
+        return "", text
+    division = _DIVISION_ALIASES.get(match.group(1).strip().lower(), "")
+    if not division:
+        return "", text
+    return division, text[match.end():].strip()
+
+
+def division_charter(init: dict) -> dict:
+    """The initiative's division charter, or {} (legacy/none/uncharted)."""
+    return DIVISION_CHARTERS.get(init.get("division") or "", {})
+
+
+def division_toolkit(init: dict) -> str:
+    """The charter toolkit block for build prompts ('' when none)."""
+    toolkit = division_charter(init).get("toolkit", "")
+    return f"\n\n{toolkit}" if toolkit else ""
+
+
+def build_directive(state: dict, init: dict) -> str:
+    """What a build turn targets: a division's toolkit REPLACES the generic
+    production-line platform directive (a Webapps build must never be told to
+    ship a SwiftUI iPhone app)."""
+    return division_charter(init).get("toolkit", "") or platform_directive(state)
+
+
+def gate_passed(text: str) -> bool:
+    """Division-gate verdict: the reply ends with 'GATE: APPROVED' or
+    'GATE: REJECTED' — the later marker wins (the games studio's proven
+    Fun Gate contract, generalized)."""
+    upper = (text or "").upper()
+    approved = upper.rfind("GATE: APPROVED")
+    rejected = upper.rfind("GATE: REJECTED")
+    return approved != -1 and approved > rejected
+
+
+def parse_gate_reasons(text: str) -> list[str]:
+    """Bullet/numbered reasons the judge gave for the verdict — up to 4."""
+    reasons: list[str] = []
+    for raw in (text or "").splitlines():
+        line = raw.strip()
+        if not re.match(r"^[-*•\d]", line):
+            continue
+        line = re.sub(r"^[-*•\d.)\s]+", "", line).strip()
+        if re.match(r"(?i)gate:\s*(approved|rejected)", line) or len(line) < 4:
+            continue
+        reasons.append(line[:100])
+        if len(reasons) >= 4:
+            break
+    return reasons
+
+
+def division_iteration_feedback(init: dict) -> str:
+    """The learning loop: after a division-gate rejection the next build turns
+    see exactly WHY the last version failed instead of iterating blind
+    (mirrors the games studio's iteration_feedback)."""
+    verdict = init.get("division_gate") or {}
+    if verdict.get("verdict") != "REJECTED":
+        return ""
+    gate = division_charter(init).get("gate") or {}
+    title = gate.get("title", "Division Gate")
+    reasons = [f"- {r}" for r in verdict.get("reasons", [])] or ["- (no reasons recorded)"]
+    return (f"\nPREVIOUS ITERATION FEEDBACK — the {title} rejected the last "
+            f"version because:\n" + "\n".join(reasons) +
+            "\nFix these specifically in this pass.\n")
+
+
+def divisions_summary(state: dict) -> list[dict]:
+    """Per-division rollup for the app's Divisions Floor: every bay in stable
+    floor order (zeros included — the app renders the whole floor). calls /
+    est_cost give the honest spend side of the P&L (estimated: calls × the
+    config's cost_per_call knob); rejections is the division-gate learning
+    curve — watch it fall as the lessons compound."""
+    cost_per_call = float((state.get("config") or {}).get(
+        "cost_per_call", DEFAULT_CONFIG["cost_per_call"]))
+    out = []
+    for div_id, name in DIVISION_NAMES.items():
+        inits = [i for i in state.get("initiatives", [])
+                 if i.get("division") == div_id]
+        calls = sum(i.get("calls_used", 0) for i in inits)
+        out.append({
+            "id": div_id,
+            "name": name,
+            "active": sum(1 for i in inits if i["stage"] not in TERMINAL_STAGES),
+            "shipped": sum(1 for i in inits if i["stage"] == "shipped"),
+            "live_urls": [i["live_url"] for i in inits if i.get("live_url")],
+            "calls": calls,
+            "est_cost": round(calls * cost_per_call, 2),
+            "rejections": sum(i.get("division_rejections", 0) for i in inits),
+        })
+    return out
+
+
+def initiative_outdir(init: dict, artifacts_root: Path) -> Path:
+    """Where this initiative's deliverables live. Adopted portfolio assets
+    carry a `workdir` (the owner's EXISTING repo — the team works in place);
+    everything else gets its own folder under the artifacts root."""
+    workdir = init.get("workdir") or ""
+    return Path(workdir) if workdir else artifacts_root / initiative_dirname(init)
+
+
+def adopt_portfolio(state: dict, path: str, name: str = "",
+                    instruction: str = "", division: str = "") -> dict:
+    """Bring one of the owner's EXISTING apps under company maintenance: an
+    initiative bound to the real repo dir (workdir), entering at planning —
+    the owner adopting it IS the greenlight, so no scout/board/gate1 theater.
+    Raises ValueError when the path isn't a real folder."""
+    folder = Path(path).expanduser()
+    if not folder.is_dir():
+        raise ValueError(f"not a folder on this Mac: {path}")
+    title = (name or folder.name).strip()[:80]
+    init = new_initiative(
+        f"Portfolio: {title}",
+        instruction.strip() or ("Maintain and improve this shipped app: fix "
+                                "the most important issues, address user "
+                                "complaints, and raise its quality."))
+    init["origin"] = "owner"
+    init["note"] = "Adopted portfolio asset — the team works in the app's own repo."
+    init["workdir"] = str(folder)
+    init["division"] = division if division in DIVISION_CHARTERS else ""
+    init["stage"] = "planning"
+    state.setdefault("initiatives", []).insert(0, init)
+    log_event(state, f"adopted into the portfolio: {title}")
+    return init
+
+
+# ─────────────────── institutional memory (the lessons loop) ───────────────────
+# Every initiative that ENDS (shipped, killed, blocked) leaves a lesson built
+# from what the pipeline actually recorded — gate rejection reasons, QA rounds,
+# budget burn, the owner's note. Deterministic (no LLM call: the reasons were
+# already extracted by the gates), so it can run synchronously inside apply_gate
+# and tick. Scout, planning, and build prompts read the relevant ones back —
+# initiative #40 must be smarter than initiative #1.
+
+LESSONS_CAP = 100          # newest kept; older history lives in the vault notes
+LESSONS_IN_PROMPT = 5
+
+
+def compose_lesson(init: dict) -> str:
+    """One-paragraph post-mortem from the initiative's own recorded facts."""
+    outcome = init.get("stage", "")
+    parts = [f"'{init.get('title', '?')}' ended {outcome} "
+             f"after {init.get('calls_used', 0)} agent calls"]
+    if init.get("review_rounds"):
+        parts.append(f"{init['review_rounds']} QA rounds")
+    gate = (init.get("division_gate") or {})
+    if init.get("division_rejections"):
+        title = (division_charter(init).get("gate") or {}).get("title", "division gate")
+        reasons = "; ".join(gate.get("reasons", [])[:3]) or "no reasons recorded"
+        parts.append(f"the {title} rejected it ×{init['division_rejections']} "
+                     f"(last: {reasons})")
+    note = (init.get("note") or "").strip()
+    if note:
+        parts.append(f"note: {note[:200]}")
+    return ". ".join(parts) + "."
+
+
+def record_lesson(state: dict, init: dict) -> dict:
+    """File (or refresh) the post-mortem for one ended initiative. Keyed by
+    initiative id so a blocked→resumed→blocked cycle updates one lesson
+    instead of stuttering duplicates."""
+    lessons = state.setdefault("lessons", [])
+    lessons[:] = [l for l in lessons if l.get("initiative_id") != init["id"]]
+    lesson = {
+        "id": secrets.token_hex(4),
+        "initiative_id": init["id"],
+        "title": init.get("title", ""),
+        "division": init.get("division", ""),
+        "outcome": init.get("stage", ""),
+        "text": compose_lesson(init),
+        "ts": time.time(),
+    }
+    lessons.append(lesson)
+    del lessons[:-LESSONS_CAP]
+    log_event(state, f"lesson recorded ({lesson['outcome']}): {lesson['title']}")
+    return lesson
+
+
+def lessons_block(state: dict, division: str = "", cap: int = LESSONS_IN_PROMPT) -> str:
+    """The prompt block that makes the org compound: the newest lessons, the
+    matching division's first. '' until there's history."""
+    lessons = state.get("lessons") or []
+    ranked = sorted(lessons, key=lambda l: (l.get("division") != division,
+                                            -l.get("ts", 0.0)))
+    picks = ranked[:cap]
+    if not picks:
+        return ""
+    lines = "\n".join(f"- [{l.get('outcome', '?')}] {l.get('text', '')}" for l in picks)
+    return ("\n\nLESSONS FROM PAST INITIATIVES (institutional memory — do not "
+            f"repeat these mistakes; repeat what shipped):\n{lines}\n")
+
+
+# ─────────────────── ship-to-URL (webapps / saas deploy) ───────────────────
+
+# How long a `vercel deploy` may run (a Next.js build can take minutes).
+VERCEL_DEPLOY_TIMEOUT = 600
+
+
+def run_killable(command: list[str], timeout: int, cwd: str | None = None) -> subprocess.CompletedProcess:
+    """subprocess.run with a timeout that kills the WHOLE process tree (own
+    process group + killpg) — the relay's run_killable semantics, local so a
+    hung deploy can't orphan node children that thrash the Mac."""
+    proc = subprocess.Popen(command, text=True, stdout=subprocess.PIPE,
+                            stderr=subprocess.PIPE, cwd=cwd,
+                            start_new_session=True)
+    try:
+        stdout, stderr = proc.communicate(timeout=timeout)
+        return subprocess.CompletedProcess(command, proc.returncode, stdout, stderr)
+    except subprocess.TimeoutExpired:
+        try:
+            os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+        except (ProcessLookupError, PermissionError, OSError):
+            proc.kill()
+        try:
+            proc.communicate(timeout=15)
+        except subprocess.TimeoutExpired:
+            pass
+        raise
+
+
+def find_vercel() -> str | None:
+    """Absolute path to the vercel CLI, PATH-independent (launchd strips PATH;
+    on this Mac vercel lives in ~/.npm-global/bin). None when not installed."""
+    search = os.pathsep.join(
+        [p for p in os.environ.get("PATH", "").split(os.pathsep) if p]
+        + [str(Path.home() / ".npm-global" / "bin"),
+           str(Path.home() / ".local" / "bin"),
+           "/usr/local/bin", "/opt/homebrew/bin"])
+    return shutil.which("vercel", path=search)
+
+
+_VERCEL_URL_RE = re.compile(r"https://[A-Za-z0-9.-]+\.vercel\.app[^\s\"'<>]*")
+
+
+def parse_vercel_url(output: str) -> str:
+    """The deployed URL from vercel CLI output — the LAST *.vercel.app match
+    (the CLI prints the final deployment/production URL last; inspect links
+    are vercel.com and never match)."""
+    matches = _VERCEL_URL_RE.findall(output or "")
+    return matches[-1] if matches else ""
+
+
+def deploy_initiative(state: dict, init: dict, outdir: Path, prod: bool = False) -> str:
+    """Ship-to-URL. Default is a PREVIEW deploy (division gate approval) —
+    nothing goes to production under the Chairman's name before HIS final
+    gate. prod=True (after the owner approves gate2) promotes to the real
+    production URL. Deploy is DELIVERY, not quality — any failure logs an
+    honest event and returns '' while the initiative proceeds; a verified URL
+    lands in init['live_url']."""
+    vercel = find_vercel()
+    if not vercel:
+        log_event(state, f"deploy skipped — vercel CLI not installed (run "
+                         f"`npm i -g vercel && vercel login` on the Mac): {init['title']}")
+        return ""
+    command = [vercel, "deploy", "--yes"] + (["--prod"] if prod else [])
+    try:
+        result = run_killable(command,
+                              timeout=VERCEL_DEPLOY_TIMEOUT, cwd=str(outdir))
+    except (OSError, subprocess.TimeoutExpired):
+        log_event(state, f"deploy skipped — vercel timed out or crashed; run "
+                         f"`vercel login` on the Mac and retry: {init['title']}")
+        return ""
+    url = parse_vercel_url((result.stdout or "") + "\n" + (result.stderr or ""))
+    if result.returncode != 0 or not url:
+        log_event(state, f"deploy skipped — run `vercel login` on the Mac "
+                         f"(vercel exited {result.returncode} without a URL): "
+                         f"{init['title']}")
+        return ""
+    init["live_url"] = url
+    log_event(state, f"{'Live' if prod else 'Preview'} at {url} — {init['title']}")
+    return url
+
+
 GATE_STAGES = ("gate1", "gate2")
 BLOCKED_STAGE = "blocked"
 PAUSED_STAGES = (*GATE_STAGES, BLOCKED_STAGE)
@@ -85,6 +737,7 @@ def new_state() -> dict:
         "task_mode": False,    # "Kanban List" toggle: drop own ideas, work the owner's list
         "asks": [],            # "Ask the company" Q&A (leaders answer, CEO synthesizes)
         "schedules": [],       # recurring owner automations (directives / asks) — the Cron
+        "lessons": [],         # institutional memory: post-mortems of ended initiatives
     }
 
 
@@ -265,18 +918,22 @@ def meeting_turn_prompt(meeting: dict, role: str, transcript: str, state: dict) 
 
 
 def new_schedule(title: str, kind: str, text: str, cadence: str,
-                 at_hour: int = 9, at_minute: int = 0, weekday: int = 0) -> dict:
-    """A recurring owner automation. kind = 'directive' (pitch an idea) or 'ask'
-    (ask the company). cadence = 'hourly' | 'daily' | 'weekly'."""
+                 at_hour: int = 9, at_minute: int = 0, weekday: int = 0,
+                 at_ts: float = 0.0) -> dict:
+    """An owner automation. kind = 'directive' (pitch an idea) or 'ask'
+    (ask the company). cadence = 'hourly' | 'daily' | 'weekly' | 'once'
+    ('once' fires a single time at `at_ts` — how a scheduled meeting actually
+    convenes at its calendar time — then run_schedules disables it)."""
     return {
         "id": secrets.token_hex(4),
         "title": title.strip() or text.strip()[:40] or "Automation",
-        "kind": kind if kind in ("directive", "ask", "meeting") else "directive",
+        "kind": kind if kind in ("directive", "ask", "meeting", "board_packet") else "directive",
         "text": text.strip(),
-        "cadence": cadence if cadence in ("hourly", "daily", "weekly") else "daily",
+        "cadence": cadence if cadence in ("hourly", "daily", "weekly", "once") else "daily",
         "at_hour": max(0, min(23, int(at_hour))),
         "at_minute": max(0, min(59, int(at_minute))),
         "weekday": max(0, min(6, int(weekday))),   # Monday=0 … Sunday=6
+        "at_ts": float(at_ts),                     # one-shot fire time (cadence 'once')
         "enabled": True,
         # Stamp creation time so the first fire is the NEXT scheduled occurrence,
         # not an immediate catch-up of a slot that already passed today.
@@ -292,6 +949,11 @@ def schedule_last_occurrence(schedule: dict, now: float) -> float:
     minute = schedule.get("at_minute", 0)
     cadence = schedule.get("cadence", "daily")
 
+    if cadence == "once":
+        # Due exactly once: at_ts is the occurrence the moment it passes
+        # (last_fired was stamped at creation, before at_ts). 0.0 = never.
+        at_ts = float(schedule.get("at_ts", 0.0))
+        return at_ts if at_ts <= now else 0.0
     if cadence == "hourly":
         occurrence = moment.replace(minute=minute, second=0, microsecond=0)
         if occurrence > moment:
@@ -361,6 +1023,27 @@ def ask_synthesis_prompt(question: str, transcript: str) -> str:
     return role_prompt("ceo", body)
 
 
+def board_packet_prompt(state: dict, revenue_brief: str) -> str:
+    """The CFO's Sunday one-pager for the Chairman, from REAL state only."""
+    inits = state.get("initiatives", [])
+    shipped = [i["title"] for i in inits if i.get("stage") == "shipped"]
+    pipeline = [f"{i['title']} ({i['stage']})" for i in inits
+                if i.get("stage") not in TERMINAL_STAGES]
+    waiting = [i["title"] for i in inits if i.get("stage") in PAUSED_STAGES]
+    body = (
+        "Write the owner's ONE-PAGE weekly board packet as markdown with exactly "
+        "these sections: ## Shipped, ## Revenue, ## Pipeline, ## Risks, ## Next Week.\n"
+        "Use ONLY the real company state below — never invent numbers, products, or "
+        "progress. If a section has nothing real to report, say so plainly: an honest "
+        "'nothing shipped this week' beats padding.\n"
+        f"Shipped (all time): {', '.join(shipped) or 'nothing yet'}.\n"
+        f"Pipeline: {', '.join(pipeline) or 'empty'}.\n"
+        f"Waiting on the Chairman (gates/blocked): {', '.join(waiting) or 'none'}.\n"
+        f"Revenue telemetry: {revenue_brief or 'not connected — say so honestly'}.\n"
+    )
+    return role_prompt("cfo", body)
+
+
 def new_initiative(title: str, pitch: str, score: dict | None = None) -> dict:
     return {
         "id": secrets.token_hex(4),
@@ -375,6 +1058,8 @@ def new_initiative(title: str, pitch: str, score: dict | None = None) -> dict:
         "artifacts": [],  # file paths produced during execution
         "note": "",
         "iteration": 0,   # bumped each time the owner asks for more work
+        "division": "",   # Divisions Floor bay this belongs to ("" = generic pipeline)
+        "live_url": "",   # deployed URL once the webapps/saas ship-to-URL step lands
     }
 
 
@@ -396,15 +1081,18 @@ def seed_initiative(state: dict, text: str, title: str | None = None) -> dict:
     """Owner pitched an idea directly (e.g. a voice memo). Seed it as an
     initiative so the team researches it, debates it, and brings it to the
     gate — the same pipeline as a scouted idea, but flagged as the Chairman's
-    directive (the board treats it as a mandate, not a maybe)."""
-    text = (text or "").strip()
+    directive (the board treats it as a mandate, not a maybe). A
+    '[<Bay> division]' prefix routes it to that division's charter."""
+    division, text = parse_division_prefix(text)
     raw = (title or text).strip()
     headline = re.split(r"[.\n]", raw, maxsplit=1)[0].strip()[:80] or "Owner directive"
     init = new_initiative(headline, text)
     init["note"] = "Owner directive (voice memo)"
     init["origin"] = "owner"
+    init["division"] = division
     state.setdefault("initiatives", []).insert(0, init)
-    log_event(state, f"owner directive: {headline}")
+    tag = f" [{DIVISION_NAMES[division]}]" if division else ""
+    log_event(state, f"owner directive: {headline}{tag}")
     return init
 
 
@@ -598,10 +1286,17 @@ def run_scout(state: dict, runner) -> dict | None:
         f"LIVE PORTFOLIO PERFORMANCE (what our shipped products actually earn "
         f"— double down on the patterns that make money): {performance}\n"
         if performance else "")
+    feedback = (state.get("asc_brief") or "").strip()
+    feedback_block = (
+        "REAL USER FEEDBACK on shipped portfolio apps (recent 1-3★ App Store "
+        "reviews — a paying user's complaint is a proven wedge; pitch the fix "
+        f"or the product it points to):\n{feedback}\n"
+        if feedback else "")
     body = (
         f"Scan current market trends across: {sources}. "
         f"The owner's standing investment thesis: {thesis}.\n"
         f"{performance_line}"
+        f"{feedback_block}"
         "Find FRESH, differentiated product opportunities people already PAY "
         "for — never another generic reminder/tracker/'Lite' clone of an "
         "existing app. For every idea you must be able to name: the specific "
@@ -615,6 +1310,7 @@ def run_scout(state: dict, runner) -> dict | None:
         f"Do not re-pitch anything similar to past initiatives: {past}. "
         f"The owner REJECTED these — learn the pattern and avoid ideas like "
         f"them: {rejected or '(none yet)'}.\n"
+        f"{lessons_block(state)}"
         f"{SCOUT_JSON_SPEC}"
     )
     ideas = parse_ideas(runner("research", role_prompt("research", body)))
@@ -727,12 +1423,12 @@ def advance_stage(state: dict, init: dict, runner, artifacts_root: Path) -> None
                 "one-and-done toy. The team will build it and then harden it over "
                 "several QA rounds, so aim high — but keep it coherent and focused, "
                 "not bloated. List every file to create and what each is responsible "
-                "for."))
+                "for." + lessons_block(state, init.get("division", ""))))
         log_minute(init, "planning", "ceo", reply)
         init["stage"] = "execution"
 
     elif stage == "execution":
-        outdir = artifacts_root / initiative_dirname(init)
+        outdir = initiative_outdir(init, artifacts_root)
         outdir.mkdir(parents=True, exist_ok=True)
 
         def collect_artifacts() -> None:
@@ -753,7 +1449,7 @@ def advance_stage(state: dict, init: dict, runner, artifacts_root: Path) -> None
                 if existing:
                     # Iteration/resume: extend the project on disk, don't rebuild.
                     build = runner("builder", role_prompt("builder",
-                        f"{BUILDER_TOOLKIT}\n\n{platform_directive(state)}\n\n"
+                        f"{BUILDER_TOOLKIT}\n\n{build_directive(state, init)}\n\n"
                         f"EXTEND the existing project at {outdir} — do NOT rebuild it. "
                         f"Read what's already there, then make ONLY the additions in the "
                         f"work order, wired in properly and working (no stubs/TODOs). "
@@ -761,13 +1457,15 @@ def advance_stage(state: dict, init: dict, runner, artifacts_root: Path) -> None
                         f"Existing files:\n{chr(10).join(existing[:40])}\n\n"
                         f"Work order:\n{last_text(init, 'planning')}\n"
                         "List each file you added or changed with a one-line summary, and "
-                        "flag anything that needs an owner login or key."))
+                        "flag anything that needs an owner login or key."
+                        + division_iteration_feedback(init)
+                        + lessons_block(state, init.get("division", ""))))
                 else:
                     # First build — a real, polished, working product. It gets
                     # hardened toward production over the QA rounds, so build this
                     # pass solid and real (no stubs); don't ship a skeleton.
                     build = runner("builder", role_prompt("builder",
-                        f"{BUILDER_TOOLKIT}\n\n{platform_directive(state)}\n\n"
+                        f"{BUILDER_TOOLKIT}\n\n{build_directive(state, init)}\n\n"
                         f"Build '{init['title']}' as a real, working, polished product — not a "
                         f"toy or a skeleton. Implement the core experience fully and well: real "
                         f"logic and real data (NO stubs, TODOs, placeholder text, fake results, "
@@ -778,7 +1476,9 @@ def advance_stage(state: dict, init: dict, runner, artifacts_root: Path) -> None
                         f"file under {outdir} using your file tools.\n"
                         f"Work order:\n{last_text(init, 'planning')}\n"
                         "List each file you created with a one-line summary, and flag anything "
-                        "that needs an owner login or key."))
+                        "that needs an owner login or key."
+                        + division_iteration_feedback(init)
+                        + lessons_block(state, init.get("division", ""))))
                 log_minute(init, "execution", "builder", build)
                 collect_artifacts()
                 init["exec_phase"] = "review"
@@ -792,7 +1492,8 @@ def advance_stage(state: dict, init: dict, runner, artifacts_root: Path) -> None
                     f"completeness and polish while you're in there (add the missing "
                     f"screens, navigation, and features it calls for). Verify your work "
                     f"actually builds and the tests pass before you report. Don't argue — "
-                    f"do the work.\n\nQA review:\n{review}"))
+                    f"do the work.\n\nQA review:\n{review}"
+                    f"{division_toolkit(init)}{division_iteration_feedback(init)}"))
                 log_minute(init, "execution", "builder", fix)
                 collect_artifacts()
                 init["exec_phase"] = "review"
@@ -833,7 +1534,12 @@ def advance_stage(state: dict, init: dict, runner, artifacts_root: Path) -> None
                 init["review_rounds"] = init.get("review_rounds", 0) + 1
                 if review_passed(review) or init["review_rounds"] >= MAX_REVIEW_ROUNDS:
                     init["exec_phase"] = ""
-                    init["stage"] = "demo_ready"
+                    # Division initiatives face their specialist gate before
+                    # Demo Day; the generic pipeline goes straight there.
+                    if division_charter(init).get("gate"):
+                        init["stage"] = "division_gate"
+                    else:
+                        init["stage"] = "demo_ready"
                 else:
                     init["exec_phase"] = "fix"
         except BudgetExceeded:
@@ -844,8 +1550,72 @@ def advance_stage(state: dict, init: dict, runner, artifacts_root: Path) -> None
             init["exec_phase"] = ""
             init["stage"] = "demo_ready"
 
+    elif stage == "division_gate":
+        # The division's specialist judge reviews the actual deliverables
+        # before Demo Day — the games studio's Fun Gate, generalized. REJECTED
+        # loops back to the build with the reasons (division_iteration_feedback);
+        # three strikes blocks it honestly for the owner.
+        charter = division_charter(init)
+        gate = charter.get("gate") or {}
+        if not gate:   # charter lost its gate (or division cleared) — nothing to judge
+            init["stage"] = "demo_ready"
+            return
+        outdir = initiative_outdir(init, artifacts_root)
+        init["artifacts"] = sorted(str(p) for p in outdir.rglob("*") if p.is_file())
+        files = "\n".join(init["artifacts"]) or "(no files)"
+        hint = charter.get("deliverable_hint", "")
+        gate_role = gate.get("role", "qa")
+        title = gate.get("title", "Division Gate")
+        # Hard code-side floor first (disclaimer banner / data artifact /
+        # Sources section): a failed check is an automatic REJECTED with an
+        # honest reason, regardless of any judge — no judge turn is bought.
+        check = charter.get("check")
+        auto_reason = check(outdir) if check else ""
+        if auto_reason:
+            passed = False
+            log_minute(init, "division_gate", gate_role,
+                       f"AUTO-REJECT (code check): {auto_reason}\nGATE: REJECTED")
+            init["division_gate"] = {"verdict": "REJECTED",
+                                     "reasons": [auto_reason]}
+        else:
+            reply = runner(gate_role, (
+                f"{COMPANY_CULTURE}\n\n{gate.get('prompt_intro', '')}\n\n"
+                f"{title} review of '{init['title']}' "
+                f"({charter.get('name', 'division')} division). The deliverable "
+                f"should be {hint or 'division-grade work'}.\n"
+                f"READ the files under {outdir} yourself — judge the actual work, "
+                f"not the team's summaries.\nFiles:\n{files}\n\n"
+                "Give up to 4 bullet reasons, then end with EXACTLY one line: "
+                "'GATE: APPROVED' or 'GATE: REJECTED'."))
+            log_minute(init, "division_gate", gate_role, reply)
+            passed = gate_passed(reply)
+            init["division_gate"] = {
+                "verdict": "APPROVED" if passed else "REJECTED",
+                "reasons": parse_gate_reasons(reply),
+            }
+        if passed:
+            log_event(state, f"{title} APPROVED: {init['title']}")
+            if charter.get("deploy"):
+                deploy_initiative(state, init, outdir)
+            init["stage"] = "demo_ready"
+        else:
+            init["division_rejections"] = init.get("division_rejections", 0) + 1
+            if init["division_rejections"] >= MAX_DIVISION_REJECTIONS:
+                init["stage"] = BLOCKED_STAGE
+                init["note"] = (f"blocked: {title} rejected {MAX_DIVISION_REJECTIONS} "
+                                "builds in a row — the team can't clear the division "
+                                "bar without the owner's steer")
+                record_lesson(state, init)
+                log_event(state, f"{title} REJECTED ×{MAX_DIVISION_REJECTIONS}: "
+                                 f"{init['title']} — blocked for the owner")
+            else:
+                init["stage"] = "execution"
+                init["exec_phase"] = "fix"
+                init["review_rounds"] = 0   # fresh QA rounds for the rework
+                log_event(state, f"{title} REJECTED: {init['title']} — back to the build team")
+
     elif stage == "demo_ready":
-        outdir = artifacts_root / initiative_dirname(init)
+        outdir = initiative_outdir(init, artifacts_root)
         if init.get("demo_phase") != "invite":
             # Demo Day you can SEE: before the invite, the builder captures
             # real screenshots of the product so the owner's gate-2 decision
@@ -853,7 +1623,7 @@ def advance_stage(state: dict, init: dict, runner, artifacts_root: Path) -> None
             # execution — a timeout here costs the turn, not the stage.
             demo_dir = outdir / ".demo"
             capture = runner("builder", role_prompt("builder",
-                f"{BUILDER_TOOLKIT}\n\n{platform_directive(state)}\n\n"
+                f"{BUILDER_TOOLKIT}\n\n{build_directive(state, init)}\n\n"
                 f"Demo Day prep for '{init['title']}' (project at {outdir}). Produce REAL "
                 f"visual evidence of the product so the owner can SEE it before deciding "
                 f"to ship. Save numbered PNG screenshots of the main screens and flows "
@@ -901,8 +1671,11 @@ def apply_gate(state: dict, initiative_id: str, decision: str, note: str = "") -
     at_gate1 = init["stage"] == "gate1"
     if decision == "kill":
         init["stage"] = "killed"
+        record_lesson(state, init)
     elif decision == "approve":
         init["stage"] = "planning" if at_gate1 else "shipped"
+        if init["stage"] == "shipped":
+            record_lesson(state, init)
     else:  # revise
         if at_gate1:
             init["stage"] = "research"
@@ -950,6 +1723,16 @@ def merge_tick_results(current: dict, ticked: dict, before: dict) -> dict:
         feed.extend(e for e in fresh if (e.get("ts"), e.get("text")) not in known)
         feed.sort(key=lambda e: e.get("ts", 0.0))
         del feed[:-50]
+    # Lessons the tick recorded (blocked initiatives) must survive the merge
+    # like events do, or the institutional memory silently loses its worst
+    # (most instructive) outcomes.
+    known_lessons = {l.get("id") for l in current.setdefault("lessons", [])}
+    before_lessons = {l.get("id") for l in before.get("lessons", [])}
+    for lesson in ticked.get("lessons", []):
+        if lesson.get("id") not in before_lessons and lesson.get("id") not in known_lessons:
+            current["lessons"].append(lesson)
+    del current["lessons"][:-LESSONS_CAP]
+
     # Overload bookkeeping (overloaded_since / last_defer_note) must survive
     # the merge too, or the starvation escape can never trigger.
     if ticked.get("engine") != before.get("engine"):
@@ -1010,7 +1793,15 @@ def tick(state: dict, runner, artifacts_root: Path, now: float | None = None) ->
     # brand-new idea stays throttled to interval_minutes (below).
     events: list[str] = []
     queue = list(working(state))
-    for init in (queue[:1] if force_single else queue):
+    # WIP cap: several actives (stacked owner directives) advance at most
+    # max_turns_per_tick per heartbeat, rotated for fairness — bounded spend
+    # per tick instead of one heartbeat buying every initiative a turn.
+    cap = 1 if force_single else max(1, int(config.get("max_turns_per_tick", 2)))
+    if len(queue) > cap:
+        start = engine.get("turn_cursor", 0) % len(queue)
+        queue = (queue + queue)[start:start + cap]
+        engine["turn_cursor"] = (start + cap) % len(working(state))
+    for init in queue:
         charged = make_charged_runner(init, config["budget_calls"], runner)
         try:
             advance_stage(state, init, charged, artifacts_root)
@@ -1020,6 +1811,7 @@ def tick(state: dict, runner, artifacts_root: Path, now: float | None = None) ->
         except BudgetExceeded:
             init["stage"] = BLOCKED_STAGE
             init["note"] = "blocked: token budget exhausted — GM/owner decision required"
+            record_lesson(state, init)
             events.append(f"{init['id']} blocked: budget exhausted")
         except Exception as error:  # noqa: BLE001 — one bad turn must not stop the pulse
             # str(TimeoutExpired) embeds the ENTIRE 4KB agent prompt — the app
@@ -1031,6 +1823,7 @@ def tick(state: dict, runner, artifacts_root: Path, now: float | None = None) ->
             if init["stall_count"] >= MAX_STALLS:
                 init["stage"] = BLOCKED_STAGE
                 init["note"] = f"blocked after {MAX_STALLS} failed attempts: {reason}"
+                record_lesson(state, init)
                 events.append(f"{init['id']} blocked: {reason}")
             else:
                 init["note"] = f"stalled ({init['stall_count']}/{MAX_STALLS}): {reason}"

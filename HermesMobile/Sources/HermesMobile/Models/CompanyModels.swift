@@ -138,6 +138,15 @@ struct CompanyMeeting: Codable, Equatable, Identifiable {
     var turns: [CompanyMeetingTurn]?    // present only in the detail endpoint
 
     var isLive: Bool { status == "live" }
+
+    /// The relay stamps `started` as local ISO seconds ("2026-07-04T19:59:29",
+    /// no timezone) — parse it as local time for the honest elapsed clock.
+    static func parseStarted(_ started: String) -> Date? {
+        let formatter = DateFormatter()
+        formatter.dateFormat = "yyyy-MM-dd'T'HH:mm:ss"
+        formatter.locale = Locale(identifier: "en_US_POSIX")
+        return formatter.date(from: started)
+    }
 }
 
 struct CompanyMeetingTurn: Codable, Equatable, Identifiable {
@@ -234,6 +243,10 @@ struct CompanyInitiative: Codable, Equatable, Identifiable {
     var repoUrl: String?
     /// "owner" when the Chairman pitched it directly (voice memo / directive).
     var origin: String?
+    /// Division that owns this work ("webapps"…"legal"); empty/nil = untagged legacy.
+    var division: String? = nil
+    /// Deployed URL once the product is live on the web; empty/nil = not deployed.
+    var liveUrl: String? = nil
     /// Present only on the detail endpoint.
     var minutes: [CompanyMinute]?
 
@@ -269,6 +282,19 @@ struct CompanyInitiative: Codable, Equatable, Identifiable {
         default:            stage
         }
     }
+}
+
+/// One division's rollup from `GET /company/divisions` (relay pass B).
+/// The P&L fields are optional so a relay that predates them still decodes.
+struct DivisionInfo: Codable, Equatable, Identifiable {
+    var id: String            // "webapps" … "growth"
+    var name: String
+    var active: Int
+    var shipped: Int
+    var liveUrls: [String]
+    var calls: Int?           // agent calls spent across the division
+    var estCost: Double?      // ≈ $ spent (relay's honest estimate)
+    var rejections: Int?      // division-gate rejections — the learning curve
 }
 
 enum CompanyDecision: String {

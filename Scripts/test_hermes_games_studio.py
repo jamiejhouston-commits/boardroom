@@ -3,6 +3,7 @@ import json
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 SCRIPT_PATH = Path(__file__).with_name("hermes_games_studio.py")
 SPEC = importlib.util.spec_from_file_location("hermes_games_studio", SCRIPT_PATH)
@@ -103,20 +104,22 @@ class ParserTests(unittest.TestCase):
 
     def test_parse_distribution_maps_channels(self):
         text = "itch: live and posted. reddit: submitted to r/WebGames. portals: planned."
+        # An unverified "live" claim is honestly downgraded to planned.
         dist = studio.parse_distribution(text)
+        self.assertEqual(dist, {"itch": "planned", "reddit": "submitted", "portals": "planned"})
+        # A VERIFIED publish lets the live claim stand.
+        dist = studio.parse_distribution(text, verified=True)
         self.assertEqual(dist, {"itch": "live", "reddit": "submitted", "portals": "planned"})
 
-    def test_parse_distribution_defaults_on_garbage(self):
+    def test_parse_distribution_defaults_to_planned(self):
         dist = studio.parse_distribution("nothing useful")
-        self.assertEqual(set(dist.keys()), {"itch", "reddit", "portals"})
-        for status in dist.values():
-            self.assertIn(status, studio.CHANNEL_STATES)
+        self.assertEqual(dist, {"itch": "planned", "reddit": "planned", "portals": "planned"})
 
     def test_parse_distribution_asset_channels(self):
         text = ("itch: live. Roblox Creator Store: submitted for review. "
                 "Unity Asset Store: planned for next week.")
         dist = studio.parse_distribution(text, asset=True)
-        self.assertEqual(dist, {"itch": "live", "roblox": "submitted", "unity": "planned"})
+        self.assertEqual(dist, {"itch": "planned", "roblox": "submitted", "unity": "planned"})
 
 
 class ChargedRunnerTests(unittest.TestCase):
@@ -166,7 +169,9 @@ class PipelineTests(unittest.TestCase):
         self.assertEqual(game["stage"], "shipped")
         self.assertEqual(game["fun_gate"]["verdict"], "APPROVED")
         self.assertEqual(len(game["playtests"]), len(studio.PLAYTEST_PANEL))
-        self.assertEqual(game["distribution"]["itch"], "live")
+        # No verified publish happened, so the "live" claim was not believed.
+        self.assertEqual(game["distribution"]["itch"], "planned")
+        self.assertFalse(game["distribution_verified"])
         self.assertTrue(game["pillars"])
         # Stages progressed monotonically through the machine.
         self.assertEqual(stages,
@@ -205,6 +210,7 @@ class PipelineTests(unittest.TestCase):
         self.assertEqual(game["runtime"], "")   # packs never enter the cabinet
         self.assertEqual(set(game["distribution"].keys()), {"itch", "roblox", "unity"})
         self.assertEqual(game["distribution"]["roblox"], "submitted")
+        self.assertEqual(game["distribution"]["itch"], "planned")   # unverified
 
     def test_fun_gate_rejection_loops_back_to_design(self):
         state, game = self.make_state()
@@ -250,16 +256,250 @@ class PipelineTests(unittest.TestCase):
         game["stage"] = "build"
         game["pillars"] = ["loop"]
         with tempfile.TemporaryDirectory() as tmp:
-            self.advance_with_root(state, game, tmp,
-                                   lambda r, p: "built it, entry index.html")
-            # The build turn created the game's working directory.
-            self.assertTrue(any(Path(tmp).iterdir()))
+            outdir = Path(tmp) / studio._game_dirname(game)
+
+            def runner(role, prompt):
+                # The builder actually writes the game file — so verification
+                # passes and the stage advances.
+                (outdir / "index.html").write_text("<canvas></canvas>")
+                return "built it, entry index.html"
+
+            self.advance_with_root(state, game, tmp, runner)
+            # The build turn created the game's working directory + file.
+            self.assertTrue((outdir / "index.html").exists())
         self.assertEqual(game["stage"], "playtest")
         self.assertTrue(game["runtime"])
+
+    def test_build_without_file_does_not_advance(self):
+        state, game = self.make_state()
+        game["stage"] = "build"
+        game["pillars"] = ["loop"]
+        with tempfile.TemporaryDirectory() as tmp:
+            # The builder only TALKS about a build — nothing hits the disk.
+            self.advance_with_root(state, game, tmp, lambda r, p: "built it, honest")
+        self.assertEqual(game["stage"], "build", "no file → no advance")
+        self.assertEqual(game["runtime"], "")
+        self.assertTrue(any("produced no game file" in e["text"]
+                            for e in state["events"]))
+
+    def test_build_with_empty_file_does_not_advance(self):
+        state, game = self.make_state()
+        game["stage"] = "build"
+        game["pillars"] = ["loop"]
+        with tempfile.TemporaryDirectory() as tmp:
+            outdir = Path(tmp) / studio._game_dirname(game)
+
+            def runner(role, prompt):
+                (outdir / "index.html").touch()   # zero bytes is not a game
+                return "built it"
+
+            self.advance_with_root(state, game, tmp, runner)
+        self.assertEqual(game["stage"], "build")
+
+    def test_asset_build_without_files_does_not_advance(self):
+        state = studio.new_studio_state()
+        state["enabled"] = True
+        game = studio.seed_concept(state, "Voxel Props", "asset-3d")
+        game["stage"] = "build"
+        game["pillars"] = ["50 pieces"]
+        with tempfile.TemporaryDirectory() as tmp:
+            self.advance_with_root(state, game, tmp, lambda r, p: "made 50 meshes")
+        self.assertEqual(game["stage"], "build")
+        self.assertTrue(any("produced no pack files" in e["text"]
+                            for e in state["events"]))
+
+    def test_playtest_prompt_contains_the_real_game_code(self):
+        state, game = self.make_state()
+        game["stage"] = "playtest"
+        game["pillars"] = ["loop"]
+        game["runtime"] = "index.html"
+        prompts = []
+
+        def runner(role, prompt):
+            prompts.append(prompt)
+            return "Tight controls, clean game over. Rating: 8/10"
+
+        with tempfile.TemporaryDirectory() as tmp:
+            outdir = Path(tmp) / studio._game_dirname(game)
+            outdir.mkdir(parents=True)
+            (outdir / "index.html").write_text("<canvas id='neon-drift-game'>")
+            self.advance_with_root(state, game, tmp, runner)
+
+        self.assertEqual(len(prompts), len(studio.PLAYTEST_PANEL))
+        for prompt in prompts:
+            self.assertIn("neon-drift-game", prompt)
+            self.assertIn("ACTUAL GAME CODE", prompt)
+        # The ratings parser still reads the replies unchanged.
+        self.assertEqual(game["playtests"][0]["rating"], 8)
+
+    def test_playtest_code_is_capped_and_marked_truncated(self):
+        state, game = self.make_state()
+        game["stage"] = "playtest"
+        prompts = []
+
+        def runner(role, prompt):
+            prompts.append(prompt)
+            return "ok. Rating: 5/10"
+
+        with tempfile.TemporaryDirectory() as tmp:
+            outdir = Path(tmp) / studio._game_dirname(game)
+            outdir.mkdir(parents=True)
+            (outdir / "index.html").write_text("x" * (studio.PLAYTEST_CODE_CAP + 500))
+            self.advance_with_root(state, game, tmp, runner)
+
+        self.assertIn("truncated", prompts[0])
+        self.assertLess(len(prompts[0]), studio.PLAYTEST_CODE_CAP + 2_000)
+
+    def test_rejection_feedback_reaches_next_design_and_build(self):
+        state, game = self.make_state()
+        game["fun_gate"] = {"verdict": "REJECTED",
+                            "reasons": ["No hook in ten seconds"]}
+        game["playtests"] = [{"tester": "Pixel", "rating": 3,
+                              "reaction": "Kinda dull honestly."}]
+        game["iteration"] = 1
+        prompts = {}
+
+        def runner(role, prompt):
+            prompts[game["stage"]] = prompt
+            return "- loop\n- feedback"
+
+        game["stage"] = "design"
+        self.advance(state, game, runner)          # design turn
+        self.advance(state, game, runner)          # build turn (no artifacts root)
+        for stage in ("design", "build"):
+            self.assertIn("PREVIOUS ITERATION FEEDBACK", prompts[stage])
+            self.assertIn("No hook in ten seconds", prompts[stage])
+            self.assertIn("Kinda dull honestly.", prompts[stage])
+
+    def test_no_feedback_block_on_first_pass(self):
+        state, game = self.make_state()
+        game["stage"] = "design"
+        prompts = []
+        self.advance(state, game, lambda r, p: prompts.append(p) or "- loop")
+        self.assertNotIn("PREVIOUS ITERATION FEEDBACK", prompts[0])
 
     def advance_with_root(self, state, game, root, runner):
         studio.advance_game(state, game,
                             studio.make_charged_runner(game, 40, runner), Path(root))
+
+
+class DistributionHonestyTests(unittest.TestCase):
+    def _shipped_setup(self):
+        state = studio.new_studio_state()
+        state["enabled"] = True
+        game = studio.seed_concept(state, "Neon Drift", "hyper-casual")
+        game["stage"] = "distribution"
+        game["playtests"] = [{"tester": "Pixel", "rating": 9, "reaction": "yes"}]
+        return state, game
+
+    def test_butler_missing_leaves_planned_with_honest_event(self):
+        state, game = self._shipped_setup()
+        with tempfile.TemporaryDirectory() as tmp, \
+                mock.patch.object(studio.shutil, "which", return_value=None):
+            studio.advance_game(state, game,
+                                studio.make_charged_runner(
+                                    game, 40, lambda r, p: "itch: live!"),
+                                Path(tmp))
+        self.assertEqual(game["stage"], "shipped")
+        self.assertEqual(game["distribution"]["itch"], "planned")
+        self.assertFalse(game["distribution_verified"])
+        self.assertTrue(any("butler/itch not configured" in e["text"]
+                            for e in state["events"]))
+
+    def test_verified_publish_marks_itch_live_with_url(self):
+        state, game = self._shipped_setup()
+        url = "https://andrew.itch.io/neon-drift"
+        with mock.patch.object(studio, "publish_itch", return_value=url):
+            studio.advance_game(state, game,
+                                studio.make_charged_runner(
+                                    game, 40, lambda r, p: "itch: live"),
+                                Path("/tmp"))
+        self.assertEqual(game["distribution"]["itch"], "live")
+        self.assertTrue(game["distribution_verified"])
+        self.assertEqual(game["itch_url"], url)
+
+    def test_publish_itch_returns_none_without_butler(self):
+        game = studio.new_game("X", "hyper-casual")
+        with tempfile.TemporaryDirectory() as tmp, \
+                mock.patch.object(studio.shutil, "which", return_value=None):
+            self.assertIsNone(studio.publish_itch(game, Path(tmp)))
+        self.assertIsNone(studio.publish_itch(game, None))
+
+
+class PausedTests(unittest.TestCase):
+    def test_budget_exceeded_pauses_instead_of_shelving(self):
+        state = studio.new_studio_state()
+        state["enabled"] = True
+        game = studio.seed_concept(state, "Money Pit", "hyper-casual")
+        game["calls_used"] = studio.DEFAULT_BUDGET   # already exhausted
+        events = studio.tick(state, lambda r, p: "x", now=1000)
+        self.assertEqual(game["stage"], "paused")
+        self.assertIn("paused", events[0])
+        self.assertIn("budget", game["paused_note"])
+        self.assertNotIn("paused", studio.TERMINAL_STAGES)   # NOT terminal
+
+    def test_paused_game_is_skipped_by_tick(self):
+        state = studio.new_studio_state()
+        state["enabled"] = True
+        game = studio.seed_concept(state, "Money Pit", "hyper-casual")
+        game["stage"] = "paused"
+        calls = []
+        events = studio.tick(state, lambda r, p: calls.append(r) or "x", now=1000)
+        self.assertEqual(events, [])
+        self.assertEqual(calls, [])
+        self.assertEqual(game["stage"], "paused")
+
+    def test_pause_stores_the_pre_pause_stage(self):
+        state = studio.new_studio_state()
+        state["enabled"] = True
+        game = studio.seed_concept(state, "Money Pit", "hyper-casual")
+        game["stage"] = "playtest"
+        game["calls_used"] = studio.DEFAULT_BUDGET
+        studio.tick(state, lambda r, p: "x", now=1000)
+        self.assertEqual(game["stage"], "paused")
+        self.assertEqual(game["paused_from"], "playtest")
+
+    def test_resume_restores_stage_and_tops_up_budget(self):
+        state = studio.new_studio_state()
+        state["enabled"] = True
+        game = studio.seed_concept(state, "Money Pit", "hyper-casual")
+        game.update({"stage": "paused", "paused_from": "playtest",
+                     "paused_note": "budget exhausted",
+                     "calls_used": studio.DEFAULT_BUDGET})
+        resumed = studio.resume_game(state, game["id"])
+        self.assertIs(resumed, game)
+        self.assertEqual(game["stage"], "playtest")
+        self.assertEqual(game["calls_used"],
+                         studio.DEFAULT_BUDGET - studio.RESUME_TOP_UP_CALLS)
+        self.assertNotIn("paused_from", game)
+        self.assertNotIn("paused_note", game)
+        self.assertTrue(any("resumed" in e["text"] for e in state["events"]))
+        # The top-up means the next tick actually spends turns again.
+        events = studio.tick(state, lambda r, p: "fun. Rating: 8/10", now=1000)
+        self.assertTrue(events)
+        self.assertEqual(game["stage"], "fun_gate")
+
+    def test_resume_defaults_to_build_for_legacy_pauses(self):
+        state = studio.new_studio_state()
+        game = studio.seed_concept(state, "Old Pause", "hyper-casual")
+        game["stage"] = "paused"          # no paused_from recorded pre-upgrade
+        studio.resume_game(state, game["id"])
+        self.assertEqual(game["stage"], "build")
+
+    def test_resume_top_up_never_goes_negative(self):
+        state = studio.new_studio_state()
+        game = studio.seed_concept(state, "Cheap Pause", "hyper-casual")
+        game.update({"stage": "paused", "paused_from": "design", "calls_used": 3})
+        studio.resume_game(state, game["id"])
+        self.assertEqual(game["calls_used"], 0)
+
+    def test_resume_unknown_and_not_paused_raise(self):
+        state = studio.new_studio_state()
+        game = studio.seed_concept(state, "Running Fine", "hyper-casual")
+        with self.assertRaises(KeyError):
+            studio.resume_game(state, "nope")
+        with self.assertRaises(ValueError):
+            studio.resume_game(state, game["id"])   # concept, not paused
 
 
 class MergeTickTests(unittest.TestCase):

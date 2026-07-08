@@ -166,7 +166,9 @@ private enum AgentRoomBuilder {
         let roomKit = kit(for: agent)
 
         scene.lightingEnvironment.contents = environmentMap()
-        scene.lightingEnvironment.intensity = 1.3
+        // 0.35: reflections only. At 1.3 the IBL was a major heat source on
+        // the character's PBR body (bench-measured) — part of the blowout.
+        scene.lightingEnvironment.intensity = 0.35
         scene.background.contents = UIColor(red: 0.012, green: 0.02, blue: 0.035, alpha: 1)
         scene.fogStartDistance = 7.5
         scene.fogEndDistance = 17
@@ -191,6 +193,15 @@ private enum AgentRoomBuilder {
         let robot = AgentRobot.node(for: agent, color: color)
         robot.position = SCNVector3(0, 0, -0.1)
         scene.rootNode.addChildNode(robot)
+        // The agent greets you at the door (real skeletal clip when the HQ
+        // rig is bundled; a silent no-op otherwise).
+        if HQAssetLibrary.hasAnimation(matching: "Wave", under: robot) {
+            HQAssetLibrary.playAnimation(matching: "Wave", under: robot)
+            robot.runAction(.sequence([
+                .wait(duration: 1.7),
+                .run { n in HQAssetLibrary.playAnimation(matching: "Idle", under: n) },
+            ]))
+        }
 
         return scene
     }
@@ -202,9 +213,12 @@ private enum AgentRoomBuilder {
         camera.fieldOfView = 38
         camera.wantsHDR = true
         camera.wantsExposureAdaptation = false
-        camera.bloomIntensity = 0.4
-        camera.bloomThreshold = 0.55
-        camera.bloomBlurRadius = 8
+        // The HQ-proven pipeline: threshold 0.85 — lower blooms the robot's
+        // bright body into a blob (same lesson as HQCameraController).
+        camera.bloomIntensity = 0.5
+        camera.bloomThreshold = 0.85
+        camera.bloomBlurRadius = 16
+        camera.exposureOffset = 0.05
         camera.wantsDepthOfField = true
         camera.focusDistance = 3.3
         camera.fStop = 5.0
@@ -225,51 +239,54 @@ private enum AgentRoomBuilder {
         scene.rootNode.addChildNode(node)
     }
 
+    // The HQ-proven rig, adapted: soft tinted ambient + one directional key +
+    // a distant attenuated ceiling omni. NO spots or close omnis near the
+    // robot — SceneKit spots concentrate their lumens into the cone and
+    // close-range attenuated omnis follow inverse-square, so both delivered
+    // several times their nominal intensity and nuked the character white
+    // (bench-measured; the old 240 "monitor glow" 0.67 m away saturated the
+    // robot single-handedly).
     private static func addLights(to scene: SCNScene, accent: UIColor) {
         let ambient = SCNLight()
         ambient.type = .ambient
-        ambient.intensity = 90
-        ambient.color = UIColor(white: 0.28, alpha: 1)
+        ambient.intensity = 340
+        ambient.color = UIColor(red: 0.18, green: 0.22, blue: 0.33, alpha: 1)
         let an = SCNNode(); an.light = ambient
         scene.rootNode.addChildNode(an)
 
-        // Warm key spot with soft shadows — the hero light on the robot.
+        // Warm directional key with soft shadows — the hero light.
         let key = SCNLight()
-        key.type = .spot
-        key.intensity = 950
+        key.type = .directional
+        key.intensity = 350
         key.color = UIColor(red: 1.0, green: 0.93, blue: 0.82, alpha: 1)
-        key.spotInnerAngle = 25
-        key.spotOuterAngle = 70
         key.castsShadow = true
-        key.shadowRadius = 14
-        key.shadowColor = UIColor(white: 0, alpha: 0.65)
+        key.shadowRadius = 12
+        key.shadowColor = UIColor(white: 0, alpha: 0.55)
         let kn = SCNNode(); kn.light = key
-        kn.position = SCNVector3(-2.0, 3.1, 2.4)
-        let keyTarget = SCNNode()
-        keyTarget.position = SCNVector3(0, 0.7, 0)
-        scene.rootNode.addChildNode(keyTarget)
-        kn.constraints = [SCNLookAtConstraint(target: keyTarget)]
+        kn.eulerAngles = SCNVector3(-Float.pi / 2.6, 0.4, 0)
         scene.rootNode.addChildNode(kn)
+
+        // Cool ceiling bounce, far enough that inverse-square behaves.
+        let ceiling = SCNLight()
+        ceiling.type = .omni
+        ceiling.intensity = 250
+        ceiling.color = UIColor(red: 0.72, green: 0.82, blue: 1.0, alpha: 1)
+        ceiling.attenuationStartDistance = 2
+        ceiling.attenuationEndDistance = 20
+        let cn = SCNNode(); cn.light = ceiling
+        cn.position = SCNVector3(0, 4.9, 1.5)
+        scene.rootNode.addChildNode(cn)
 
         // Cool teal rim from behind-right — separates the robot from the wall.
         let rim = SCNLight()
         rim.type = .omni
-        rim.intensity = 330
+        rim.intensity = 150
         rim.color = UIColor(red: 0.45, green: 0.75, blue: 0.85, alpha: 1)
+        rim.attenuationStartDistance = 2
+        rim.attenuationEndDistance = 8
         let rn = SCNNode(); rn.light = rim
         rn.position = SCNVector3(1.9, 2.1, -1.5)
         scene.rootNode.addChildNode(rn)
-
-        // The monitor's glow on the robot's face.
-        let screenGlow = SCNLight()
-        screenGlow.type = .omni
-        screenGlow.intensity = 240
-        screenGlow.color = accent
-        screenGlow.attenuationStartDistance = 0.2
-        screenGlow.attenuationEndDistance = 2.6
-        let sg = SCNNode(); sg.light = screenGlow
-        sg.position = SCNVector3(-0.3, 1.0, 0.5)
-        scene.rootNode.addChildNode(sg)
 
         // Warm pool from the floor lamp.
         let lamp = SCNLight()

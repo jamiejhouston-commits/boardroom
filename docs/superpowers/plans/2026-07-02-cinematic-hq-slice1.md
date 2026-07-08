@@ -36,7 +36,7 @@
 
 - [ ] **Step 3:** In `WarRoomView`, add a prominent hero button near the top — `Label("Enter Headquarters", systemImage: "building.2.crop.circle")` styled with `hermesCard` — with `@State private var showHQ = false` and `.fullScreenCover(isPresented: $showHQ) { HeadquartersView() }`.
 
-- [ ] **Step 4 (Claude compile-check):** Run `cd "/Users/chosenvessel/Documents/hermes ios" && xcodegen generate` then compile the target. Expected: builds with no errors; new files included.
+- [ ] **Step 4 (Claude compile-check):** From the repo root, run `xcodegen generate` then compile the target. Expected: builds with no errors; new files included.
 
 - [ ] **Step 5 (User on iPhone):** Build+run. Open War Room → tap "Enter Headquarters" → a full-screen 3D view shows a lit navy floor from an elevated angle; close button returns to War Room. Existing War Room content unchanged.
 

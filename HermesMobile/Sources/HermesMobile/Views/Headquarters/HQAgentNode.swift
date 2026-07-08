@@ -99,7 +99,7 @@ final class HQAgentNode: SCNNode {
         removeAction(forKey: "meeting")
         let dx = worldPoint.x - worldPosition.x
         let dz = worldPoint.z - worldPosition.z
-        let face = atan2(-dx, -dz)          // model forward is -Z
+        let face = atan2(dx, dz)            // model forward is +Z (render-proven)
         runAction(.rotateTo(x: 0, y: CGFloat(face), z: 0, duration: 0.4,
                             usesShortestUnitArc: true), forKey: "converse.turn")
         guard usesCharacterAsset else { return }
@@ -196,7 +196,8 @@ final class HQAgentNode: SCNNode {
     }
 
     private static func yaw(from: SCNVector3, toward: SCNVector3) -> Float {
-        atan2(-(toward.x - from.x), -(toward.z - from.z))
+        // +Z-forward rig: face the direction of travel, not away from it.
+        atan2(toward.x - from.x, toward.z - from.z)
     }
 
     private static func travelTime(from: SCNVector3, to: SCNVector3) -> TimeInterval {
@@ -215,8 +216,8 @@ final class HQAgentNode: SCNNode {
         let homeYaw = self.homeYaw
         let out = SCNVector3(home.x * 0.35, home.y, home.z + 3.2)
         let dx = out.x - home.x, dz = out.z - home.z
-        let outYaw = atan2(-dx, -dz)
-        let backYaw = atan2(dx, dz)
+        let outYaw = atan2(dx, dz)          // +Z-forward rig
+        let backYaw = atan2(-dx, -dz)
 
         let walkOn = SCNAction.run { n in HQAssetLibrary.playAnimation(matching: "Walking", under: n) }
         let idleOn = SCNAction.run { n in HQAssetLibrary.playAnimation(matching: "Idle", under: n) }

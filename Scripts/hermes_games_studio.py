@@ -28,6 +28,8 @@ import json
 import os
 import re
 import secrets
+import shutil
+import subprocess
 import time
 from datetime import datetime
 from pathlib import Path
@@ -42,6 +44,9 @@ LINES = GAME_LINES + ASSET_LINES
 STAGE_ORDER = ("concept", "design", "build", "playtest", "fun_gate",
                "distribution", "shipped")
 TERMINAL_STAGES = ("shipped", "shelved")
+# Paused (budget exhausted) is NOT terminal — the owner can resume it — but
+# the tick skips it so it stops burning calls.
+SKIP_STAGES = TERMINAL_STAGES + ("paused",)
 DISTRIBUTION_CHANNELS = ("itch", "reddit", "portals")
 # Asset packs sell on marketplaces, not game portals.
 ASSET_CHANNELS = ("itch", "roblox", "unity")
@@ -57,6 +62,8 @@ PLAYTEST_PANEL = ("Pixel", "Bolt", "Ada")
 MAX_REJECTIONS = 3
 # Per-game call budget (mirror of the company engine's guardrail).
 DEFAULT_BUDGET = 40
+# How much of the built game's source a playtester gets to read.
+PLAYTEST_CODE_CAP = 30_000
 
 # The bundled, genuinely-playable flagship. Its runtime file ships in the app.
 FLAGSHIP_RUNTIME = "SkylineStack.html"
@@ -251,24 +258,26 @@ def parse_fun_reasons(text: str) -> list[str]:
     return reasons
 
 
-def parse_distribution(text: str, asset: bool = False) -> dict:
-    """Map a distributor reply onto per-channel status. Recognizes each channel
-    name near a status word; anything unseen keeps a sensible default."""
+def parse_distribution(text: str, asset: bool = False, verified: bool = False) -> dict:
+    """Map a distributor reply onto per-channel status. Every channel defaults
+    to 'planned' — nothing is 'live' on an agent's say-so. A 'live' claim only
+    sticks when `verified` is True (a real publish, e.g. butler, succeeded)."""
     lowered = (text or "").lower()
     if asset:
-        result = {"itch": "live", "roblox": "submitted", "unity": "planned"}
+        channels = ASSET_CHANNELS
         aliases = {
             "itch": ["itch"],
             "roblox": ["roblox", "creator store", "creator marketplace"],
             "unity": ["unity", "unreal", "fab", "godot", "marketplace", "asset store"],
         }
     else:
-        result = {"itch": "live", "reddit": "submitted", "portals": "planned"}
+        channels = DISTRIBUTION_CHANNELS
         aliases = {
             "itch": ["itch"],
             "reddit": ["reddit", "r/"],
             "portals": ["portal", "newgrounds", "crazygames", "poki", "kongregate"],
         }
+    result = {c: "planned" for c in channels}
     for channel, keys in aliases.items():
         for key in keys:
             idx = lowered.find(key)
@@ -277,10 +286,41 @@ def parse_distribution(text: str, asset: bool = False) -> dict:
             window = lowered[idx: idx + 60]
             for status in ("live", "submitted", "planned"):
                 if status in window:
+                    if status == "live" and not verified:
+                        status = "planned"   # honest: unverified "live" claim
                     result[channel] = status
                     break
             break
     return result
+
+
+def publish_itch(game: dict, outdir: Path | None) -> str | None:
+    """REAL itch.io publish via the butler CLI. Returns the live URL on
+    verified success, None on any failure or missing butler/config — the
+    caller must never mark 'live' without a URL from here."""
+    if outdir is None:
+        return None
+    butler = shutil.which("butler")
+    config_path = Path.home() / ".hermes" / "itch.json"
+    if not butler or not config_path.exists():
+        return None
+    try:
+        user = str(json.loads(config_path.read_text()).get("user", "")).strip()
+    except (json.JSONDecodeError, OSError):
+        return None
+    entry = game.get("runtime") or "index.html"
+    if not user or not (Path(outdir) / entry).exists():
+        return None
+    slug = re.sub(r"[^a-z0-9]+", "-", game["title"].lower()).strip("-")[:40] or "game"
+    try:
+        result = subprocess.run(
+            [butler, "push", str(outdir), f"{user}/{slug}:html5"],
+            capture_output=True, text=True, timeout=300)
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    if result.returncode != 0:
+        return None
+    return f"https://{user}.itch.io/{slug}"
 
 
 # ────────────────────────── charged runner ────────────────────────────
@@ -301,7 +341,25 @@ def make_charged_runner(game: dict, budget: int, runner):
 # ─────────────────────────── stage machine ────────────────────────────
 
 def working(state: dict) -> list[dict]:
-    return [g for g in state.get("games", []) if g["stage"] not in TERMINAL_STAGES]
+    return [g for g in state.get("games", []) if g["stage"] not in SKIP_STAGES]
+
+
+def iteration_feedback(game: dict) -> str:
+    """The learning loop: after a Fun-Gate rejection, the next design and build
+    turns see exactly WHY the last version failed — gate reasons plus the
+    playtesters' criticisms — instead of iterating blind."""
+    gate = game.get("fun_gate", {})
+    if gate.get("verdict") != "REJECTED":
+        return ""
+    gate_name = "Quality Gate" if is_asset(game) else "Fun Gate"
+    reasons = [f"- {r}" for r in gate.get("reasons", [])] or ["- (no reasons recorded)"]
+    block = (f"\nPREVIOUS ITERATION FEEDBACK — the {gate_name} rejected "
+             f"v{game.get('iteration', 1)} because:\n" + "\n".join(reasons))
+    criticisms = [f"- {t.get('tester', '?')}: {t.get('reaction', '')}"
+                  for t in game.get("playtests", []) if t.get("reaction")]
+    if criticisms:
+        block += "\nPlaytester criticisms:\n" + "\n".join(criticisms)
+    return block + "\nFix these specifically in this iteration.\n"
 
 
 def advance_game(state: dict, game: dict, runner, artifacts_root: Path | None = None) -> None:
@@ -349,6 +407,7 @@ def advance_game(state: dict, game: dict, runner, artifacts_root: Path | None = 
                 "Write 3-5 crisp DESIGN PILLARS — the non-negotiables the build must "
                 "honor (core loop, control scheme, feedback/juice, difficulty curve, "
                 "session length). One pillar per line, no preamble.")
+        body += iteration_feedback(game)
         reply = runner("game_designer", role_prompt("game_designer", body))
         game["pillars"] = parse_pillars(reply)
         game["stage"] = "build"
@@ -359,6 +418,7 @@ def advance_game(state: dict, game: dict, runner, artifacts_root: Path | None = 
             outdir = Path(artifacts_root) / _game_dirname(game)
             outdir.mkdir(parents=True, exist_ok=True)
         pillars = "\n- ".join(game["pillars"] or [game["pitch"]])
+        feedback = iteration_feedback(game)
         if asset:
             reply = runner("artist", role_prompt("artist",
                 f"{ASSET_TOOLKIT}\n\n"
@@ -368,8 +428,16 @@ def advance_game(state: dict, game: dict, runner, artifacts_root: Path | None = 
                  else "Lay the pack out store-ready.") +
                 "\nBuild EVERY piece in the pillar piece list — professional, "
                 "consistent, sellable quality, no filler. Summarize what you made "
-                "in 2-3 lines: piece count, formats, and anything a buyer must know."))
+                "in 2-3 lines: piece count, formats, and anything a buyer must know."
+                + feedback))
             game["build_notes"] = reply.strip()[:600]
+            # Verify the pack actually hit the disk before advancing.
+            if outdir is not None and not any(
+                    p.is_file() and not p.name.startswith(".")
+                    for p in outdir.rglob("*")):
+                log_event(state, f"build produced no pack files — "
+                                 f"retrying next tick: {game['title']}")
+                return
             # Asset packs aren't playable in the cabinet — no runtime file.
         else:
             reply = runner("builder", role_prompt("builder",
@@ -378,8 +446,18 @@ def advance_game(state: dict, game: dict, runner, artifacts_root: Path | None = 
                 (f"\nSave it to {outdir}/index.html." if outdir else "") +
                 "\nCanvas render loop, touch + keyboard input, WebAudio feedback, a "
                 "score and a best-score, and a restart loop. No stubs. Summarize what "
-                "you built in 2-3 lines and name the entry file."))
+                "you built in 2-3 lines and name the entry file."
+                + feedback))
             game["build_notes"] = reply.strip()[:600]
+            # Trust nothing: only a real, non-empty index.html on disk advances
+            # the stage. A no-show build stays at `build` and retries next tick
+            # (the call budget is the runaway guard).
+            if outdir is not None:
+                built = outdir / "index.html"
+                if not built.is_file() or built.stat().st_size == 0:
+                    log_event(state, f"build produced no game file — "
+                                     f"retrying next tick: {game['title']}")
+                    return
             # Record the runtime filename. The flagship keeps its bundled file.
             if not game["runtime"]:
                 game["runtime"] = "index.html"
@@ -388,6 +466,22 @@ def advance_game(state: dict, game: dict, runner, artifacts_root: Path | None = 
     elif stage == "playtest":
         # Playtest choreography: each tester on the couch plays and reports.
         # For asset packs the same panel sits as picky store buyers instead.
+        # Testers judge the ACTUAL built code, not the builder's summary.
+        game_code = ""
+        if not asset and artifacts_root is not None:
+            entry = game.get("runtime") or "index.html"
+            built = Path(artifacts_root) / _game_dirname(game) / entry
+            try:
+                raw = built.read_text(errors="replace")
+                truncated = len(raw) > PLAYTEST_CODE_CAP
+                game_code = (
+                    f"\nTHE ACTUAL GAME CODE ({entry}"
+                    f"{', truncated' if truncated else ''}):\n"
+                    f"```html\n{raw[:PLAYTEST_CODE_CAP]}\n```\n"
+                    "Judge the ACTUAL code and mechanics — controls, feel, "
+                    "game-over conditions, scoring — not the build notes.")
+            except OSError:
+                pass
         game["playtests"] = []
         for tester in PLAYTEST_PANEL:
             if asset:
@@ -403,8 +497,8 @@ def advance_game(state: dict, game: dict, runner, artifacts_root: Path | None = 
                 body = (
                     f"You are {tester}. Play '{game['title']}' ({game['line']}). "
                     f"Design pillars:\n- " + "\n- ".join(game["pillars"] or ["(none)"]) +
-                    f"\nBuild notes: {game['build_notes']}\n"
-                    "React in ONE honest sentence, then give a fun rating from 1 to 10 "
+                    f"\nBuild notes: {game['build_notes']}\n" + game_code +
+                    "\nReact in ONE honest sentence, then give a fun rating from 1 to 10 "
                     "as 'Rating: N/10'.")
             reply = runner("playtester", role_prompt("playtester", body))
             result = parse_playtest(reply)
@@ -465,7 +559,24 @@ def advance_game(state: dict, game: dict, runner, artifacts_root: Path | None = 
                 f"'{game['title']}' passed the Fun Gate (avg {avg}/10). Get it in front "
                 "of players. For each channel — itch.io, Reddit, portals — say whether "
                 "it is 'live', 'submitted', or 'planned' and one line on the angle."))
-        game["distribution"] = parse_distribution(reply, asset=asset)
+        # A REAL publish attempt (butler → itch.io). 'live' only on verified
+        # success — never on the agent's say-so.
+        itch_url = None
+        if not asset:
+            outdir = (Path(artifacts_root) / _game_dirname(game)
+                      if artifacts_root is not None else None)
+            itch_url = publish_itch(game, outdir)
+        game["distribution"] = parse_distribution(
+            reply, asset=asset, verified=itch_url is not None)
+        if itch_url is not None:
+            game["distribution"]["itch"] = "live"
+            game["itch_url"] = itch_url
+            game["distribution_verified"] = True
+            log_event(state, f"published to itch.io: {itch_url}")
+        else:
+            game["distribution_verified"] = False
+            log_event(state, f"distribution queued — butler/itch not configured: "
+                             f"{game['title']}")
         game["stage"] = "shipped"
         log_event(state, f"shipped: {game['title']}")
 
@@ -530,8 +641,13 @@ def tick(state: dict, runner, artifacts_root: Path | None = None,
             advance_game(state, game, charged, artifacts_root)
             events.append(f"{game['id']} → {game['stage']}")
         except BudgetExceeded:
-            game["stage"] = "shelved"
-            events.append(f"{game['id']} shelved: budget exhausted")
+            # Paused, not shelved — the game keeps its progress and the owner
+            # can resume it later; the tick just stops spending on it.
+            game["paused_from"] = game["stage"]   # resume returns exactly here
+            game["stage"] = "paused"
+            game["paused_note"] = (f"call budget ({DEFAULT_BUDGET}) exhausted — "
+                                   "paused, resume to continue")
+            events.append(f"{game['id']} paused: budget exhausted")
         except Exception as error:  # noqa: BLE001 — one bad turn never stops the pulse
             reason = str(error)
             if len(reason) > 200:
@@ -590,6 +706,28 @@ def seed_concept(state: dict, title: str, line: str, pitch: str = "") -> dict:
     game = new_game(title, line, pitch)
     state.setdefault("games", []).insert(0, game)
     log_event(state, f"new concept: {game['title']} ({game['line']})")
+    return game
+
+
+# Budget granted back on resume so a resumed game can actually take a few
+# turns instead of instantly re-pausing on the same exhausted budget.
+RESUME_TOP_UP_CALLS = 15
+
+
+def resume_game(state: dict, game_id: str) -> dict:
+    """Owner resumes a budget-paused game: back to its pre-pause stage (stored
+    in paused_from when it paused; 'build' for legacy pauses) with a small
+    budget top-up. Raises KeyError (unknown id) / ValueError (not paused)."""
+    game = next((g for g in state.get("games", []) if g["id"] == game_id), None)
+    if game is None:
+        raise KeyError(game_id)
+    if game.get("stage") != "paused":
+        raise ValueError(f"game {game_id} is not paused")
+    game["stage"] = game.pop("paused_from", "") or "build"
+    game.pop("paused_note", None)
+    game["calls_used"] = max(0, game.get("calls_used", 0) - RESUME_TOP_UP_CALLS)
+    log_event(state, f"resumed: {game['title']} → {game['stage']} "
+                     f"(+{RESUME_TOP_UP_CALLS} calls)")
     return game
 
 

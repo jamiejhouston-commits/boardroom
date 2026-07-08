@@ -22,21 +22,31 @@ struct GamesRoomView: View {
         var id: String { rawValue }
     }
 
-    /// The game the cabinet plays: the first studio game whose runtime is
-    /// actually bundled in the app, else the flagship (whose SkylineStack.html
-    /// always ships). A relay game built to a server-side "index.html" is NOT
-    /// bundled, so it must never be picked — the cabinet would load a dead
-    /// "not bundled yet" placeholder instead of the real playable game.
-    private var playableGame: StudioGame {
-        studio.state.games.first { ArcadeGameWebView.runtimeURL($0.runtime) != nil }
-            ?? StudioGame.skylineStack
+    /// The game the cabinet plays and where its HTML comes from. Preference
+    /// order: the room's current game if the relay can serve its built file
+    /// (`/games/artifact/<id>/`) — so you play what the studio just shipped —
+    /// then any game bundled in the app, then the flagship (always bundled).
+    private var playable: (game: StudioGame, source: ArcadeGameSource) {
+        if studio.isLive,
+           let current = studio.currentGame,
+           !current.runtime.isEmpty,
+           ArcadeGameWebView.runtimeURL(current.runtime) == nil,
+           ["playtest", "fun_gate", "distribution", "shipped"].contains(current.stage),
+           let base = runtime.relayConfiguration.baseURL {
+            let url = base.appending(path: "games/artifact/\(current.id)/")
+            return (current, .relay(url: url, token: runtime.relayConfiguration.token))
+        }
+        if let bundled = studio.state.games.first(where: { ArcadeGameWebView.runtimeURL($0.runtime) != nil }) {
+            return (bundled, .bundled(file: bundled.runtime))
+        }
+        return (StudioGame.skylineStack, .bundled(file: StudioGame.skylineStack.runtime))
     }
 
     var body: some View {
         ZStack {
             GamesRoomSceneView(
                 game: studio.currentGame,
-                bestScore: studio.localBest,
+                bestScore: studio.localBest(for: playable.game),
                 cameraMode: cameraMode,
                 roamControl: roamControl,
                 onTap: handleTap
@@ -45,6 +55,14 @@ struct GamesRoomView: View {
 
             hud
         }
+        .alert("Games Studio", isPresented: Binding(
+            get: { studio.errorMessage != nil },
+            set: { if !$0 { studio.errorMessage = nil } }
+        )) {
+            Button("OK", role: .cancel) {}
+        } message: {
+            Text(studio.errorMessage ?? "")
+        }
         .task {
             while !Task.isCancelled {
                 await studio.refresh(relay: runtime.relayConfiguration)
@@ -52,10 +70,12 @@ struct GamesRoomView: View {
             }
         }
         .fullScreenCover(isPresented: $playing) {
+            let pick = playable
             ArcadeCabinetPlayView(
-                game: playableGame,
+                game: pick.game,
+                source: pick.source,
                 onScore: { _, score, _ in
-                    studio.recordScore(score, for: playableGame,
+                    studio.recordScore(score, for: pick.game,
                                        relay: runtime.relayConfiguration)
                 },
                 onClose: { playing = false })
@@ -204,7 +224,11 @@ struct GamesRoomView: View {
         let game = studio.currentGame
         switch which {
         case .build:
-            BuildSheet(game: game, isLive: studio.isLive, bestScore: studio.localBest)
+            BuildSheet(game: game, isLive: studio.isLive,
+                       bestScore: studio.localBest(for: playable.game)) {
+                guard let id = game?.id else { return }
+                Task { await studio.resume(id: id, relay: runtime.relayConfiguration) }
+            }
         case .design:
             DesignSheet(game: game)
         case .funGate:
@@ -221,6 +245,7 @@ private struct BuildSheet: View {
     let game: StudioGame?
     let isLive: Bool
     let bestScore: Int
+    let onResume: () -> Void
 
     var body: some View {
         List {
@@ -235,6 +260,19 @@ private struct BuildSheet: View {
                             Text(game.pitch).font(.callout).foregroundStyle(.secondary)
                                 .padding(.top, 2)
                         }
+                    }
+                }
+                if game.stage == "paused" {
+                    Section {
+                        Button {
+                            onResume()
+                        } label: {
+                            Label("Resume work", systemImage: "play.circle.fill")
+                                .font(.subheadline.weight(.semibold))
+                                .foregroundStyle(GamesRoomTheme.emerald)
+                        }
+                    } footer: {
+                        Text("Paused means the build ran out of budget — resuming hands the team a fresh one.")
                     }
                 }
                 if let notes = game.buildNotes, !notes.isEmpty {

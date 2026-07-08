@@ -52,6 +52,12 @@ acp_module = importlib.util.module_from_spec(_ACP_SPEC)
 assert _ACP_SPEC.loader is not None
 _ACP_SPEC.loader.exec_module(acp_module)
 
+_ASC_SPEC = importlib.util.spec_from_file_location(
+    "hermes_asc", Path(__file__).with_name("hermes_asc.py"))
+asc_module = importlib.util.module_from_spec(_ASC_SPEC)
+assert _ASC_SPEC.loader is not None
+_ASC_SPEC.loader.exec_module(asc_module)
+
 # A small pool of warm Hermes agents for all interactive chat — turns cost ~3s
 # instead of the 15-30s per-message cold start, and two conversations no longer
 # queue single-file behind one agent's lock. Cold CLI remains the fallback.
@@ -346,7 +352,27 @@ def maybe_reexec_with_hermes_python() -> None:
     os.execve(str(candidate), [str(candidate), *sys.argv], env)
 
 
+def tailscale_ip() -> str | None:
+    """The Mac's Tailscale address (100.64.0.0/10), if the tailnet is up.
+    Pairing prefers it because it never changes with the Wi-Fi network and
+    works from anywhere the phone's Tailscale is on — cellular included."""
+    try:
+        for line in subprocess.run(["ifconfig"], text=True, capture_output=True,
+                                   timeout=5, check=False).stdout.splitlines():
+            line = line.strip()
+            if line.startswith("inet 100."):
+                candidate = line.split()[1]
+                octets = candidate.split(".")
+                if len(octets) == 4 and 64 <= int(octets[1]) <= 127:
+                    return candidate
+    except (OSError, ValueError, subprocess.SubprocessError):
+        pass
+    return None
+
+
 def local_ip() -> str:
+    if (ts := tailscale_ip()) is not None:
+        return ts
     sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     try:
         sock.connect(("8.8.8.8", 80))
@@ -776,6 +802,11 @@ def ship_initiative(init: dict) -> str | None:
     """Run the ship pipeline; returns the private repo URL or None.
     Raises with a readable message if git/gh fail, so the caller can surface
     it instead of handing the owner a link to an empty repo."""
+    if init.get("workdir"):
+        # Adopted portfolio asset — the owner's OWN repo. Never auto-create a
+        # new remote or push his real app on our authority; just surface the
+        # repo link that already exists.
+        return _remote_https_url(Path(init["workdir"]))
     slug = company_module.initiative_dirname(init)
     outdir = COMPANY_ARTIFACTS_ROOT / slug
     if not outdir.is_dir() or not any(outdir.rglob("*")):
@@ -858,6 +889,45 @@ def ship_in_background(initiative_id: str) -> None:
     threading.Thread(target=run, daemon=True).start()
 
 
+def promote_in_background(initiative_id: str) -> None:
+    """After the OWNER approves gate2, promote a web division's preview deploy
+    to the real production URL (`vercel --prod`). The division gate only ever
+    bought a preview — nothing goes live under the Chairman's name before his
+    own yes. Slow deploy runs outside the lock; the URL + event land in state."""
+    def run() -> None:
+        store = company_module.CompanyStore(COMPANY_STATE_PATH)
+        with COMPANY_LOCK:
+            state = store.load()
+            try:
+                init = company_module.find_initiative(state, initiative_id)
+            except KeyError:
+                return
+        if not company_module.division_charter(init).get("deploy"):
+            return
+        outdir = company_module.initiative_outdir(init, COMPANY_ARTIFACTS_ROOT)
+        scratch = {"initiatives": [], "events": []}   # captures deploy events
+        try:
+            url = company_module.deploy_initiative(scratch, init, outdir, prod=True)
+        except Exception as error:  # noqa: BLE001 — promotion must never die silently
+            url = ""
+            company_module.log_event(scratch, f"production promote failed: {error}")
+        with COMPANY_LOCK:
+            current = store.load()
+            try:
+                target = company_module.find_initiative(current, initiative_id)
+            except KeyError:
+                return
+            if url:
+                target["live_url"] = url
+            for event in scratch["events"]:
+                company_module.log_event(current, event["text"])
+            store.save(current)
+        if url:
+            print(f"company - {initiative_id} promoted to production: {url}", flush=True)
+
+    threading.Thread(target=run, daemon=True).start()
+
+
 # ── APNs push: real remote notifications, so gate decisions reach the owner
 #    ANYWHERE — closed app, cellular, other side of the world. The Mac relay
 #    talks straight to Apple's push service over HTTP/2 (via curl); no VPS
@@ -932,6 +1002,29 @@ def apns_message(title: str, body: str, category: str = "",
     return {"aps": aps, **(payload or {})}
 
 
+def apns_host(config: dict) -> str:
+    return ("api.sandbox.push.apple.com"
+            if config.get("environment", "development") == "development"
+            else "api.push.apple.com")
+
+
+def _apns_deliver(bearer: str, host: str, topic: str, push_type: str,
+                  message: str, token: str) -> str:
+    """One APNs delivery over curl --http2. Returns Apple's HTTP status code
+    ('' on transport failure). Shared by alert and VoIP pushes."""
+    result = subprocess.run(
+        ["curl", "-s", "-o", "/dev/null", "-w", "%{http_code}",
+         "--http2", "-m", "10",
+         "-H", f"authorization: bearer {bearer}",
+         "-H", f"apns-topic: {topic}",
+         "-H", f"apns-push-type: {push_type}",
+         "-H", "apns-priority: 10",
+         "-d", message,
+         f"https://{host}/3/device/{token}"],
+        text=True, capture_output=True, timeout=15, check=False)
+    return result.stdout.strip()
+
+
 def send_push(title: str, body: str, category: str = "",
               payload: dict | None = None) -> int:
     """Deliver an alert to every registered device. Returns sends that landed.
@@ -944,24 +1037,13 @@ def send_push(title: str, body: str, category: str = "",
     bearer = apns_jwt(config)
     if not bearer:
         return 0
-    host = ("api.sandbox.push.apple.com"
-            if config.get("environment", "development") == "development"
-            else "api.push.apple.com")
+    host = apns_host(config)
     message = json.dumps(apns_message(title, body, category, payload))
     sent = 0
     for token in tokens:
         try:
-            result = subprocess.run(
-                ["curl", "-s", "-o", "/dev/null", "-w", "%{http_code}",
-                 "--http2", "-m", "10",
-                 "-H", f"authorization: bearer {bearer}",
-                 "-H", f"apns-topic: {config['bundle_id']}",
-                 "-H", "apns-push-type: alert",
-                 "-H", "apns-priority: 10",
-                 "-d", message,
-                 f"https://{host}/3/device/{token}"],
-                text=True, capture_output=True, timeout=15, check=False)
-            status = result.stdout.strip()
+            status = _apns_deliver(bearer, host, config["bundle_id"], "alert",
+                                   message, token)
             if status == "200":
                 sent += 1
             elif status == "410":       # Apple says this token is dead
@@ -1000,6 +1082,154 @@ def gate_push_content(init: dict) -> tuple[str, str, str, dict]:
     return ("⚠️ The team is blocked",
             f"{init.get('title', '')} needs your call to continue.",
             "", payload)
+
+
+# ── Incoming calls: "the company calls you". A gate (or an explicit
+#    /call/request) queues a ringing call; the app's CallKit screen answers it.
+#    Delivery is VoIP push when apns.json also has {"voip_topic":
+#    "<bundle>.voip"} + a registered PushKit token, else the app's poll of
+#    /call/pending rings when open. Never faked: unconfigured = honest no-op. ──
+
+CALLS_STATE_PATH = Path.home() / ".hermes" / "mobile-calls.json"
+CALLS_LOCK = threading.Lock()
+CALL_TTL_SECONDS = 120                 # a ringing call nobody answers expires
+AUTO_CALL_COOLDOWN = 30 * 60           # at most one gate auto-call per 30 min
+CALLS_KEPT = 20
+
+
+def _load_calls() -> dict:
+    try:
+        data = json.loads(CALLS_STATE_PATH.read_text())
+        if isinstance(data, dict) and isinstance(data.get("calls"), list):
+            data.setdefault("last_auto_call", 0.0)
+            return data
+    except (OSError, json.JSONDecodeError, ValueError):
+        pass
+    return {"calls": [], "last_auto_call": 0.0}
+
+
+def _save_calls(data: dict) -> None:
+    CALLS_STATE_PATH.parent.mkdir(parents=True, exist_ok=True)
+    CALLS_STATE_PATH.write_text(json.dumps(data, indent=2))
+
+
+def _expire_calls(data: dict, now: float) -> bool:
+    """Mark stale ringing calls expired; True when anything changed."""
+    changed = False
+    for call in data["calls"]:
+        if (call.get("status") == "ringing"
+                and now - call.get("created", 0.0) > CALL_TTL_SECONDS):
+            call["status"] = "expired"
+            changed = True
+    return changed
+
+
+def create_call(caller: str, reason: str) -> dict:
+    """Queue a ringing call and try to ring the phone via VoIP push."""
+    call = {"id": secrets.token_hex(4), "caller": caller, "reason": reason,
+            "created": time.time(), "status": "ringing"}
+    with CALLS_LOCK:
+        data = _load_calls()
+        _expire_calls(data, call["created"])
+        data["calls"].append(call)
+        del data["calls"][:-CALLS_KEPT]
+        _save_calls(data)
+    send_voip_push(call)
+    return call
+
+
+def pending_call() -> dict:
+    """The newest still-ringing call for the app's poll, or {}."""
+    with CALLS_LOCK:
+        data = _load_calls()
+        if _expire_calls(data, time.time()):
+            _save_calls(data)
+        ringing = [c for c in data["calls"] if c.get("status") == "ringing"]
+        return dict(ringing[-1]) if ringing else {}
+
+
+def ack_call(call_id: str, status: str) -> dict | None:
+    """Owner answered/declined. Returns the updated call, or None if unknown."""
+    with CALLS_LOCK:
+        data = _load_calls()
+        for call in data["calls"]:
+            if call.get("id") == call_id:
+                call["status"] = status
+                _save_calls(data)
+                return dict(call)
+    return None
+
+
+def maybe_auto_call(title: str) -> bool:
+    """A gate became pending → Lena calls the owner, at most once per 30 min
+    (the cooldown persists across restarts in the calls file)."""
+    now = time.time()
+    with CALLS_LOCK:
+        data = _load_calls()
+        if now - data.get("last_auto_call", 0.0) < AUTO_CALL_COOLDOWN:
+            return False
+        data["last_auto_call"] = now
+        _save_calls(data)
+    create_call("Lena", f"The board needs your decision on {title}".strip())
+    return True
+
+
+def voip_push_tokens() -> list[str]:
+    data = RelayConfigStore(CONFIG_PATH).load()
+    tokens = data.get("voip_push_tokens")
+    return [t for t in tokens if isinstance(t, str) and t] if isinstance(tokens, list) else []
+
+
+def register_voip_push_token(token: str) -> None:
+    """PushKit tokens live apart from alert tokens — different APNs topic."""
+    store = RelayConfigStore(CONFIG_PATH)
+    data = store.load()
+    tokens = [t for t in data.get("voip_push_tokens", []) if isinstance(t, str) and t != token]
+    tokens.append(token)
+    data["voip_push_tokens"] = tokens[-5:]
+    store.save(data)
+
+
+def drop_voip_push_token(token: str) -> None:
+    store = RelayConfigStore(CONFIG_PATH)
+    data = store.load()
+    data["voip_push_tokens"] = [t for t in data.get("voip_push_tokens", []) if t != token]
+    store.save(data)
+
+
+def send_voip_push(call: dict) -> int:
+    """Ring registered devices through PushKit (wakes a CLOSED app). Needs the
+    usual apns.json key fields PLUS {"voip_topic": "<bundle>.voip"}. Returns
+    sends that landed; honest 0 + log when unconfigured — the app's
+    /call/pending poll still rings an open app."""
+    config = apns_config()
+    topic = (config or {}).get("voip_topic", "")
+    if not config or not topic:
+        print("calls - voip push skipped: no voip_topic in ~/.hermes/apns.json "
+              "(poll fallback only)", flush=True)
+        return 0
+    tokens = voip_push_tokens()
+    if not tokens:
+        print("calls - voip push skipped: no registered voip tokens", flush=True)
+        return 0
+    bearer = apns_jwt(config)
+    if not bearer:
+        return 0
+    host = apns_host(config)
+    message = json.dumps({"call": call})
+    sent = 0
+    for token in tokens:
+        try:
+            status = _apns_deliver(bearer, host, topic, "voip", message, token)
+            if status == "200":
+                sent += 1
+            elif status == "410":       # Apple says this token is dead
+                drop_voip_push_token(token)
+            else:
+                print(f"calls - voip push returned {status or 'nothing'}", flush=True)
+        except Exception as error:  # noqa: BLE001
+            print(f"calls - voip push failed: {error}", flush=True)
+    return sent
 
 
 # ── Revenue loop: the company SEES what its shipped products earn (RevenueCat)
@@ -1103,6 +1333,23 @@ def update_revenue_brief() -> None:
             store.save(state)
 
 
+def update_asc_brief() -> None:
+    """Drop recent 1-3★ App Store review complaints into company state so the
+    scout pitches fixes for REAL user pain on the shipped portfolio — same
+    feedback loop as revenue_brief. No-op when ~/.hermes/asc.json isn't wired
+    (hermes_asc degrades honestly, never crashes)."""
+    summary = asc_module.review_summary()   # 1h cache inside
+    if not summary.get("configured"):
+        return
+    brief = asc_module.complaint_brief(summary)
+    store = company_module.CompanyStore(COMPANY_STATE_PATH)
+    with COMPANY_LOCK:
+        state = store.load()
+        if state.get("asc_brief") != brief:
+            state["asc_brief"] = brief
+            store.save(state)
+
+
 # ── Demo Day assets: the screenshots the builder captures into <project>/.demo
 #    so the owner SEES the product at gate 2 instead of approving blind. ──
 
@@ -1120,7 +1367,8 @@ def artifacts_dir_for(initiative_id: str) -> Path | None:
         init = company_module.find_initiative(state, initiative_id)
     except KeyError:
         return None
-    return COMPANY_ARTIFACTS_ROOT / company_module.initiative_dirname(init)
+    # Adopted portfolio assets browse/install from the owner's real repo.
+    return company_module.initiative_outdir(init, COMPANY_ARTIFACTS_ROOT)
 
 
 def demo_dir_for(initiative_id: str) -> Path | None:
@@ -1223,6 +1471,489 @@ def initiative_file(initiative_id: str, relpath: str):
         return None
 
 
+# ── Game artifacts: the agent-built games, served to the arcade cabinet
+#    (mirrors the deliverables browser above, keyed on the games studio). ──
+
+def game_artifacts_dir(game_id: str) -> tuple[Path, dict] | None:
+    """(artifacts dir, game) for one game, or None when no such game exists.
+    The dir is where the games engine writes that game's build output."""
+    with GAMES_LOCK:
+        state = games_module.StudioStore(GAMES_STATE_PATH).load()
+    game = next((g for g in state.get("games", []) if g["id"] == game_id), None)
+    if game is None:
+        return None
+    return GAMES_ARTIFACTS_ROOT / games_module._game_dirname(game), game
+
+
+def game_artifact_content_type(path: Path) -> str:
+    # The cabinet's WKWebView must RENDER the game, not read its source.
+    if path.suffix.lower() in (".html", ".htm"):
+        return "text/html"
+    return file_content_type(path)
+
+
+def game_artifact(game_id: str, relpath: str):
+    """Bytes + MIME for one game artifact. Empty relpath → the game's entry
+    file (its `runtime`, defaulting to index.html). Returns (bytes, mime),
+    'too_large', or None. Resolved paths must stay INSIDE the game's dir."""
+    found = game_artifacts_dir(game_id)
+    if found is None:
+        return None
+    root, game = found
+    if not relpath:
+        relpath = game.get("runtime") or "index.html"
+    try:
+        root = root.resolve()
+        target = (root / relpath).resolve()
+        if not target.is_relative_to(root) or target == root or not target.is_file():
+            return None
+        if target.stat().st_size > FILE_MAX_BYTES:
+            return "too_large"
+        return target.read_bytes(), game_artifact_content_type(target)
+    except OSError:
+        return None
+
+
+# ── Install Day: OTA install of the company's built iPhone apps onto the
+#    owner's phone. xcodebuild archives + ad-hoc-exports the initiative's app,
+#    then serves Apple's itms-services manifest + .ipa over tailnet HTTPS
+#    (`tailscale serve` fronting this relay). iOS fetches both WITHOUT auth,
+#    so the capability is the unguessable token in the path — shown only
+#    inside the authed app. Unconfigured = honest available:false, never
+#    faked. Config: ~/.hermes/install-day.json {"team_id": "..."}. ──
+
+INSTALL_DAY_CONFIG_PATH = Path.home() / ".hermes" / "install-day.json"
+INSTALLS_STATE_PATH = Path.home() / ".hermes" / "mobile-installs.json"
+INSTALLS_LOCK = threading.Lock()
+TAILSCALE_BIN = "/Applications/Tailscale.app/Contents/MacOS/Tailscale"
+INSTALL_HTTPS_PORT = 8443
+_TAILNET_CACHE: dict[str, Any] = {"base": None, "checked": 0.0}
+
+
+def install_day_config() -> dict | None:
+    try:
+        data = json.loads(INSTALL_DAY_CONFIG_PATH.read_text())
+        if data.get("team_id"):
+            return data
+    except (OSError, json.JSONDecodeError, ValueError):
+        pass
+    return None
+
+
+def tailnet_https_base(force: bool = False) -> str | None:
+    """https://<magicdns>:8443 ONLY when the tailnet can really serve the OTA
+    manifest: a MagicDNS name, HTTPS certs enabled (CertDomains), and
+    `tailscale serve` fronting this relay on 8443. None otherwise — an
+    itms-services URL that can't be fetched is worse than an honest 'not yet'.
+    Cached 60s (the app polls /install)."""
+    now = time.time()
+    if not force and now - _TAILNET_CACHE["checked"] < 60:
+        return _TAILNET_CACHE["base"]
+    base = None
+    try:
+        status = json.loads(subprocess.run(
+            [TAILSCALE_BIN, "status", "--json"], capture_output=True,
+            text=True, timeout=10, check=False).stdout or "{}")
+        dns_name = ((status.get("Self") or {}).get("DNSName") or "").rstrip(".")
+        serve = subprocess.run(
+            [TAILSCALE_BIN, "serve", "status"], capture_output=True,
+            text=True, timeout=10, check=False).stdout or ""
+        # ponytail: substring check on `serve status` text; if its format ever
+        # changes we fail toward available:false, never toward a broken URL.
+        if dns_name and status.get("CertDomains") and str(INSTALL_HTTPS_PORT) in serve:
+            base = f"https://{dns_name}:{INSTALL_HTTPS_PORT}"
+    except Exception as error:  # noqa: BLE001 — no Tailscale = no OTA, not a crash
+        print(f"install - tailscale check failed: {error}", flush=True)
+    _TAILNET_CACHE.update(base=base, checked=now)
+    return base
+
+
+def _load_installs() -> dict:
+    try:
+        data = json.loads(INSTALLS_STATE_PATH.read_text())
+        if isinstance(data, dict):
+            return data
+    except (OSError, json.JSONDecodeError, ValueError):
+        pass
+    return {}
+
+
+def _save_installs(data: dict) -> None:
+    INSTALLS_STATE_PATH.parent.mkdir(parents=True, exist_ok=True)
+    INSTALLS_STATE_PATH.write_text(json.dumps(data, indent=2))
+
+
+def set_install_entry(initiative_id: str, **fields: Any) -> dict:
+    with INSTALLS_LOCK:
+        data = _load_installs()
+        entry = {**(data.get(initiative_id) or {}), **fields, "updated": time.time()}
+        data[initiative_id] = entry
+        _save_installs(data)
+        return entry
+
+
+def begin_export(initiative_id: str) -> bool:
+    """Atomically claim the export slot; False when one is already running.
+    A claim older than 2h is stale (relay died mid-build) and may be retaken."""
+    with INSTALLS_LOCK:
+        data = _load_installs()
+        entry = data.get(initiative_id) or {}
+        if (entry.get("status") == "exporting"
+                and time.time() - entry.get("updated", 0.0) < 2 * 3600):
+            return False
+        data[initiative_id] = {**entry, "status": "exporting",
+                               "note": "xcodebuild archive + ad-hoc export running",
+                               "updated": time.time()}
+        _save_installs(data)
+        return True
+
+
+def install_status(initiative_id: str) -> dict:
+    """What the app shows on the initiative's Install button. available:false
+    names the exact missing piece — config or tailnet HTTPS — honestly."""
+    with INSTALLS_LOCK:
+        entry = dict(_load_installs().get(initiative_id) or {})
+    status = entry.get("status", "none")
+    if install_day_config() is None:
+        return {"available": False, "status": status,
+                "note": 'Add ~/.hermes/install-day.json {"team_id": "<Apple '
+                        'Developer team id>"} to enable Install Day.'}
+    base = tailnet_https_base()
+    if base is None:
+        return {"available": False, "status": status,
+                "note": "enable Tailscale HTTPS (MagicDNS + cert), then run: "
+                        "tailscale serve --bg https:8443 http://127.0.0.1:8787"}
+    result = {"available": True, "status": status, "note": entry.get("note", "")}
+    if status == "ready" and entry.get("token"):
+        result["install_url"] = ("itms-services://?action=download-manifest&url="
+                                 f"{base}/install/{entry['token']}/manifest.plist")
+    return result
+
+
+def _xcodebuild_tail(result: subprocess.CompletedProcess) -> str:
+    """The honest last lines of a failed xcodebuild — what actually went wrong."""
+    return (((result.stderr or "") + "\n" + (result.stdout or "")).strip())[-400:]
+
+
+# plistlib is OFF LIMITS here: importing it drags in pyexpat, whose dylib is
+# broken on this Mac's Homebrew python — it took the whole relay module down.
+# The two plists we WRITE are tiny (hand-rendered XML below); the one we READ
+# (the built app's binary Info.plist) goes through macOS's own plutil.
+
+def _plist_escape(text: str) -> str:
+    return text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+
+
+_PLIST_HEADER = ('<?xml version="1.0" encoding="UTF-8"?>\n'
+                 '<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" '
+                 '"http://www.apple.com/DTDs/PropertyList-1.0.dtd">\n')
+
+_EXPORT_OPTIONS_TEMPLATE = _PLIST_HEADER + """<plist version="1.0"><dict>
+  <key>method</key><string>ad-hoc</string>
+  <key>teamID</key><string>{team_id}</string>
+  <key>signingStyle</key><string>automatic</string>
+</dict></plist>
+"""
+
+_INSTALL_MANIFEST_TEMPLATE = _PLIST_HEADER + """<plist version="1.0"><dict>
+  <key>items</key><array><dict>
+    <key>assets</key><array><dict>
+      <key>kind</key><string>software-package</string>
+      <key>url</key><string>{ipa_url}</string>
+    </dict></array>
+    <key>metadata</key><dict>
+      <key>bundle-identifier</key><string>{bundle_id}</string>
+      <key>bundle-version</key><string>{version}</string>
+      <key>kind</key><string>software</string>
+      <key>title</key><string>{title}</string>
+    </dict>
+  </dict></array>
+</dict></plist>
+"""
+
+
+def _read_info_plist(path: Path) -> dict:
+    """A built app's Info.plist (usually binary) → dict, via /usr/bin/plutil
+    (ships with every macOS). {} on any failure — callers stay honest."""
+    try:
+        result = subprocess.run(
+            ["/usr/bin/plutil", "-convert", "json", "-o", "-", str(path)],
+            capture_output=True, text=True, timeout=15, check=False)
+        data = json.loads(result.stdout) if result.returncode == 0 else {}
+        return data if isinstance(data, dict) else {}
+    except Exception:  # noqa: BLE001
+        return {}
+
+
+def _archive_initiative(initiative_id: str, team_id: str,
+                        subdir: str) -> tuple[Path | None, Path | None, str]:
+    """The shared front half of Install Day AND TestFlight: find the app
+    container in the deliverables, pick a scheme, xcodebuild archive into
+    <artifacts>/<subdir>/app.xcarchive. Returns (workdir, built .app, error) —
+    error '' on success."""
+    artifacts = artifacts_dir_for(initiative_id)
+    if artifacts is None or not artifacts.exists():
+        return None, None, "no artifacts folder for this initiative"
+    # Real workspaces only — every .xcodeproj contains an internal project.xcworkspace.
+    workspaces = [p for p in sorted(artifacts.rglob("*.xcworkspace"))
+                  if p.parent.suffix != ".xcodeproj"]
+    projects = sorted(artifacts.rglob("*.xcodeproj"))
+    container = (workspaces or projects or [None])[0]
+    if container is None:
+        return None, None, ("No .xcodeproj/.xcworkspace in the deliverables — "
+                            "not an installable iOS app.")
+    kind_flag = "-workspace" if container.suffix == ".xcworkspace" else "-project"
+    xcodebuild = _resolve_bin("xcodebuild")
+    listing = run_killable([xcodebuild, kind_flag, str(container), "-list", "-json"],
+                           timeout=120)
+    try:
+        info = json.loads(listing.stdout or "{}")
+        schemes = (info.get("project") or info.get("workspace") or {}).get("schemes") or []
+    except json.JSONDecodeError:
+        schemes = []
+    if not schemes:
+        return None, None, f"xcodebuild -list found no schemes: {_xcodebuild_tail(listing)}"
+    scheme = next((s for s in schemes if s == container.stem), schemes[0])
+
+    workdir = artifacts / subdir
+    shutil.rmtree(workdir, ignore_errors=True)
+    workdir.mkdir(parents=True)
+    archive = workdir / "app.xcarchive"
+    result = run_killable(
+        [xcodebuild, kind_flag, str(container), "-scheme", scheme,
+         "-configuration", "Release", "-destination", "generic/platform=iOS",
+         "-archivePath", str(archive), "archive", "-allowProvisioningUpdates",
+         f"DEVELOPMENT_TEAM={team_id}", "CODE_SIGN_STYLE=Automatic"],
+        timeout=1800)
+    if result.returncode != 0:
+        return None, None, f"archive failed: {_xcodebuild_tail(result)}"
+    apps = sorted((archive / "Products" / "Applications").glob("*.app"))
+    if not apps:
+        return None, None, "archive produced no .app bundle"
+    return workdir, apps[0], ""
+
+
+def _export_ipa(initiative_id: str) -> None:
+    """archive → ad-hoc export → mint capability token. Every failure lands in
+    the status file with the real reason; nothing is ever reported ready that
+    isn't an .ipa on disk."""
+    config = install_day_config()
+    if config is None:
+        set_install_entry(initiative_id, status="failed",
+                          note="Missing team_id config for this initiative.")
+        return
+    install_dir, app, error = _archive_initiative(initiative_id,
+                                                  config["team_id"], ".install")
+    if error:
+        set_install_entry(initiative_id, status="failed", note=error)
+        return
+    archive = install_dir / "app.xcarchive"
+    info_plist = _read_info_plist(app / "Info.plist")
+    bundle_id = str(info_plist.get("CFBundleIdentifier") or "")
+    if not bundle_id:
+        set_install_entry(initiative_id, status="failed",
+                          note="built app has no readable CFBundleIdentifier — manifest would be invalid")
+        return
+    version = str(info_plist.get("CFBundleShortVersionString")
+                  or info_plist.get("CFBundleVersion") or "1.0")
+    options = install_dir / "ExportOptions.plist"
+    options.write_text(_EXPORT_OPTIONS_TEMPLATE.format(
+        team_id=_plist_escape(config["team_id"])))
+    export_dir = install_dir / "export"
+    result = run_killable(
+        [_resolve_bin("xcodebuild"), "-exportArchive", "-archivePath", str(archive),
+         "-exportPath", str(export_dir), "-exportOptionsPlist", str(options),
+         "-allowProvisioningUpdates"],
+        timeout=900)
+    ipas = sorted(export_dir.glob("*.ipa")) if export_dir.exists() else []
+    if result.returncode != 0 or not ipas:
+        set_install_entry(initiative_id, status="failed",
+                          note=f"ad-hoc export failed: {_xcodebuild_tail(result)}")
+        return
+    try:
+        state = company_module.CompanyStore(COMPANY_STATE_PATH).load()
+        title = company_module.find_initiative(state, initiative_id).get("title", "")
+    except Exception:  # noqa: BLE001
+        title = ""
+    set_install_entry(initiative_id, status="ready", note="",
+                      token=secrets.token_urlsafe(16), ipa_path=str(ipas[0]),
+                      bundle_id=bundle_id, version=version,
+                      title=title or app.stem)
+    print(f"install - {initiative_id} ipa ready: {ipas[0].name}", flush=True)
+
+
+def export_ipa_in_background(initiative_id: str) -> None:
+    """Slow xcodebuild work off the request thread — same shape as
+    ship_in_background. run_killable kills the WHOLE tree on timeout so a hung
+    build never orphans (that leak bit ship before)."""
+    def run() -> None:
+        try:
+            _export_ipa(initiative_id)
+        except Exception as error:  # noqa: BLE001 — the status file gets the truth
+            set_install_entry(initiative_id, status="failed",
+                              note=f"Export crashed: {str(error)[:300]}")
+            print(f"install - {initiative_id} export FAILED: {error}", flush=True)
+    threading.Thread(target=run, daemon=True).start()
+
+
+def install_manifest(entry: dict, ipa_url: str) -> bytes:
+    """Apple's OTA manifest plist — what the iPhone installer actually reads."""
+    return _INSTALL_MANIFEST_TEMPLATE.format(
+        ipa_url=_plist_escape(ipa_url),
+        bundle_id=_plist_escape(entry.get("bundle_id", "")),
+        version=_plist_escape(str(entry.get("version", "1.0"))),
+        title=_plist_escape(entry.get("title", "App"))).encode()
+
+
+def install_asset(token: str, filename: str) -> tuple[bytes, str] | None:
+    """(bytes, content_type) for the two files iOS fetches WITHOUT auth. The
+    urlsafe token in the path is the capability; anything else is 404."""
+    if not token or filename not in ("manifest.plist", "app.ipa"):
+        return None
+    with INSTALLS_LOCK:
+        data = _load_installs()
+    for entry in data.values():
+        stored = entry.get("token", "")
+        if not (stored and secrets.compare_digest(stored, token)
+                and entry.get("status") == "ready"):
+            continue
+        if filename == "app.ipa":
+            try:
+                # ponytail: whole-.ipa read into memory; stream if apps outgrow RAM
+                return Path(entry["ipa_path"]).read_bytes(), "application/octet-stream"
+            except OSError:
+                return None
+        base = tailnet_https_base()
+        if base is None:
+            return None   # can't mint an absolute HTTPS ipa URL honestly
+        return (install_manifest(entry, f"{base}/install/{token}/app.ipa"),
+                "text/xml; charset=utf-8")
+    return None
+
+
+# ── TestFlight: the company ships to Apple ITSELF once the owner approves.
+#    Same archive front-half as Install Day, then an App Store export and an
+#    `xcrun altool --upload-app` with the owner's ASC API key. Owner-triggered
+#    only (a button in the app AFTER gate2) — publishing to Apple is exactly
+#    the kind of consequential move that never runs on the company's own
+#    authority. Unconfigured = honest available:false, never a fake. ──
+
+_EXPORT_APPSTORE_TEMPLATE = _PLIST_HEADER + """<plist version="1.0"><dict>
+  <key>method</key><string>app-store</string>
+  <key>teamID</key><string>{team_id}</string>
+  <key>signingStyle</key><string>automatic</string>
+</dict></plist>
+"""
+
+
+def _tf_key(initiative_id: str) -> str:
+    """TestFlight entries share the installs state file under a tf: prefix —
+    invisible to install_status (which looks up the bare id), zero new
+    persistence code."""
+    return f"tf:{initiative_id}"
+
+
+def submit_status(initiative_id: str) -> dict:
+    """What the app shows on the Send-to-TestFlight button. available:false
+    names the exact missing credential honestly."""
+    with INSTALLS_LOCK:
+        entry = dict(_load_installs().get(_tf_key(initiative_id)) or {})
+    status = entry.get("status", "none")
+    if asc_module.asc_config() is None:
+        return {"available": False, "status": status,
+                "note": 'Add ~/.hermes/asc.json {"key_path", "key_id", '
+                        '"issuer_id"} (an App Store Connect API key) to '
+                        'enable TestFlight submits.'}
+    if install_day_config() is None:
+        return {"available": False, "status": status,
+                "note": 'Add ~/.hermes/install-day.json {"team_id": "<Apple '
+                        'Developer team id>"} — signing needs it.'}
+    return {"available": True, "status": status, "note": entry.get("note", "")}
+
+
+def begin_submit(initiative_id: str) -> bool:
+    """Atomically claim the TestFlight slot (mirror of begin_export)."""
+    with INSTALLS_LOCK:
+        data = _load_installs()
+        entry = data.get(_tf_key(initiative_id)) or {}
+        if (entry.get("status") == "submitting"
+                and time.time() - entry.get("updated", 0.0) < 2 * 3600):
+            return False
+        data[_tf_key(initiative_id)] = {**entry, "status": "submitting",
+                                        "note": "archive + App Store upload running",
+                                        "updated": time.time()}
+        _save_installs(data)
+        return True
+
+
+def _ensure_altool_key(config: dict) -> None:
+    """altool only finds ASC API keys in ./private_keys, ~/private_keys, or
+    ~/.appstoreconnect/private_keys — stage the owner's key there once."""
+    dest = Path.home() / "private_keys" / f"AuthKey_{config['key_id']}.p8"
+    if not dest.exists():
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy(Path(config["key_path"]).expanduser(), dest)
+
+
+def _submit_testflight(initiative_id: str) -> None:
+    """archive → app-store export → altool upload. Every failure lands in the
+    tf: entry with the real reason; 'submitted' means Apple ACCEPTED the
+    upload (processing then takes ~5–30 min on their side)."""
+    def fail(note: str) -> None:
+        set_install_entry(_tf_key(initiative_id), status="failed", note=note[:400])
+
+    asc = asc_module.asc_config()
+    team = install_day_config()
+    if asc is None or team is None:
+        fail("Missing ~/.hermes/asc.json or install-day.json.")
+        return
+    tf_dir, app, error = _archive_initiative(initiative_id,
+                                             team["team_id"], ".testflight")
+    if error:
+        fail(error)
+        return
+    options = tf_dir / "ExportOptions.plist"
+    options.write_text(_EXPORT_APPSTORE_TEMPLATE.format(
+        team_id=_plist_escape(team["team_id"])))
+    export_dir = tf_dir / "export"
+    result = run_killable(
+        [_resolve_bin("xcodebuild"), "-exportArchive",
+         "-archivePath", str(tf_dir / "app.xcarchive"),
+         "-exportPath", str(export_dir), "-exportOptionsPlist", str(options),
+         "-allowProvisioningUpdates"],
+        timeout=900)
+    ipas = sorted(export_dir.glob("*.ipa")) if export_dir.exists() else []
+    if result.returncode != 0 or not ipas:
+        fail(f"App Store export failed: {_xcodebuild_tail(result)}")
+        return
+    _ensure_altool_key(asc)
+    upload = run_killable(
+        ["/usr/bin/xcrun", "altool", "--upload-app", "-f", str(ipas[0]),
+         "-t", "ios", "--apiKey", asc["key_id"], "--apiIssuer", asc["issuer_id"]],
+        timeout=1800)
+    if upload.returncode != 0:
+        fail(f"upload failed: {_xcodebuild_tail(upload)}")
+        return
+    set_install_entry(_tf_key(initiative_id), status="submitted",
+                      note="Uploaded — Apple is processing; it appears in "
+                           "TestFlight in ~5–30 minutes.")
+    send_push("🛫 On its way to TestFlight",
+              "The build uploaded to App Store Connect.",
+              payload={"initiative_id": initiative_id})
+    print(f"testflight - {initiative_id} uploaded: {ipas[0].name}", flush=True)
+
+
+def submit_testflight_in_background(initiative_id: str) -> None:
+    def run() -> None:
+        try:
+            _submit_testflight(initiative_id)
+        except Exception as error:  # noqa: BLE001 — the status entry gets the truth
+            set_install_entry(_tf_key(initiative_id), status="failed",
+                              note=f"Submit crashed: {str(error)[:300]}")
+            print(f"testflight - {initiative_id} FAILED: {error}", flush=True)
+    threading.Thread(target=run, daemon=True).start()
+
+
 # ── Company Vault: Lena files meetings as linked Obsidian notes (additive) ──
 
 CONSTITUTION_FILENAME = "Company.md"
@@ -1260,6 +1991,31 @@ def _vault_write(subdir: str, filename: str, content: str) -> None:
     folder = COMPANY_VAULT_ROOT / subdir if subdir else COMPANY_VAULT_ROOT
     folder.mkdir(parents=True, exist_ok=True)
     (folder / filename).write_text(content)
+
+
+def file_unfiled_lessons(state: dict) -> int:
+    """Institutional memory → second brain: every recorded lesson that hasn't
+    been filed yet becomes a linked note in Lessons/ (the knowledge graph and
+    the agents' vault reads pick it up). Marks lessons filed in-place — the
+    caller persists state. Returns how many were filed; never raises (a vault
+    hiccup must not break a gate decision or the heartbeat)."""
+    filed = 0
+    for lesson in state.get("lessons", []):
+        if lesson.get("filed"):
+            continue
+        try:
+            date = time.strftime("%Y-%m-%d", time.localtime(lesson.get("ts") or time.time()))
+            name = f"{date}-{_vault_slug(lesson.get('title', 'lesson'))}"
+            _vault_write("Lessons", f"{name}.md", (
+                f"---\ntype: lesson\noutcome: {lesson.get('outcome', '')}\n"
+                f"division: {lesson.get('division', '')}\ndate: {date}\n---\n"
+                f"# Lesson — {lesson.get('title', '')}\n\n"
+                f"{lesson.get('text', '')}\n"))
+            lesson["filed"] = True
+            filed += 1
+        except Exception as error:  # noqa: BLE001 — retried on the next pass
+            print(f"company - lesson filing failed: {error}", flush=True)
+    return filed
 
 
 def ensure_constitution(root: Path | None = None) -> None:
@@ -1468,6 +2224,33 @@ def obsidian_notes(root: Path) -> tuple[list[Path], bool]:
         return sorted(notes), False
     notes.sort(key=mtime, reverse=True)
     return notes[:OBSIDIAN_NOTE_CAP], True
+
+
+BRAIN_DUMP_CAP = 64 * 1024
+
+
+def capture_brain_dump(text: str, title: str = "") -> dict:
+    """Owner's brain dump → an Inbox/ note in the second brain. The Obsidian
+    vault wins; the company vault is the fallback so capture always lands.
+    Returns {ok, path, id} — id is the node it appears as in /company/vault/graph.
+    Filename comes from _vault_slug (strict [a-z0-9-]), so traversal is impossible."""
+    text = text[:BRAIN_DUMP_CAP]
+    root = obsidian_vault_root()
+    in_obsidian = root is not None
+    if root is None:
+        root = COMPANY_VAULT_ROOT
+    slug = _vault_slug(title or " ".join(text.split()[:6]))
+    folder = root / "Inbox"
+    folder.mkdir(parents=True, exist_ok=True)
+    stem = f"{time.strftime('%Y-%m-%d-%H%M')}-{slug}"
+    path = folder / f"{stem}.md"
+    if path.exists():   # same minute, same words — keep both
+        stem = f"{stem}-{secrets.token_hex(2)}"
+        path = folder / f"{stem}.md"
+    heading = f"# {title.strip()}\n\n" if title.strip() else ""
+    path.write_text(f"{heading}{text.rstrip()}\n\n#brain-dump\n")
+    node_id = f"obsidian:Inbox/{stem}" if in_obsidian else stem
+    return {"ok": True, "path": str(path), "id": node_id}
 
 
 def vault_graph() -> dict:
@@ -1781,12 +2564,54 @@ def run_scheduled_meeting(topic: str) -> None:
     file_meeting_minutes(meeting_id)
 
 
+def run_meeting_actions(meeting_id: str) -> None:
+    """Talk becomes tracked work: the CEO distills a finished meeting's
+    transcript into concrete action items, appended to the owner's Kanban
+    backlog. Background thread; one agent turn."""
+    store = company_module.CompanyStore(COMPANY_STATE_PATH)
+    with COMPANY_LOCK:
+        state = store.load()
+        meeting = find_meeting(state, meeting_id)
+        if meeting is None:
+            return
+        topic = meeting.get("topic", "")
+        transcript = "\n".join(f"{t['role'].upper()}: {t['text']}"
+                               for t in meeting.get("turns", []))
+    if not transcript.strip():
+        return
+    prompt = company_module.role_prompt("ceo", (
+        f"Distill this internal meeting on \"{topic}\" into the concrete action "
+        f"items the team should actually execute.\nTranscript:\n{transcript}\n\n"
+        "Reply with ONLY the action items, one per line, at most 6, each a "
+        "single specific actionable sentence. No numbering, no headers, no "
+        "commentary. If nothing in the meeting is actionable, reply exactly: NONE"))
+    try:
+        reply = company_cli_runner("ceo", prompt).strip()
+    except Exception as error:  # noqa: BLE001 — a failed distill must not crash anything
+        print(f"company - meeting actions failed: {error}", flush=True)
+        return
+    if reply.upper().startswith("NONE"):
+        items: list[str] = []
+    else:
+        items = [re.sub(r"^[-*•\d.)\s]+", "", line).strip()
+                 for line in reply.splitlines()]
+        items = [line for line in items if len(line) > 8][:6]
+    with COMPANY_LOCK:
+        s = store.load()
+        created = company_module.add_tasks(s, items)
+        company_module.log_event(
+            s, f"meeting → {len(created)} action item{'s' if len(created) != 1 else ''}: {topic[:40]}")
+        store.save(s)
+    print(f"company - meeting actions: {len(items)} from {topic[:40]}", flush=True)
+
+
 def run_schedules() -> None:
     """Fire any owner automations that are due — recurring directives, asks, and
     office-hours meetings (the Cron). Runs each heartbeat; gated on enabled."""
     store = company_module.CompanyStore(COMPANY_STATE_PATH)
     asks_to_run: list[tuple[str, str]] = []
     meetings_to_run: list[str] = []
+    packet_due = False
     with COMPANY_LOCK:
         state = store.load()
         if not state.get("enabled"):
@@ -1797,6 +2622,8 @@ def run_schedules() -> None:
         now = time.time()
         for sched in due:
             sched["last_fired"] = now
+            if sched.get("cadence") == "once":
+                sched["enabled"] = False   # fired — stays visible, never repeats
             if sched["kind"] == "ask":
                 ask = company_module.new_ask(sched["text"])
                 state.setdefault("asks", []).insert(0, ask)
@@ -1804,6 +2631,8 @@ def run_schedules() -> None:
                 asks_to_run.append((ask["id"], sched["text"]))
             elif sched["kind"] == "meeting":
                 meetings_to_run.append(sched["text"] or sched["title"])
+            elif sched["kind"] == "board_packet":
+                packet_due = True
             else:  # directive
                 company_module.seed_initiative(state, sched["text"])
             company_module.log_event(state, f"scheduled {sched['kind']}: {sched['title']}")
@@ -1814,6 +2643,53 @@ def run_schedules() -> None:
     for topic in meetings_to_run:
         threading.Thread(target=run_scheduled_meeting, args=(topic,), daemon=True).start()
         print(f"company - scheduled office hours: {topic[:50]}", flush=True)
+    if packet_due:
+        threading.Thread(target=run_board_packet, daemon=True).start()
+        print("company - weekly board packet: CFO writing", flush=True)
+
+
+def seed_board_packet_schedule() -> None:
+    """Default owner automation: the Sunday-18:00 weekly board packet. Seeded
+    ONCE — if any board_packet schedule exists (even disabled), leave the
+    owner's choice alone."""
+    store = company_module.CompanyStore(COMPANY_STATE_PATH)
+    with COMPANY_LOCK:
+        state = store.load()
+        if any(s.get("kind") == "board_packet" for s in state.get("schedules", [])):
+            return
+        state.setdefault("schedules", []).append(company_module.new_schedule(
+            "Weekly board packet", "board_packet", "", "weekly",
+            at_hour=18, at_minute=0, weekday=6))   # Sunday 18:00
+        store.save(state)
+
+
+def run_board_packet() -> None:
+    """Sunday evening: the CFO writes the one-page weekly board report from
+    REAL state, Lena files it in the vault, and the owner's phone gets a ping.
+    Slow model turn runs OUTSIDE the lock, like every other agent turn."""
+    store = company_module.CompanyStore(COMPANY_STATE_PATH)
+    with COMPANY_LOCK:
+        state = store.load()
+    prompt = company_module.board_packet_prompt(state, state.get("revenue_brief", ""))
+    try:
+        report = company_cli_runner("cfo", prompt).strip()
+    except Exception as error:  # noqa: BLE001 — a failed packet must not kill the heartbeat
+        print(f"company - board packet failed: {error}", flush=True)
+        return
+    if not report:
+        print("company - board packet failed: CFO returned nothing", flush=True)
+        return
+    date = time.strftime("%Y-%m-%d")
+    note = f"{date}-board-packet"
+    _vault_write("Board Packets", f"{note}.md",
+                 f"---\ntype: board-packet\ndate: {date}\n---\n{report}\n")
+    with COMPANY_LOCK:
+        current = store.load()
+        company_module.log_event(current, f"weekly board packet filed: {note}")
+        store.save(current)
+    send_push("📊 Board packet", "Your weekly board report is ready.",
+              payload={"kind": "board_packet", "note": note})
+    print(f"company - board packet filed: {note}", flush=True)
 
 
 def run_task_work() -> None:
@@ -2010,13 +2886,19 @@ def company_heartbeat_loop() -> None:
             if events or state["last_tick"] != before["last_tick"]:
                 with COMPANY_LOCK:
                     current = store.load()
-                    store.save(company_module.merge_tick_results(current, state, before))
+                    merged = company_module.merge_tick_results(current, state, before)
+                    file_unfiled_lessons(merged)   # post-mortems → vault notes
+                    store.save(merged)
             # Real push (APNs) the moment something needs the owner's decision —
             # reaches a closed app on cellular, not just the local Wi-Fi poll.
             for init in gate_transitions(before, state):
                 title, body, category, payload = gate_push_content(init)
                 if send_push(title, body, category, payload):
                     print(f"company - pushed: {title} ({init['id']})", flush=True)
+                # The company also CALLS the owner (CallKit) — Lena rings for a
+                # decision, at most once per 30 min so the phone stays sane.
+                if maybe_auto_call(init.get("title", "")):
+                    print(f"company - Lena is calling about {init['id']}", flush=True)
             for event in events:
                 print(f"company - {event}", flush=True)
             # If the overload pause has dragged on, tell the owner ONCE (per
@@ -2044,6 +2926,9 @@ def company_heartbeat_loop() -> None:
             # Revenue feedback: keep the agents' view of what the portfolio
             # earns fresh (15-min cache inside; no-op without a RevenueCat key).
             update_revenue_brief()
+            # Review feedback: what shipped-app users COMPLAIN about becomes
+            # scout material (1h cache inside; no-op without ~/.hermes/asc.json).
+            update_asc_brief()
         except Exception as error:  # noqa: BLE001 — the pulse must survive anything
             print(f"company - heartbeat error: {error}", flush=True)
         time.sleep(60)
@@ -2084,6 +2969,18 @@ class RelayHandler(BaseHTTPRequestHandler):
                 }
             )
             return
+        if self.path.startswith("/install/"):
+            # OTA install assets: iOS's installer fetches these WITHOUT any
+            # Authorization header, so auth is the unguessable capability token
+            # in the path (handed out only inside the authed app).
+            parts = self.path.split("/")
+            asset = install_asset(parts[2], parts[3]) if len(parts) == 4 else None
+            if asset is None:
+                self.send_json({"error": "not_found"}, status=404)
+                return
+            data, content_type = asset
+            self.send_bytes(data, content_type)
+            return
         if self.path in {"/pair", "/pair.json", "/pair.png"} and not self.pairing_allowed():
             self.send_json({"error": "pairing_window_closed",
                             "fix": "Restart the relay (or run Scripts/setup.sh) and pair within 10 minutes, or open this page on the Mac itself."},
@@ -2109,6 +3006,39 @@ class RelayHandler(BaseHTTPRequestHandler):
             store = company_module.CompanyStore(COMPANY_STATE_PATH)
             with COMPANY_LOCK:
                 self.send_json(company_summary(store.load()))
+            return
+        if self.path == "/company/divisions":
+            # The Divisions Floor rollup: all seven bays, zeros included.
+            if not self.is_authorized():
+                self.send_json({"error": "unauthorized"}, status=401)
+                return
+            store = company_module.CompanyStore(COMPANY_STATE_PATH)
+            with COMPANY_LOCK:
+                state = store.load()
+            self.send_json({"divisions": company_module.divisions_summary(state)})
+            return
+        if self.path == "/company/live":
+            # Over-the-shoulder view: what each working initiative's agent
+            # last produced. ponytail: the last FINISHED turn (minutes are
+            # written per turn), not an intra-turn token stream — upgrade to
+            # transcript tailing if the owner wants keystroke-level live.
+            if not self.is_authorized():
+                self.send_json({"error": "unauthorized"}, status=401)
+                return
+            store = company_module.CompanyStore(COMPANY_STATE_PATH)
+            with COMPANY_LOCK:
+                state = store.load()
+            entries = []
+            for init in company_module.working(state):
+                last = (init.get("minutes") or [{}])[-1]
+                entries.append({
+                    "id": init["id"], "title": init["title"],
+                    "stage": init["stage"], "phase": init.get("exec_phase", ""),
+                    "role": last.get("role", ""), "ts": last.get("ts", ""),
+                    "text": (last.get("text", "") or "")[-2000:],
+                    "calls_used": init.get("calls_used", 0),
+                })
+            self.send_json({"working": entries, "enabled": state.get("enabled", False)})
             return
         if self.path.startswith("/company/demo/"):
             # /company/demo/<initiative_id>/<filename> → the image/video bytes.
@@ -2163,6 +3093,22 @@ class RelayHandler(BaseHTTPRequestHandler):
                 return
             self.send_json({"files": files})
             return
+        if self.path.startswith("/company/initiative/") and self.path.endswith("/install"):
+            # Install Day status: exporting/ready/failed + the itms-services
+            # URL when ready (honest available:false names the missing piece).
+            if not self.is_authorized():
+                self.send_json({"error": "unauthorized"}, status=401)
+                return
+            self.send_json(install_status(self.path.split("/")[3]))
+            return
+        if self.path.startswith("/company/initiative/") and self.path.endswith("/testflight"):
+            # TestFlight submit status: submitting/submitted/failed + honest
+            # available:false naming the missing credential.
+            if not self.is_authorized():
+                self.send_json({"error": "unauthorized"}, status=401)
+                return
+            self.send_json(submit_status(self.path.split("/")[3]))
+            return
         if self.path.startswith("/company/initiative/"):
             if not self.is_authorized():
                 self.send_json({"error": "unauthorized"}, status=401)
@@ -2209,6 +3155,28 @@ class RelayHandler(BaseHTTPRequestHandler):
                 state = games_module.StudioStore(GAMES_STATE_PATH).load()
             self.send_json(games_module.studio_summary(state))
             return
+        if self.path.startswith("/games/artifact/"):
+            # /games/artifact/<game_id>/<relative/path...> → one game file's
+            # bytes; /games/artifact/<game_id>/ → the game's entry HTML, so
+            # the arcade cabinet can point a web view straight at it.
+            if not self.is_authorized():
+                self.send_json({"error": "unauthorized"}, status=401)
+                return
+            parts = self.path.split("/", 4)   # ['', 'games', 'artifact', id, relpath]
+            if len(parts) < 4 or not parts[3]:
+                self.send_json({"error": "not_found"}, status=404)
+                return
+            relpath = urllib.parse.unquote(parts[4]) if len(parts) == 5 else ""
+            result = game_artifact(parts[3], relpath)
+            if result is None:
+                self.send_json({"error": "not_found"}, status=404)
+                return
+            if result == "too_large":
+                self.send_json({"error": "file_too_large",
+                                "max_bytes": FILE_MAX_BYTES}, status=413)
+                return
+            self.send_bytes(result[0], result[1])
+            return
         if self.path.startswith("/games/game/"):
             if not self.is_authorized():
                 self.send_json({"error": "unauthorized"}, status=401)
@@ -2246,6 +3214,20 @@ class RelayHandler(BaseHTTPRequestHandler):
                 return
             self.send_json(revenue_summary())
             return
+        if self.path == "/call/pending":
+            # The app polls this alongside /company — the newest ringing call.
+            if not self.is_authorized():
+                self.send_json({"error": "unauthorized"}, status=401)
+                return
+            self.send_json(pending_call())
+            return
+        if self.path == "/asc/summary":
+            # Live App Store reviews per shipped app (1h cache inside).
+            if not self.is_authorized():
+                self.send_json({"error": "unauthorized"}, status=401)
+                return
+            self.send_json(asc_module.review_summary())
+            return
         if self.path == "/voice/usage":
             # The Voice settings screen: budgets + what's been spent.
             if not self.is_authorized():
@@ -2265,21 +3247,64 @@ class RelayHandler(BaseHTTPRequestHandler):
 
     def do_POST(self) -> None:
         is_meeting_say = self.path.startswith("/company/meeting/") and self.path.endswith("/say")
+        is_meeting_actions = (self.path.startswith("/company/meeting/")
+                              and self.path.endswith("/actions"))
+        is_export_ipa = (self.path.startswith("/company/initiative/")
+                         and self.path.endswith("/export-ipa"))
+        is_submit_tf = (self.path.startswith("/company/initiative/")
+                        and self.path.endswith("/submit-testflight"))
         if self.path not in {"/chat", "/chat/stream", "/tts", "/push/register",
+                             "/push/register-voip", "/call/request", "/call/ack",
+                             "/vault/capture",
                              "/company/start", "/company/halt", "/company/gate",
                              "/company/iterate", "/company/directive", "/company/ask",
                              "/company/thesis", "/company/vault/sync", "/company/config",
                              "/company/tasks", "/company/tasks/mode",
                              "/company/tasks/clear", "/company/task/delete",
                              "/company/schedules", "/company/schedule/delete",
-                             "/company/schedule/toggle",
+                             "/company/schedule/toggle", "/company/portfolio/adopt",
+                             "/company/meeting/convene",
                              "/games/start", "/games/halt",
-                             "/games/concept", "/games/score"} and not is_meeting_say:
+                             "/games/concept", "/games/score", "/games/resume"} \
+                and not is_meeting_say and not is_meeting_actions \
+                and not is_export_ipa and not is_submit_tf:
             self.send_json({"error": "not_found"}, status=404)
             return
 
         if not self.is_authorized():
             self.send_json({"error": "unauthorized"}, status=401)
+            return
+
+        if is_submit_tf:
+            # The company ships to Apple — but ONLY on this owner-pressed
+            # button after gate2. The app polls GET .../testflight for status.
+            initiative_id = self.path.split("/")[3]
+            status = submit_status(initiative_id)
+            if not status["available"]:
+                self.send_json(status)          # honest: which credential is missing
+                return
+            if artifacts_dir_for(initiative_id) is None:
+                self.send_json({"error": "initiative_not_found"}, status=404)
+                return
+            if begin_submit(initiative_id):
+                submit_testflight_in_background(initiative_id)
+            self.send_json(submit_status(initiative_id))
+            return
+
+        if is_export_ipa:
+            # Install Day: kick the archive + ad-hoc export in the background;
+            # the app polls GET .../install for exporting/ready/failed.
+            initiative_id = self.path.split("/")[3]
+            status = install_status(initiative_id)
+            if not status["available"]:
+                self.send_json(status)          # honest: config/tailnet missing
+                return
+            if artifacts_dir_for(initiative_id) is None:
+                self.send_json({"error": "initiative_not_found"}, status=404)
+                return
+            if begin_export(initiative_id):
+                export_ipa_in_background(initiative_id)
+            self.send_json(install_status(initiative_id))
             return
 
         if is_meeting_say:
@@ -2297,6 +3322,36 @@ class RelayHandler(BaseHTTPRequestHandler):
             self.send_json({"ok": True})
             return
 
+        if is_meeting_actions:
+            # Turn a finished meeting into Kanban tasks — the CEO distills the
+            # transcript in the background; items land in the owner's backlog.
+            meeting_id = self.path.split("/")[3]
+            store = company_module.CompanyStore(COMPANY_STATE_PATH)
+            with COMPANY_LOCK:
+                if find_meeting(store.load(), meeting_id) is None:
+                    self.send_json({"error": "meeting_not_found"}, status=404)
+                    return
+            threading.Thread(target=run_meeting_actions,
+                             args=(meeting_id,), daemon=True).start()
+            self.send_json({"ok": True})
+            return
+
+        if self.path == "/company/meeting/convene":
+            # Convene now: the org meets on the owner's topic immediately
+            # (run_scheduled_meeting already refuses to stack on a live one).
+            try:
+                topic = str(self.read_json().get("topic", "")).strip()
+            except Exception as error:
+                self.send_json({"error": f"invalid_json: {error}"}, status=400)
+                return
+            if not topic:
+                self.send_json({"error": "topic_required"}, status=400)
+                return
+            threading.Thread(target=run_scheduled_meeting,
+                             args=(topic,), daemon=True).start()
+            self.send_json({"ok": True})
+            return
+
         if self.path == "/push/register":
             try:
                 token = str(self.read_json().get("token", "")).strip()
@@ -2308,6 +3363,67 @@ class RelayHandler(BaseHTTPRequestHandler):
                 return
             register_push_token(token.lower())
             self.send_json({"ok": True, "apns": apns_config() is not None})
+            return
+
+        if self.path == "/push/register-voip":
+            # PushKit token — rings a CLOSED app when apns.json has voip_topic.
+            try:
+                token = str(self.read_json().get("token", "")).strip()
+            except Exception as error:
+                self.send_json({"error": f"invalid_json: {error}"}, status=400)
+                return
+            if not re.fullmatch(r"[0-9a-fA-F]{32,200}", token):
+                self.send_json({"error": "token_invalid"}, status=400)
+                return
+            register_voip_push_token(token.lower())
+            self.send_json({"ok": True,
+                            "voip": bool((apns_config() or {}).get("voip_topic"))})
+            return
+
+        if self.path == "/call/request":
+            # Company events (or the owner's own tools) queue an incoming call.
+            try:
+                body = self.read_json()
+                caller = str(body.get("caller", "")).strip() or "The company"
+                reason = str(body.get("reason", "")).strip()
+            except Exception as error:
+                self.send_json({"error": f"invalid_json: {error}"}, status=400)
+                return
+            self.send_json(create_call(caller, reason))
+            return
+
+        if self.path == "/call/ack":
+            try:
+                body = self.read_json()
+                call_id = str(body.get("id", "")).strip()
+                status = str(body.get("status", "")).strip()
+            except Exception as error:
+                self.send_json({"error": f"invalid_json: {error}"}, status=400)
+                return
+            if status not in ("answered", "declined"):
+                self.send_json({"error": "status_must_be_answered_or_declined"}, status=400)
+                return
+            call = ack_call(call_id, status)
+            if call is None:
+                self.send_json({"error": "call_not_found"}, status=404)
+                return
+            self.send_json(call)
+            return
+
+        if self.path == "/vault/capture":
+            # Brain dump: whatever's in the owner's head lands in Inbox/ as a
+            # note the knowledge graph picks up.
+            try:
+                body = self.read_json()
+                text = str(body.get("text", "")).strip()
+                title = str(body.get("title", "")).strip()
+            except Exception as error:
+                self.send_json({"error": f"invalid_json: {error}"}, status=400)
+                return
+            if not text:
+                self.send_json({"error": "text_required"}, status=400)
+                return
+            self.send_json(capture_brain_dump(text, title))
             return
 
         if self.path == "/tts":
@@ -2384,6 +3500,16 @@ class RelayHandler(BaseHTTPRequestHandler):
                             if game.get("score") is None or score > game["score"]:
                                 game["score"] = score
                             break
+                elif self.path == "/games/resume":
+                    # Resume a budget-paused game back to its pre-pause stage.
+                    try:
+                        games_module.resume_game(state, str(body.get("id", "")))
+                    except KeyError:
+                        self.send_json({"error": "game_not_found"}, status=404)
+                        return
+                    except ValueError as error:
+                        self.send_json({"error": str(error)}, status=400)
+                        return
                 store.save(state)
             self.send_json(games_module.studio_summary(state))
             return
@@ -2457,7 +3583,8 @@ class RelayHandler(BaseHTTPRequestHandler):
                                 str(body.get("cadence", "daily")),
                                 int(body.get("at_hour", 9)),
                                 int(body.get("at_minute", 0)),
-                                int(body.get("weekday", 0))))
+                                int(body.get("weekday", 0)),
+                                float(body.get("at_ts", 0.0))))
                     elif self.path == "/company/schedule/delete":
                         sid = str(body.get("id", ""))
                         state["schedules"] = [s for s in state.get("schedules", [])
@@ -2474,6 +3601,16 @@ class RelayHandler(BaseHTTPRequestHandler):
                         task_id = str(body.get("id", ""))
                         state["tasks"] = [t for t in state.get("tasks", [])
                                           if t.get("id") != task_id]
+                    elif self.path == "/company/portfolio/adopt":
+                        # One of the owner's EXISTING apps joins the company:
+                        # the team maintains it in its own repo (workdir).
+                        company_module.adopt_portfolio(
+                            state,
+                            str(body.get("path", "")),
+                            str(body.get("name", "")),
+                            str(body.get("instruction", "")),
+                            str(body.get("division", "")),
+                        )
                     else:  # /company/gate
                         gated = company_module.apply_gate(
                             state,
@@ -2483,8 +3620,12 @@ class RelayHandler(BaseHTTPRequestHandler):
                         )
                         if gated["stage"] == "shipped":
                             # "Ship it" means SHIP: private GitHub repo,
-                            # owner's account, link lands back in the app.
+                            # owner's account, link lands back in the app —
+                            # and a web preview gets promoted to production
+                            # (the owner's yes IS the prod authorization).
                             ship_in_background(gated["id"])
+                            promote_in_background(gated["id"])
+                        file_unfiled_lessons(state)
                 except KeyError:
                     self.send_json({"error": "initiative_not_found"}, status=404)
                     return
@@ -2896,6 +4037,13 @@ def main() -> None:
         print("Bonjour: advertising as _hermes-relay._tcp (auto-discovery on)\n", flush=True)
     except Exception as exc:  # noqa: BLE001 — discovery is best-effort
         print(f"Bonjour advertising unavailable: {exc}\n", flush=True)
+
+    # Default owner automation: the Sunday-evening board packet (once; the
+    # owner can delete/toggle it in Schedules like any other automation).
+    try:
+        seed_board_packet_schedule()
+    except Exception as error:  # noqa: BLE001 — a bad state file must not stop the relay
+        print(f"company - board packet seed failed: {error}", flush=True)
 
     heartbeat = threading.Thread(target=company_heartbeat_loop, daemon=True)
     heartbeat.start()

@@ -8,6 +8,23 @@ You can walk around the company, enter agent offices, talk to specialists, join 
 
 > Boardroom is not another thin AI wrapper. It is an operating layer for autonomous agents: org structure, meetings, memos, voice calls, office navigation, build pipelines, QA loops, and founder approval gates.
 
+## See it
+
+Real captures from the iPhone app — the whole company rendered in 3D, live.
+
+<table>
+  <tr>
+    <td align="center" width="33%"><img src="docs/screenshots/headquarters.png" width="230" alt="3D Headquarters"><br><sub><b>Headquarters</b> — walk the floor, one office up</sub></td>
+    <td align="center" width="33%"><img src="docs/screenshots/conference-room.png" width="230" alt="Conference Room"><br><sub><b>Boardroom</b> — the whole team at the table</sub></td>
+    <td align="center" width="33%"><img src="docs/screenshots/conference-room-orbit.png" width="230" alt="Live meeting, orbit view"><br><sub><b>Live meeting</b> — orbit the room mid-debate</sub></td>
+  </tr>
+  <tr>
+    <td align="center" width="33%"><img src="docs/screenshots/headquarters-floor.png" width="230" alt="Divisions and production line"><br><sub><b>Divisions floor</b> — production line & agents at work</sub></td>
+    <td align="center" width="33%"><img src="docs/screenshots/knowledge-graph.png" width="230" alt="3D knowledge graph"><br><sub><b>Second brain</b> — the company's knowledge in 3D</sub></td>
+    <td width="33%"></td>
+  </tr>
+</table>
+
 ## Why it matters
 
 Most “AI agent” apps are just chat boxes with a nicer prompt. Boardroom is different:

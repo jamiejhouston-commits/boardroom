@@ -29,25 +29,43 @@ enum RobotCommand: String {
     }
 }
 
-/// The Hermes agent robot — a real 3D character built in SceneKit, shared by
-/// every scene that shows an agent (War Room rooms, Company Floor pods).
-///
-/// Design language: a friendly unit with a glossy rounded dome head, a dark
-/// glass visor with softly glowing eyes, headset earcups, a white chest plate
-/// on a muted accent body, and small articulated arms. Each agent gets a
-/// personality topper (antenna / stubs / fin / halo) seeded from its name,
-/// plus idle life: a gentle bob, slow head sway, eye blinks, and typing hands.
+/// The Hermes agent robot — ONE look company-wide: the same rigged character
+/// that staffs the 3D Headquarters (accent-tinted, executive gold for the
+/// CEO, playing its skeletal idle clip), shared by every scene that shows an
+/// agent — the boardroom table, the Company Floor pods, each agent's War Room
+/// office, and AR. Bundle missing → the legacy primitive below, never a crash.
 enum AgentRobot {
 
     /// Build the robot. `color` should already be the muted accent.
-    /// Local space: base at y=0, faces +z, stands ~1.3 tall.
-    /// Structure: outer `robotRoot` (moved by commands) → `body` (idle bob).
+    /// Local space: base at y=0, faces +z, stands ~1.3 tall (CEO 1.5).
+    /// Structure: outer `robotRoot` (moved by commands) → character/body.
     static func node(for agent: OrgAgent, color: UIColor) -> SCNNode {
-        let seed = agent.name.unicodeScalars.reduce(0) { $0 + Int($1.value) }
         let outer = SCNNode()
         outer.name = "robotRoot"
+        let isCEO = agent.tier == .ceo
+        let accent: UIColor = isCEO
+            ? UIColor(red: 0.72, green: 0.55, blue: 0.26, alpha: 1)   // executive gold, the HQ rule
+            : color
+        if let character = HQAssetLibrary.node(named: "Robot",
+                                               height: isCEO ? 1.5 : 1.3,
+                                               recolorYellowTo: accent,
+                                               isCharacter: true) {
+            HQAssetLibrary.playAnimation(matching: "Idle", under: character)
+            // Rig forward is +Z (verified by offscreen render: the face shows
+            // from +Z) — exactly this builder's contract, so no flip.
+            outer.addChildNode(character)
+            return outer
+        }
+        outer.addChildNode(primitiveBody(for: agent, color: color))
+        return outer
+    }
+
+    /// The original hand-built primitive — kept verbatim as the no-bundle
+    /// fallback. Design language: glossy dome head, dark visor, glowing eyes,
+    /// headset, accent trim, seeded personality topper, idle life.
+    private static func primitiveBody(for agent: OrgAgent, color: UIColor) -> SCNNode {
+        let seed = agent.name.unicodeScalars.reduce(0) { $0 + Int($1.value) }
         let root = SCNNode()
-        outer.addChildNode(root)
 
         // Reference look: glossy WHITE robot; the agent's accent appears only
         // as trim — collar, LEDs, chest emblem, topper. The CEO wears the
@@ -273,18 +291,21 @@ enum AgentRobot {
             hand.runAction(.repeatForever(tap))
         }
 
-        return outer
+        return root
     }
 
     // MARK: Chat-ordered actions ("get up and walk around the office")
 
     /// Run a command on a robot node (the `robotRoot` returned by `node(for:)`).
-    /// Movement happens on the root, so the idle bob keeps running underneath —
-    /// the robot glides around the room, faces where it's going, and returns.
-    /// `home` is the robot's resting position (where the host scene placed it).
+    /// The HQ character rig plays its REAL skeletal clips (Walking / Dance /
+    /// Wave) around the movement; the primitive falls back to its hop-and-tilt
+    /// approximations. `home` is where the host scene placed the robot.
     static func perform(_ command: RobotCommand, on robot: SCNNode, home: SCNVector3) {
         robot.removeAction(forKey: "command")
         let s = CGFloat(max(robot.scale.x, 0.01))   // scale path to room size
+        let clip: (String) -> SCNAction = { name in
+            .run { n in HQAssetLibrary.playAnimation(matching: name, under: n) }
+        }
 
         switch command {
         case .walk:
@@ -294,21 +315,29 @@ enum AgentRobot {
                 move.timingMode = .easeInEaseOut
                 return .sequence([face, move])
             }
-            let lift = SCNAction.moveBy(x: 0, y: 0.06 * s, z: 0, duration: 0.35)
-            let settle = SCNAction.moveBy(x: 0, y: -0.06 * s, z: 0, duration: 0.35)
-            let tour = SCNAction.sequence([
-                lift,
+            let tourLegs = SCNAction.sequence([
                 leg(-1.5, -0.2, 2.0),
                 leg(0, -1.2, 1.6),
                 leg(3.0, 0, 3.2),
                 leg(0, 1.2, 1.6),
                 leg(-1.5, 0.2, 2.0),
                 .rotateTo(x: 0, y: 0, z: 0, duration: 0.4, usesShortestUnitArc: true),
-                settle
             ])
-            robot.runAction(tour, forKey: "command")
+            if HQAssetLibrary.hasAnimation(matching: "Walking", under: robot) {
+                robot.runAction(.sequence([clip("Walking"), tourLegs, clip("Idle")]),
+                                forKey: "command")
+            } else {
+                let lift = SCNAction.moveBy(x: 0, y: 0.06 * s, z: 0, duration: 0.35)
+                let settle = SCNAction.moveBy(x: 0, y: -0.06 * s, z: 0, duration: 0.35)
+                robot.runAction(.sequence([lift, tourLegs, settle]), forKey: "command")
+            }
 
         case .dance:
+            if HQAssetLibrary.hasAnimation(matching: "Dance", under: robot) {
+                robot.runAction(.sequence([clip("Dance"), .wait(duration: 2.8), clip("Idle")]),
+                                forKey: "command")
+                return
+            }
             let hop = SCNAction.sequence([
                 .moveBy(x: 0, y: 0.14 * s, z: 0, duration: 0.18),
                 .moveBy(x: 0, y: -0.14 * s, z: 0, duration: 0.22)
@@ -321,7 +350,24 @@ enum AgentRobot {
             ]), forKey: "command")
 
         case .wave:
-            guard let arm = robot.childNode(withName: "armR", recursively: true) else { return }
+            if HQAssetLibrary.hasAnimation(matching: "Wave", under: robot) {
+                robot.runAction(.sequence([clip("Wave"), .wait(duration: 1.7), clip("Idle")]),
+                                forKey: "command")
+                return
+            }
+            guard let arm = robot.childNode(withName: "armR", recursively: true) else {
+                // Rigged character without a Wave clip: greet with body
+                // language — a quick bow-and-wiggle beats doing nothing.
+                let lean = SCNAction.rotateBy(x: 0.18, y: 0, z: 0, duration: 0.25)
+                let wiggle = SCNAction.sequence([
+                    .rotateBy(x: 0, y: 0, z: 0.14, duration: 0.14),
+                    .rotateBy(x: 0, y: 0, z: -0.28, duration: 0.22),
+                    .rotateBy(x: 0, y: 0, z: 0.14, duration: 0.14),
+                ])
+                robot.runAction(.sequence([lean, wiggle, wiggle, lean.reversed()]),
+                                forKey: "command")
+                return
+            }
             let raise = SCNAction.rotateTo(x: -2.4, y: 0, z: -0.5, duration: 0.3, usesShortestUnitArc: true)
             let wig = SCNAction.sequence([
                 .rotateBy(x: 0, y: 0, z: 0.45, duration: 0.16),
@@ -331,10 +377,13 @@ enum AgentRobot {
             arm.runAction(.sequence([raise, wig, wig, wig, lower]), forKey: "command")
 
         case .home:
-            robot.runAction(.group([
+            let walking = HQAssetLibrary.hasAnimation(matching: "Walking", under: robot)
+            let travel = SCNAction.group([
                 .move(to: home, duration: 1.2),
                 .rotateTo(x: 0, y: 0, z: 0, duration: 1.2, usesShortestUnitArc: true)
-            ]), forKey: "command")
+            ])
+            robot.runAction(walking ? .sequence([clip("Walking"), travel, clip("Idle")]) : travel,
+                            forKey: "command")
         }
     }
 

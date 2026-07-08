@@ -11,15 +11,23 @@ final class GamesStudioStore: ObservableObject {
     @Published private(set) var isLive = false          // true once the relay answered
     @Published var errorMessage: String?
 
-    /// The owner's best score on the flagship cabinet, persisted on-device so the
-    /// score survives offline play (mirrors the relay copy when connected).
-    private static let bestKey = "gamesStudio.best.SkylineStack"
+    /// Pre-per-game-key flagship best — migrated on first read.
+    private static let legacyBestKey = "gamesStudio.best.SkylineStack"
+
+    private static func bestKey(for gameID: String) -> String {
+        "gamesStudio.best.\(gameID)"
+    }
 
     var currentGame: StudioGame? { state.currentGame }
 
-    /// The best local arcade score (device-side source of truth for offline play).
-    var localBest: Int {
-        UserDefaults.standard.integer(forKey: Self.bestKey)
+    /// The owner's best score for one game (device-side source of truth for
+    /// offline play; mirrors the relay copy when connected).
+    func localBest(for game: StudioGame) -> Int {
+        let best = UserDefaults.standard.integer(forKey: Self.bestKey(for: game.id))
+        if best == 0, game.id == StudioGame.skylineStack.id {
+            return UserDefaults.standard.integer(forKey: Self.legacyBestKey)
+        }
+        return best
     }
 
     func refresh(relay: HermesRelayConfiguration) async {
@@ -45,7 +53,10 @@ final class GamesStudioStore: ObservableObject {
 
     /// Start / stop the autonomous studio.
     func setEnabled(_ enabled: Bool, relay: HermesRelayConfiguration) async {
-        guard relay.isConfigured else { return }
+        guard relay.isConfigured else {
+            errorMessage = "Connect your Mac relay first — the studio runs on the Mac."
+            return
+        }
         do {
             let client = HermesRelayClient(configuration: relay)
             state = enabled ? try await client.gamesStart() : try await client.gamesHalt()
@@ -58,8 +69,11 @@ final class GamesStudioStore: ObservableObject {
     /// Owner pitches a new game into the pipeline.
     func pitch(title: String, line: String, pitch: String,
                relay: HermesRelayConfiguration) async {
-        guard relay.isConfigured,
-              !title.trimmingCharacters(in: .whitespaces).isEmpty else { return }
+        guard !title.trimmingCharacters(in: .whitespaces).isEmpty else { return }
+        guard relay.isConfigured else {
+            errorMessage = "Connect your Mac relay first — the pitch can't reach the studio."
+            return
+        }
         do {
             state = try await HermesRelayClient(configuration: relay)
                 .gamesConcept(title: title, line: line, pitch: pitch)
@@ -69,12 +83,26 @@ final class GamesStudioStore: ObservableObject {
         }
     }
 
+    /// Resume a paused game — the studio picks it back up with a fresh budget.
+    func resume(id: String, relay: HermesRelayConfiguration) async {
+        guard relay.isConfigured else {
+            errorMessage = "Connect your Mac relay first — the studio runs on the Mac."
+            return
+        }
+        do {
+            state = try await HermesRelayClient(configuration: relay).gamesResume(id: id)
+            isLive = true
+        } catch {
+            errorMessage = error.localizedDescription
+        }
+    }
+
     /// The cabinet reports a finished run. Persist the best locally, and forward
-    /// it to the relay so the studio's record of its flagship stays current.
+    /// it to the relay so the studio's record stays current.
     func recordScore(_ score: Int, for game: StudioGame,
                      relay: HermesRelayConfiguration) {
-        if score > localBest {
-            UserDefaults.standard.set(score, forKey: Self.bestKey)
+        if score > localBest(for: game) {
+            UserDefaults.standard.set(score, forKey: Self.bestKey(for: game.id))
         }
         guard relay.isConfigured else { return }
         Task {
