@@ -68,7 +68,9 @@ struct HermesMobileApp: App {
     static func registerCompanyRefresh() {
         guard !didRegisterCompanyRefresh else { return }
         didRegisterCompanyRefresh = true
-        BGTaskScheduler.shared.register(forTaskWithIdentifier: companyRefreshTaskID, using: nil) { task in
+        // .main, not nil: the closure is MainActor-isolated (Swift 6) and the
+        // scheduler's default background queue trips the runtime isolation trap.
+        BGTaskScheduler.shared.register(forTaskWithIdentifier: companyRefreshTaskID, using: .main) { task in
             scheduleCompanyRefresh()   // keep the chain alive
             let refresh = Task {
                 let relay = HermesRuntimeController.persistedRelayConfiguration()

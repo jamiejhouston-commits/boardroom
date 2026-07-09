@@ -227,24 +227,37 @@ enum HQLiveBoards {
     // MARK: Ticker
 
     private static func drawTicker(_ scene: SKScene, events: [CompanyEvent]) {
-        let recent = events.suffix(6).reversed().map(\.text)
-        let string = recent.isEmpty
-            ? "BOARDROOM · all quiet — the company is standing by"
-            : recent.joined(separator: "      •      ")
+        // Cap each entry: an SKLabelNode rasterizes its whole line into ONE
+        // Metal texture at device scale — an uncapped feed line pushed past the
+        // 16384 px GPU limit and Metal abort()s the app (crash 2026-07-10).
+        let recent = events.suffix(6).reversed().map { String($0.text.prefix(90)) }
+        let segments = recent.isEmpty
+            ? ["BOARDROOM · all quiet — the company is standing by"]
+            : recent
+        let string = segments.joined(separator: "      •      ")
         // Skip the rebuild when the feed hasn't changed — keeps the marquee smooth.
         if scene.userData?["text"] as? String == string { return }
         scene.userData = NSMutableDictionary(dictionary: ["text": string])
         scene.removeAllChildren()
 
-        let node = label(string, font: fontSemi, size: 34, color: textBright.withAlphaComponent(0.92),
-                         at: .zero, align: .left)
-        node.verticalAlignmentMode = .center
-        node.position = CGPoint(x: scene.size.width, y: scene.size.height / 2)
-        scene.addChild(node)
-        let width = node.frame.width
-        let travel = scene.size.width + width + 40
+        // One label per entry, chained under a container, so no single texture
+        // grows with the feed; the marquee moves the container.
+        let strip = SKNode()
+        var x: CGFloat = 0
+        for (i, segment) in segments.enumerated() {
+            let text = i < segments.count - 1 ? segment + "      •      " : segment
+            let node = label(text, font: fontSemi, size: 34,
+                             color: textBright.withAlphaComponent(0.92),
+                             at: CGPoint(x: x, y: 0), align: .left)
+            node.verticalAlignmentMode = .center
+            strip.addChild(node)
+            x += node.frame.width
+        }
+        strip.position = CGPoint(x: scene.size.width, y: scene.size.height / 2)
+        scene.addChild(strip)
+        let travel = scene.size.width + x + 40
         let sweep = SCNActionizedSKAction.marquee(travel: travel, speed: 130)
-        node.run(sweep)
+        strip.run(sweep)
     }
 
     // MARK: Gate desk
