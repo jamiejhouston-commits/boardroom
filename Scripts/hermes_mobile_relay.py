@@ -574,7 +574,8 @@ def kill_tree(proc: subprocess.Popen) -> None:
             pass
 
 
-def run_killable(command: list[str], timeout: int) -> subprocess.CompletedProcess:
+def run_killable(command: list[str], timeout: int,
+                 cwd: str | None = None) -> subprocess.CompletedProcess:
     """Like subprocess.run(timeout=...), but the child runs in its OWN process
     group, so a timeout kills the ENTIRE tree — the model backend, tool
     subprocesses, everything it spawned — not just the direct child.
@@ -589,7 +590,7 @@ def run_killable(command: list[str], timeout: int) -> subprocess.CompletedProces
     are handled separately by cleanup_zombie_simulators.)"""
     proc = subprocess.Popen(
         command, text=True,
-        stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+        stdout=subprocess.PIPE, stderr=subprocess.PIPE, cwd=cwd,
         start_new_session=True,   # own session/process group → killpg reaches all descendants
     )
     try:
@@ -2605,12 +2606,48 @@ def run_meeting_actions(meeting_id: str) -> None:
     print(f"company - meeting actions: {len(items)} from {topic[:40]}", flush=True)
 
 
+# How long one scheduled Automations-bay script may run before its whole
+# process tree is killed. Generous for a data job, far below a runaway.
+SCRIPT_SCHEDULE_TIMEOUT = 600
+
+
+def run_script_schedule(title: str, command: str, workdir: str | None) -> None:
+    """Run one shipped automation on its schedule — the Automations bay's
+    deliverable actually running instead of sitting in a folder. Only commands
+    from a gate-approved automation.json get here, and only after the owner
+    flipped the schedule on. The outcome lands honestly in the activity feed:
+    a clean run, the exit code + stderr tail, or the timeout kill."""
+    try:
+        result = run_killable(["/bin/sh", "-c", command],
+                              timeout=SCRIPT_SCHEDULE_TIMEOUT, cwd=workdir or None)
+        if result.returncode == 0:
+            note = f"automation ran clean: {title}"
+        else:
+            tail = " ".join(((result.stderr or result.stdout or "").strip()
+                             .splitlines() or [""])[-1:])[:160]
+            note = (f"automation FAILED (exit {result.returncode}): {title}"
+                    + (f" — {tail}" if tail else ""))
+    except subprocess.TimeoutExpired:
+        note = (f"automation timed out after {SCRIPT_SCHEDULE_TIMEOUT // 60} "
+                f"min (killed): {title}")
+    except OSError as error:
+        note = f"automation failed to launch: {title} — {error}"
+    store = company_module.CompanyStore(COMPANY_STATE_PATH)
+    with COMPANY_LOCK:
+        state = store.load()
+        company_module.log_event(state, note)
+        store.save(state)
+    print(f"company - {note[:100]}", flush=True)
+
+
 def run_schedules() -> None:
-    """Fire any owner automations that are due — recurring directives, asks, and
-    office-hours meetings (the Cron). Runs each heartbeat; gated on enabled."""
+    """Fire any owner automations that are due — recurring directives, asks,
+    office-hours meetings, and shipped Automations-bay scripts (the Cron).
+    Runs each heartbeat; gated on enabled."""
     store = company_module.CompanyStore(COMPANY_STATE_PATH)
     asks_to_run: list[tuple[str, str]] = []
     meetings_to_run: list[str] = []
+    scripts_to_run: list[tuple[str, str, str]] = []
     packet_due = False
     with COMPANY_LOCK:
         state = store.load()
@@ -2633,6 +2670,9 @@ def run_schedules() -> None:
                 meetings_to_run.append(sched["text"] or sched["title"])
             elif sched["kind"] == "board_packet":
                 packet_due = True
+            elif sched["kind"] == "script":
+                scripts_to_run.append((sched["title"], sched["text"],
+                                       sched.get("workdir") or ""))
             else:  # directive
                 company_module.seed_initiative(state, sched["text"])
             company_module.log_event(state, f"scheduled {sched['kind']}: {sched['title']}")
@@ -2643,6 +2683,10 @@ def run_schedules() -> None:
     for topic in meetings_to_run:
         threading.Thread(target=run_scheduled_meeting, args=(topic,), daemon=True).start()
         print(f"company - scheduled office hours: {topic[:50]}", flush=True)
+    for title, command, workdir in scripts_to_run:
+        threading.Thread(target=run_script_schedule,
+                         args=(title, command, workdir), daemon=True).start()
+        print(f"company - scheduled automation: {title[:50]}", flush=True)
     if packet_due:
         threading.Thread(target=run_board_packet, daemon=True).start()
         print("company - weekly board packet: CFO writing", flush=True)

@@ -40,6 +40,7 @@ struct CompanySchedule: Codable, Equatable, Identifiable {
         switch kind {
         case "ask":     return "Ask"
         case "meeting": return "Office hours"
+        case "script":  return "Automation"   // a shipped Automations-bay script
         default:        return "Pitch idea"
         }
     }

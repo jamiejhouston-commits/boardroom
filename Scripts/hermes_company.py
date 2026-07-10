@@ -47,11 +47,12 @@ DEFAULT_CONFIG = {
     # active at once (owner directives can stack). Bounds spend per tick;
     # the rotation cursor keeps it fair.
     "max_turns_per_tick": 2,
-    # The SaaS bay's real checkout: a Stripe Payment Link URL the owner
-    # creates once (dashboard → Payment links). Set → every SaaS build wires
-    # its Upgrade buttons to it; empty → builds ship an honest, clearly
-    # marked seam instead of a fake checkout.
-    "stripe_payment_link": "",
+    # The SaaS bay's real checkout: a Paddle checkout link the owner creates
+    # once (Paddle dashboard → Checkout → hosted checkout link). Paddle, not
+    # Stripe — Stripe doesn't support Seychelles. Set → every SaaS build
+    # wires its Upgrade buttons to it; empty → builds ship an honest,
+    # clearly marked seam instead of a fake checkout.
+    "paddle_checkout_link": "",
 }
 
 # What the production line builds. The owner switches this from the HQ's
@@ -151,20 +152,54 @@ def check_accounting_data(outdir: Path) -> str:
 
 # A shortish line (optionally a heading) reading "Sources"/"References".
 _SOURCES_RE = re.compile(r"(?im)^\s*#{0,6}\s*(sources|references)\b.{0,60}$")
+_URL_RE = re.compile(r"https?://[^\s)>\]\"']+")
+
+# The Evidence Gate's floor: a "cited" report backed by fewer real URLs than
+# this is a padded heading, not evidence.
+MIN_CONSULTING_SOURCES = 3
 
 
 def check_consulting_sources(outdir: Path) -> str:
     """Hard code-side floor for the Evidence Gate: the main report must have a
-    Sources/References section. '' when present."""
+    Sources/References section backed by real URLs — a bare heading with no
+    (or token) links is a padded section, not evidence. '' when clean."""
     reports = [p for p in _deliverable_files(outdir) if p.suffix.lower() == ".md"]
     if not reports:
         return "no report found in the deliverables"
     # ponytail: the biggest markdown file is "the main deliverable" — good
     # enough until reports grow a manifest.
     main = max(reports, key=lambda p: p.stat().st_size)
-    if _SOURCES_RE.search(main.read_text(errors="replace")):
-        return ""
-    return f"no Sources/References section in the main deliverable ({main.name})"
+    text = main.read_text(errors="replace")
+    if not _SOURCES_RE.search(text):
+        return f"no Sources/References section in the main deliverable ({main.name})"
+    urls = {u.rstrip(".,;") for u in _URL_RE.findall(text)}
+    if len(urls) < MIN_CONSULTING_SOURCES:
+        return (f"only {len(urls)} source URL(s) in {main.name} — a cited "
+                f"report needs at least {MIN_CONSULTING_SOURCES} real, "
+                f"distinct URLs")
+    return ""
+
+
+def check_automation_manifest(outdir: Path) -> str:
+    """Hard code-side floor for the Reliability Gate: a shipped automation
+    must declare how to run it — automation.json at the project root with a
+    non-empty "run" command and an optional cadence. Without the manifest it
+    can never be scheduled, only admired in a folder. '' when clean."""
+    path = Path(outdir) / "automation.json"
+    if not path.is_file():
+        return ("no automation.json at the project root declaring how to run "
+                'it ({"run": "<command>", "cadence": "daily"})')
+    try:
+        manifest = json.loads(path.read_text(errors="replace"))
+    except json.JSONDecodeError:
+        return "automation.json is not valid JSON"
+    if not isinstance(manifest, dict) or not str(manifest.get("run") or "").strip():
+        return 'automation.json has no "run" command'
+    cadence = str(manifest.get("cadence") or "daily")
+    if cadence not in ("hourly", "daily", "weekly", "monthly"):
+        return (f'automation.json cadence "{cadence}" is not one of '
+                "hourly|daily|weekly|monthly")
+    return ""
 
 
 # Adding a division's charter is DATA, not code: give it a name, an output
@@ -256,7 +291,12 @@ DIVISION_CHARTERS = {
             "watcher, scheduled job, or small pipeline (Python or shell "
             "preferred; keep dependencies minimal). It must be genuinely "
             "runnable on this Mac: include a README with setup + run "
-            "instructions, an example config, and sample input/output. RUN it "
+            "instructions, an example config, and sample input/output. Declare "
+            "how to run it in an automation.json at the project root — "
+            '{"run": "<one shell command>", "cadence": "hourly|daily|weekly|'
+            'monthly"} — when the owner ships it, that exact command is '
+            "registered in his Cron (off until he flips it on), so it must run "
+            "unattended from the project dir. RUN it "
             "yourself end-to-end on the sample data before you report — an "
             "automation that was never executed is not done. Fail loudly (clear "
             "errors, non-zero exit codes), never silently."),
@@ -274,10 +314,13 @@ DIVISION_CHARTERS = {
                 "schedules — documented honestly? An automation that was never "
                 "executed, or that hides failure, is a rejection."),
         },
-        "deliverable_hint": ("a runnable automation: script(s), a README with "
-                             "setup + run instructions, an example config, and "
-                             "sample input/output proven by a real run"),
+        "deliverable_hint": ("a runnable automation: script(s), an "
+                             "automation.json declaring the run command and "
+                             "cadence, a README with setup + run instructions, "
+                             "an example config, and sample input/output "
+                             "proven by a real run"),
         "deploy": False,
+        "check": check_automation_manifest,
     },
     "ecommerce": {
         # ponytail: parked — charter shell only, so the bay tags initiatives and
@@ -299,8 +342,9 @@ DIVISION_CHARTERS = {
             "This initiative belongs to the Consulting division: the deliverable "
             "is a cited research report in markdown. Every factual claim needs a "
             "numbered citation [1], [2], … resolving to a mandatory \"Sources\" "
-            "section that lists real URLs — a report without its Sources section "
-            "is automatically rejected. The deep-research tooling on this Mac "
+            "section that lists real URLs — a report without its Sources "
+            "section, or with fewer than 3 real distinct source URLs, is "
+            "automatically rejected. The deep-research tooling on this Mac "
             "(web search / fetch skills) may be used to gather evidence — use it "
             "rather than writing from memory. Numbers, named competitors, and "
             "market claims all need a source; a recommendation is only as good "
@@ -469,17 +513,18 @@ def division_charter(init: dict) -> dict:
 
 def saas_payment_directive(state: dict) -> str:
     """The SaaS bay's checkout reality, from the owner's config. A configured
-    Stripe Payment Link gets wired for real; nothing configured → the build
-    ships one honest, clearly marked seam instead of a fake checkout."""
-    link = str((state.get("config") or {}).get("stripe_payment_link") or "").strip()
+    Paddle checkout link gets wired for real; nothing configured → the build
+    ships one honest, clearly marked seam instead of a fake checkout.
+    (Paddle, not Stripe: Stripe doesn't support Seychelles.)"""
+    link = str((state.get("config") or {}).get("paddle_checkout_link") or "").strip()
     if link:
-        return ("\nPAYMENTS: the owner's Stripe Payment Link is " + link +
+        return ("\nPAYMENTS: the owner's Paddle checkout link is " + link +
                 " — wire every Upgrade/Subscribe button to open it directly.")
-    return ("\nPAYMENTS: no Stripe Payment Link is configured yet. Route the "
+    return ("\nPAYMENTS: no Paddle checkout link is configured yet. Route the "
             "whole upgrade flow through ONE seam (an UPGRADE_URL constant, "
-            "documented in the README as awaiting the owner's payment link) "
-            "and label the upgrade UI honestly — NEVER a fake checkout that "
-            "pretends to charge.")
+            "documented in the README as awaiting the owner's Paddle checkout "
+            "link) and label the upgrade UI honestly — NEVER a fake checkout "
+            "that pretends to charge.")
 
 
 def _toolkit_text(init: dict, state: dict | None) -> str:
@@ -984,15 +1029,17 @@ def meeting_turn_prompt(meeting: dict, role: str, transcript: str, state: dict) 
 def new_schedule(title: str, kind: str, text: str, cadence: str,
                  at_hour: int = 9, at_minute: int = 0, weekday: int = 0,
                  at_ts: float = 0.0) -> dict:
-    """An owner automation. kind = 'directive' (pitch an idea) or 'ask'
-    (ask the company). cadence = 'hourly' | 'daily' | 'weekly' | 'monthly' |
-    'once' ('monthly' fires on the 1st at at_hour; 'once' fires a single time
-    at `at_ts` — how a scheduled meeting actually convenes at its calendar
-    time — then run_schedules disables it)."""
+    """An owner automation. kind = 'directive' (pitch an idea), 'ask' (ask
+    the company), or 'script' (run a shipped Automations-bay command — `text`
+    IS the shell command). cadence = 'hourly' | 'daily' | 'weekly' |
+    'monthly' | 'once' ('monthly' fires on the 1st at at_hour; 'once' fires a
+    single time at `at_ts` — how a scheduled meeting actually convenes at its
+    calendar time — then run_schedules disables it)."""
     return {
         "id": secrets.token_hex(4),
         "title": title.strip() or text.strip()[:40] or "Automation",
-        "kind": kind if kind in ("directive", "ask", "meeting", "board_packet") else "directive",
+        "kind": kind if kind in ("directive", "ask", "meeting", "board_packet",
+                                 "script") else "directive",
         "text": text.strip(),
         "cadence": cadence if cadence in ("hourly", "daily", "weekly", "monthly", "once") else "daily",
         "at_hour": max(0, min(23, int(at_hour))),
@@ -1798,6 +1845,37 @@ def queue_growth_kit(state: dict, shipped: dict,
     return init
 
 
+def register_automation_schedule(state: dict, shipped: dict,
+                                 artifacts_root: Path | None = None) -> dict | None:
+    """Ship → run handoff for the Automations bay: the approved automation's
+    declared command (automation.json, enforced by the Reliability Gate's
+    code floor) lands in the owner's Cron as a DISABLED script schedule.
+    Flipping it on in Schedules is the owner's explicit opt-in to unattended
+    runs — shipping alone never starts executing code on his Mac."""
+    if shipped.get("division") != "automations":
+        return None
+    if artifacts_root is None and not shipped.get("workdir"):
+        return None
+    outdir = initiative_outdir(shipped, Path(artifacts_root or "."))
+    if check_automation_manifest(outdir):
+        return None   # no valid manifest — nothing schedulable shipped
+    manifest = json.loads((Path(outdir) / "automation.json").read_text(errors="replace"))
+    if any(s.get("source_id") == shipped["id"]
+           for s in state.get("schedules", [])):
+        return None
+    sched = new_schedule(shipped["title"], "script",
+                         str(manifest.get("run")).strip(),
+                         str(manifest.get("cadence") or "daily"))
+    sched["enabled"] = False
+    sched["workdir"] = str(outdir)
+    sched["source_id"] = shipped["id"]
+    state.setdefault("schedules", []).append(sched)
+    log_event(state, f"automation registered in the Cron (off): "
+                     f"{shipped['title']} — flip it on in Schedules to run it "
+                     f"{sched['cadence']}")
+    return sched
+
+
 def apply_gate(state: dict, initiative_id: str, decision: str, note: str = "",
                artifacts_root: Path | None = None) -> dict:
     init = find_initiative(state, initiative_id)
@@ -1815,6 +1893,7 @@ def apply_gate(state: dict, initiative_id: str, decision: str, note: str = "",
         if init["stage"] == "shipped":
             record_lesson(state, init)
             queue_growth_kit(state, init, artifacts_root)
+            register_automation_schedule(state, init, artifacts_root)
     else:  # revise
         if at_gate1:
             init["stage"] = "research"

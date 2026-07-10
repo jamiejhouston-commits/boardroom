@@ -1023,6 +1023,25 @@ class BoardPacketTests(unittest.TestCase):
         self.assertIn("[Accounting division]", sched["text"])
         self.assertTrue(sched["enabled"])
 
+    def test_run_script_schedule_runs_in_workdir_and_logs_clean(self):
+        workdir = Path(self.tmp.name) / "automation"
+        workdir.mkdir()
+        relay.run_script_schedule("Inbox Sweeper", "echo swept > proof.txt",
+                                  str(workdir))
+        self.assertEqual((workdir / "proof.txt").read_text().strip(), "swept")
+        state = relay.company_module.CompanyStore(relay.COMPANY_STATE_PATH).load()
+        self.assertTrue(any("automation ran clean: Inbox Sweeper" in e["text"]
+                            for e in state["events"]))
+
+    def test_run_script_schedule_reports_failure_honestly(self):
+        relay.run_script_schedule("Broken Job",
+                                  "echo boom >&2; exit 3", self.tmp.name)
+        state = relay.company_module.CompanyStore(relay.COMPANY_STATE_PATH).load()
+        failures = [e["text"] for e in state["events"]
+                    if "FAILED (exit 3)" in e["text"]]
+        self.assertEqual(len(failures), 1)
+        self.assertIn("boom", failures[0])
+
     def test_run_board_packet_files_note_logs_event_and_pushes(self):
         store = relay.company_module.CompanyStore(relay.COMPANY_STATE_PATH)
         state = relay.company_module.new_state()

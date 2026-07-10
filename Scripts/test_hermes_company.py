@@ -294,18 +294,70 @@ class DivisionRealityTests(unittest.TestCase):
         # No payment link configured → one honest seam, never a fake checkout.
         self.assertIn("PAYMENTS", directive)
         self.assertIn("UPGRADE_URL", directive)
-        state["config"]["stripe_payment_link"] = "https://buy.stripe.com/test123"
+        state["config"]["paddle_checkout_link"] = "https://pay.paddle.io/hsc-test123"
         wired = company.build_directive(state, init)
-        self.assertIn("https://buy.stripe.com/test123", wired)
+        self.assertIn("https://pay.paddle.io/hsc-test123", wired)
         self.assertNotIn("UPGRADE_URL", wired)
 
     def test_saas_payment_line_reaches_fix_turns_too(self):
         state = company.new_state()
-        state["config"]["stripe_payment_link"] = "https://buy.stripe.com/test123"
+        state["config"]["paddle_checkout_link"] = "https://pay.paddle.io/hsc-test123"
         init = company.new_initiative("S", "")
         init["division"] = "saas"
-        self.assertIn("https://buy.stripe.com/test123",
+        self.assertIn("https://pay.paddle.io/hsc-test123",
                       company.division_toolkit(init, state))
+
+    def test_consulting_sources_need_three_real_urls(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            report = Path(tmp) / "report.md"
+            report.write_text("# Market\n\n## Sources\n- https://a.com\n")
+            self.assertIn("at least 3", company.check_consulting_sources(Path(tmp)))
+            report.write_text("# Market\n\n## Sources\n- https://a.com\n"
+                              "- https://b.com/x\n- https://c.org/y\n")
+            self.assertEqual(company.check_consulting_sources(Path(tmp)), "")
+
+    def test_automation_manifest_floor(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            outdir = Path(tmp)
+            self.assertIn("no automation.json",
+                          company.check_automation_manifest(outdir))
+            manifest = outdir / "automation.json"
+            manifest.write_text("not json")
+            self.assertIn("not valid JSON",
+                          company.check_automation_manifest(outdir))
+            manifest.write_text('{"run": "", "cadence": "daily"}')
+            self.assertIn('no "run" command',
+                          company.check_automation_manifest(outdir))
+            manifest.write_text('{"run": "python3 job.py", "cadence": "sometimes"}')
+            self.assertIn("cadence", company.check_automation_manifest(outdir))
+            manifest.write_text('{"run": "python3 job.py", "cadence": "daily"}')
+            self.assertEqual(company.check_automation_manifest(outdir), "")
+
+    def test_ship_registers_disabled_automation_schedule(self):
+        state = company.new_state()
+        init = company.new_initiative("Inbox Sweeper", "")
+        init["division"] = "automations"
+        init["stage"] = "gate2"
+        state["initiatives"] = [init]
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            outdir = root / company.initiative_dirname(init)
+            outdir.mkdir(parents=True)
+            (outdir / "automation.json").write_text(
+                '{"run": "python3 sweep.py", "cadence": "hourly"}')
+            company.apply_gate(state, init["id"], "approve", artifacts_root=root)
+            scripts = [s for s in state["schedules"] if s["kind"] == "script"]
+            self.assertEqual(len(scripts), 1)
+            sched = scripts[0]
+            self.assertFalse(sched["enabled"])       # owner's flip = the opt-in
+            self.assertEqual(sched["text"], "python3 sweep.py")
+            self.assertEqual(sched["cadence"], "hourly")
+            self.assertEqual(sched["workdir"], str(outdir))
+            # Re-shipping never duplicates the registration.
+            init["stage"] = "gate2"
+            company.apply_gate(state, init["id"], "approve", artifacts_root=root)
+            self.assertEqual(
+                len([s for s in state["schedules"] if s["kind"] == "script"]), 1)
 
 
 class StageMachineTests(unittest.TestCase):
@@ -1218,8 +1270,13 @@ class DeployTests(unittest.TestCase):
             state = company.new_state()
             init = company.seed_initiative(state, directive)
             init["stage"] = "division_gate"
-            (self.root / company.initiative_dirname(init)).mkdir(parents=True,
-                                                                 exist_ok=True)
+            outdir = self.root / company.initiative_dirname(init)
+            outdir.mkdir(parents=True, exist_ok=True)
+            if init["division"] == "automations":
+                # Clear the Reliability Gate's manifest floor so the judge
+                # verdict (not an auto-reject) decides this test.
+                (outdir / "automation.json").write_text(
+                    '{"run": "python3 sort.py", "cadence": "daily"}')
             with mock.patch.object(company, "deploy_initiative") as deploy:
                 company.advance_stage(state, init,
                                       lambda r, p: "GATE: APPROVED", self.root)
@@ -1329,11 +1386,13 @@ class CodeSideCheckTests(unittest.TestCase):
         self.assertIn("report.md", company.check_consulting_sources(self.dir))
 
     def test_consulting_sources_or_references_heading_passes(self):
+        links = ("1. https://example.com/data\n2. https://example.org/report\n"
+                 "3. https://example.net/study")
         (self.dir / "report.md").write_text(
-            "Market grew 12% [1].\n\n## Sources\n1. https://example.com/data")
+            f"Market grew 12% [1].\n\n## Sources\n{links}")
         self.assertEqual(company.check_consulting_sources(self.dir), "")
         (self.dir / "report.md").write_text(
-            "Claim [1].\n\nReferences:\n1. https://example.com")
+            f"Claim [1].\n\nReferences:\n{links}")
         self.assertEqual(company.check_consulting_sources(self.dir), "")
 
 
