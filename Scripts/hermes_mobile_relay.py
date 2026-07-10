@@ -3617,6 +3617,7 @@ class RelayHandler(BaseHTTPRequestHandler):
                             str(body.get("id", "")),
                             str(body.get("decision", "")),
                             str(body.get("note", "")),
+                            artifacts_root=COMPANY_ARTIFACTS_ROOT,
                         )
                         if gated["stage"] == "shipped":
                             # "Ship it" means SHIP: private GitHub repo,

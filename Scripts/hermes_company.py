@@ -1244,9 +1244,16 @@ ROLE_SOULS = {
 SCOUT_JSON_SPEC = (
     'Respond with STRICT JSON only, exactly this shape: '
     '{"ideas": [{"title": "...", "pitch": "one sentence", "heat": 1, "fit": 1, '
-    '"effort": 1, "rationale": "..."}]} '
+    '"effort": 1, "division": "", "rationale": "..."}]} '
     "— heat = market momentum 1-10, fit = match to our thesis 1-10, "
-    "effort = build cost 1-10 (lower is easier). Up to 3 ideas."
+    "effort = build cost 1-10 (lower is easier). division = which company bay "
+    "owns the idea, chosen by what the DELIVERABLE is: \"webapps\" (a "
+    "deployable web app), \"saas\" (a subscription-shaped web product), "
+    "\"automations\" (a runnable script/watcher/scheduled job), \"consulting\" "
+    "(a cited research report), \"accounting\" (a financial workbook from real "
+    "inputs), \"legal\" (legal docs for our own products), \"growth\" (a "
+    "launch kit for a product we already shipped) — or \"\" for a native app "
+    "or anything else. Up to 3 ideas."
 )
 
 
@@ -1322,6 +1329,12 @@ def run_scout(state: dict, runner) -> dict | None:
         str(best.get("pitch", "")),
         score={k: best.get(k) for k in ("heat", "fit", "effort", "rationale")},
     )
+    # The scout routes its own ideas to the bays: a valid, open division tag
+    # runs that charter (toolkit + specialist gate); anything else — unknown,
+    # parked (e-commerce), or "" — stays on the generic pipeline.
+    division = str(best.get("division") or "")
+    charter = DIVISION_CHARTERS.get(division, {})
+    initiative["division"] = division if charter and not charter.get("parked") else ""
     state["initiatives"].insert(0, initiative)
     return initiative
 
@@ -1406,9 +1419,12 @@ def advance_stage(state: dict, init: dict, runner, artifacts_root: Path) -> None
                 "change and what each change does. Keep it to one focused pass."))
         else:
             note = f" The owner added: {init['note']}." if init["note"] else ""
+            # build_directive, not platform_directive: a division initiative's
+            # work order must plan the division's deliverable (a web app, a
+            # report, …), never default to "ship a SwiftUI iPhone app".
             reply = runner("ceo", role_prompt("ceo",
                 f"The owner GREENLIT '{init['title']}'.{note}\n"
-                f"{platform_directive(state)}\n"
+                f"{build_directive(state, init)}\n"
                 f"Research memo:\n{last_text(init, 'research')}\n"
                 "Write a work order for a COMPLETE, production-ready product the owner "
                 "can put in front of real users — not a bare MVP or a single toy "
@@ -1661,7 +1677,52 @@ def find_initiative(state: dict, initiative_id: str) -> dict:
     raise KeyError(initiative_id)
 
 
-def apply_gate(state: dict, initiative_id: str, decision: str, note: str = "") -> dict:
+def queue_growth_kit(state: dict, shipped: dict,
+                     artifacts_root: Path | None = None) -> dict | None:
+    """Ship → sell handoff: the moment the owner ships a product, a Growth
+    launch-kit initiative lands at gate1 — his greenlight, zero agent calls
+    spent until he approves. The product's real location rides in a research
+    minute (planning reads it back; gate approval wipes `note`, so a minute is
+    the only slot that survives). Skips Growth's own kits and duplicates."""
+    if shipped.get("division") == "growth":
+        return None
+    if any(i.get("source_id") == shipped["id"]
+           for i in state.get("initiatives", [])):
+        return None
+    product_dir = shipped.get("workdir") or ""
+    if not product_dir and artifacts_root is not None:
+        product_dir = str(initiative_outdir(shipped, Path(artifacts_root)))
+    init = new_initiative(
+        f"Launch kit: {shipped['title']}"[:80],
+        f"Growth launch kit for the just-shipped '{shipped['title']}' — "
+        "appstore.md copy, a deployable landing page, and DRAFT social posts "
+        "the owner sends himself.")
+    init["origin"] = "growth_kit"
+    init["source_id"] = shipped["id"]
+    init["division"] = "growth"
+    init["stage"] = "gate1"
+    init["brief"] = (
+        f"WHAT: a launch kit for '{shipped['title']}' — App Store copy, a "
+        "landing page that deploys to a URL, and social post DRAFTS you send "
+        "under your own hand.\n"
+        "WHY: it just shipped, and an unmarketed product earns nothing.\n"
+        "WHO: the Growth bay, judged by its Conversion Gate — every claim "
+        "checked against the actual product.\n"
+        "EFFORT: one focused pass over an already-built product.\n"
+        "Recommendation: GREENLIGHT.")
+    log_minute(init, "research", "growth",
+               f"Handoff from the shipped initiative '{shipped['title']}'"
+               + (f" — its deliverables live at {product_dir}; READ them "
+                  "before writing a word about the product." if product_dir
+                  else " — locate its deliverables before writing a word."))
+    state.setdefault("initiatives", []).insert(0, init)
+    log_event(state, f"Growth queued a launch kit for {shipped['title']} — "
+                     "awaiting your greenlight")
+    return init
+
+
+def apply_gate(state: dict, initiative_id: str, decision: str, note: str = "",
+               artifacts_root: Path | None = None) -> dict:
     init = find_initiative(state, initiative_id)
     if init["stage"] not in GATE_STAGES:
         raise ValueError(f"initiative {initiative_id} is not awaiting a decision")
@@ -1676,6 +1737,7 @@ def apply_gate(state: dict, initiative_id: str, decision: str, note: str = "") -
         init["stage"] = "planning" if at_gate1 else "shipped"
         if init["stage"] == "shipped":
             record_lesson(state, init)
+            queue_growth_kit(state, init, artifacts_root)
     else:  # revise
         if at_gate1:
             init["stage"] = "research"

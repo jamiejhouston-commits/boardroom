@@ -19,6 +19,7 @@ struct BoardroomView: View {
     @StateObject private var pitchRecorder = VoiceNoteRecorder()
     @State private var typedPitch = ""
     @State private var pitchConfirmation: String?
+    @State private var pitchDivision: HQDivision?
 
     private let ticker = Timer.publish(every: 60, on: .main, in: .common).autoconnect()
 
@@ -293,6 +294,29 @@ struct BoardroomView: View {
                 .disabled(typedPitch.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
             }
 
+            // Route the idea to a division bay: prepends the "[<Bay> division]"
+            // prefix the relay already parses, so the charter (toolkit +
+            // specialist gate) owns the work instead of the generic pipeline.
+            Menu {
+                Button("Board decides (no division)") { pitchDivision = nil }
+                ForEach(HQDivision.allCases) { division in
+                    Button("\(division.glyph) \(division.name)") {
+                        pitchDivision = division
+                    }
+                }
+            } label: {
+                HStack(spacing: 6) {
+                    Image(systemName: "building.2")
+                    Text(pitchDivision.map { "\($0.name) division" }
+                         ?? "Route to a division (optional)")
+                    Image(systemName: "chevron.up.chevron.down")
+                        .font(.caption2)
+                }
+                .font(.caption)
+                .foregroundStyle(pitchDivision == nil ? AnyShapeStyle(.secondary)
+                                                      : AnyShapeStyle(HermesTheme.emerald))
+            }
+
             if let pitchConfirmation {
                 Label(pitchConfirmation, systemImage: "checkmark.circle.fill")
                     .font(.caption)
@@ -303,6 +327,12 @@ struct BoardroomView: View {
         } footer: {
             Text("Speak (or type) an idea — the team researches it, debates it in the boardroom, and brings it back for your greenlight.")
         }
+    }
+
+    /// The directive text with the selected bay's routing prefix (if any).
+    private func routedPitch(_ text: String) -> String {
+        guard let division = pitchDivision else { return text }
+        return "[\(division.name) division] \(text)"
     }
 
     private var pitchStatus: String {
@@ -318,8 +348,9 @@ struct BoardroomView: View {
         if pitchRecorder.state == .recording {
             if let text = await pitchRecorder.finishRecordingAndTranscribe(),
                !text.isEmpty {
-                await company.submitDirective(text, relay: runtime.relayConfiguration)
+                await company.submitDirective(routedPitch(text), relay: runtime.relayConfiguration)
                 pitchConfirmation = "Sent to the board: \"\(text.prefix(60))\""
+                pitchDivision = nil
             }
         } else {
             pitchConfirmation = nil
@@ -329,9 +360,11 @@ struct BoardroomView: View {
 
     private func sendTypedPitch() {
         let text = typedPitch
+        let directive = routedPitch(text)
         typedPitch = ""
+        pitchDivision = nil
         Task {
-            await company.submitDirective(text, relay: runtime.relayConfiguration)
+            await company.submitDirective(directive, relay: runtime.relayConfiguration)
             pitchConfirmation = "Sent to the board: \"\(text.prefix(60))\""
         }
     }

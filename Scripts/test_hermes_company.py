@@ -154,6 +154,28 @@ class ScoutTests(unittest.TestCase):
         self.assertIn("MRR: $412.00", seen["prompt"])
         self.assertIn("PORTFOLIO PERFORMANCE", seen["prompt"])
 
+    def test_run_scout_routes_valid_division(self):
+        state = company.new_state()
+        reply = ('{"ideas": [{"title": "Invoice Chaser", "pitch": "x", '
+                 '"heat": 9, "fit": 9, "effort": 2, "division": "automations", '
+                 '"rationale": "r"}]}')
+        init = company.run_scout(state, lambda role, prompt: reply)
+        self.assertEqual(init["division"], "automations")
+
+    def test_run_scout_rejects_parked_and_unknown_divisions(self):
+        for bogus in ("ecommerce", "nonsense", ""):
+            state = company.new_state()
+            reply = ('{"ideas": [{"title": "Shop", "pitch": "x", "heat": 9, '
+                     f'"fit": 9, "effort": 2, "division": "{bogus}", '
+                     '"rationale": "r"}]}')
+            init = company.run_scout(state, lambda role, prompt: reply)
+            self.assertEqual(init["division"], "", bogus)   # generic pipeline
+
+    def test_scout_spec_offers_the_division_roster(self):
+        self.assertIn('"division"', company.SCOUT_JSON_SPEC)
+        self.assertIn("webapps", company.SCOUT_JSON_SPEC)
+        self.assertNotIn("ecommerce", company.SCOUT_JSON_SPEC)  # parked bay not offered
+
     def test_run_scout_feeds_back_user_complaints(self):
         state = company.new_state()
         state["asc_brief"] = 'Tabula 1★ "Sync broken": lost my data after the update'
@@ -408,6 +430,42 @@ class GateTests(unittest.TestCase):
         self.assertEqual(self.init["stage"], "execution")
         self.assertEqual(self.init["exec_phase"], "build")   # extend, fresh QA rounds
         self.assertEqual(self.init["review_rounds"], 0)
+
+    def test_ship_queues_growth_launch_kit_at_gate1(self):
+        self.init["stage"] = "gate2"
+        company.apply_gate(self.state, self.init["id"], "approve",
+                           artifacts_root=Path("/tmp/boardroom"))
+        kits = [i for i in self.state["initiatives"]
+                if i.get("origin") == "growth_kit"]
+        self.assertEqual(len(kits), 1)
+        kit = kits[0]
+        self.assertEqual(kit["stage"], "gate1")          # owner approves first
+        self.assertEqual(kit["division"], "growth")
+        self.assertEqual(kit["source_id"], self.init["id"])
+        # The product's location must survive gate approval (which wipes
+        # `note`) — it rides a research minute that planning reads back.
+        handoff = company.last_text(kit, "research")
+        self.assertIn("/tmp/boardroom", handoff)
+        self.assertEqual(kit["calls_used"], 0)           # free until greenlit
+
+    def test_ship_never_duplicates_or_self_markets(self):
+        # Shipping the same product twice → one kit.
+        self.init["stage"] = "gate2"
+        company.apply_gate(self.state, self.init["id"], "approve")
+        self.init["stage"] = "gate2"
+        company.apply_gate(self.state, self.init["id"], "approve")
+        kits = [i for i in self.state["initiatives"]
+                if i.get("origin") == "growth_kit"]
+        self.assertEqual(len(kits), 1)
+        # A Growth initiative shipping never spawns a kit for itself.
+        growth = company.new_initiative("Launch kit: A", "")
+        growth["division"] = "growth"
+        growth["stage"] = "gate2"
+        self.state["initiatives"].append(growth)
+        company.apply_gate(self.state, growth["id"], "approve")
+        kits = [i for i in self.state["initiatives"]
+                if i.get("origin") == "growth_kit" and i["stage"] != "shipped"]
+        self.assertEqual(len(kits), 1)
 
     def test_gate_rejects_wrong_stage_and_unknown_id(self):
         self.init["stage"] = "research"
