@@ -1,4 +1,5 @@
 import importlib.util
+import json
 import subprocess
 import tempfile
 import time
@@ -235,6 +236,76 @@ class BoardPacketPromptTests(unittest.TestCase):
                          ("weekly", 18, 6))
         self.assertNotEqual(company.new_schedule("x", "bogus", "", "daily")["kind"],
                             "board_packet")           # unknown kinds still coerce
+
+
+class DivisionRealityTests(unittest.TestCase):
+    """Monthly books cadence, real accounting inputs, honest SaaS payments."""
+
+    def test_monthly_cadence_fires_on_the_first(self):
+        sched = company.new_schedule("Monthly books", "directive", "x",
+                                     "monthly", at_hour=9)
+        sched["last_fired"] = time.mktime((2026, 6, 15, 12, 0, 0, 0, 0, -1))
+        june_30 = time.mktime((2026, 6, 30, 23, 0, 0, 0, 0, -1))
+        july_1_early = time.mktime((2026, 7, 1, 8, 0, 0, 0, 0, -1))
+        july_1_late = time.mktime((2026, 7, 1, 9, 30, 0, 0, 0, -1))
+        self.assertFalse(company.schedule_due(sched, june_30))
+        self.assertFalse(company.schedule_due(sched, july_1_early))  # before 09:00
+        self.assertTrue(company.schedule_due(sched, july_1_late))
+
+    def test_new_schedule_accepts_monthly_cadence(self):
+        self.assertEqual(company.new_schedule("x", "directive", "t",
+                                              "monthly")["cadence"], "monthly")
+
+    def test_write_accounting_inputs_is_real_and_honest(self):
+        state = company.new_state()
+        init = company.new_initiative("A", "")
+        init["division"] = "webapps"
+        init["calls_used"] = 7
+        state["initiatives"] = [init]
+        with tempfile.TemporaryDirectory() as tmp:
+            path = company.write_accounting_inputs(state, Path(tmp))
+            data = json.loads(path.read_text())
+        # No telemetry connected → the file says so instead of inventing MRR.
+        self.assertIn("not connected", data["revenue_telemetry"])
+        webapps = next(d for d in data["divisions"] if d["id"] == "webapps")
+        self.assertEqual(webapps["calls"], 7)
+        self.assertEqual(data["initiatives"][0]["calls_used"], 7)
+
+    def test_execution_turn_refreshes_accounting_inputs(self):
+        state = company.new_state()
+        init = company.new_initiative("Books", "monthly P&L")
+        init["division"] = "accounting"
+        init["stage"] = "execution"
+        state["initiatives"] = [init]
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            company.advance_stage(state, init, lambda r, p: "built.", root)
+            outdir = root / company.initiative_dirname(init)
+            self.assertTrue((outdir / "company-inputs.json").exists())
+
+    def test_saas_directive_is_honest_about_payments_and_backend(self):
+        state = company.new_state()
+        init = company.new_initiative("S", "")
+        init["division"] = "saas"
+        directive = company.build_directive(state, init)
+        # The false "Supabase via MCP" promise is gone; local-first is the law.
+        self.assertNotIn("MCP", directive)
+        self.assertIn("LOCAL-FIRST", directive)
+        # No payment link configured → one honest seam, never a fake checkout.
+        self.assertIn("PAYMENTS", directive)
+        self.assertIn("UPGRADE_URL", directive)
+        state["config"]["stripe_payment_link"] = "https://buy.stripe.com/test123"
+        wired = company.build_directive(state, init)
+        self.assertIn("https://buy.stripe.com/test123", wired)
+        self.assertNotIn("UPGRADE_URL", wired)
+
+    def test_saas_payment_line_reaches_fix_turns_too(self):
+        state = company.new_state()
+        state["config"]["stripe_payment_link"] = "https://buy.stripe.com/test123"
+        init = company.new_initiative("S", "")
+        init["division"] = "saas"
+        self.assertIn("https://buy.stripe.com/test123",
+                      company.division_toolkit(init, state))
 
 
 class StageMachineTests(unittest.TestCase):
@@ -825,11 +896,13 @@ class DivisionCharterTests(unittest.TestCase):
         self.assertIsNone(charter["gate"])
         self.assertIn("parked", charter["output"])
 
-    def test_saas_toolkit_offers_supabase_with_honest_fallback(self):
+    def test_saas_toolkit_is_local_first_and_never_fakes_a_backend(self):
+        # The old charter promised "Supabase via MCP" — verified false for
+        # relay-spawned builders (no supabase server in ~/.hermes config).
         toolkit = company.DIVISION_CHARTERS["saas"]["toolkit"]
-        self.assertIn("Supabase", toolkit)
-        self.assertIn("MCP", toolkit)
-        self.assertIn("local storage", toolkit)
+        self.assertNotIn("MCP", toolkit)
+        self.assertIn("LOCAL-FIRST", toolkit)
+        self.assertIn("NEVER fake a backend", toolkit)
 
     def test_division_and_live_url_survive_the_store(self):
         with tempfile.TemporaryDirectory() as tmp:

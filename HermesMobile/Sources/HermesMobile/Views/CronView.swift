@@ -125,6 +125,7 @@ private struct AddScheduleSheet: View {
                         Text("Hourly").tag("hourly")
                         Text("Daily").tag("daily")
                         Text("Weekly").tag("weekly")
+                        Text("Monthly (1st)").tag("monthly")
                     }
                     if cadence == "weekly" {
                         Picker("Day", selection: $weekday) {

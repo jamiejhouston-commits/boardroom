@@ -29,7 +29,7 @@ struct CompanySchedule: Codable, Equatable, Identifiable {
     var title: String
     var kind: String            // "directive" | "ask"
     var text: String
-    var cadence: String         // "hourly" | "daily" | "weekly"
+    var cadence: String         // "hourly" | "daily" | "weekly" | "monthly"
     var atHour: Int
     var atMinute: Int
     var weekday: Int            // Monday=0 … Sunday=6
@@ -54,6 +54,7 @@ struct CompanySchedule: Codable, Equatable, Identifiable {
         case "weekly":
             let day = Self.weekdayNames[min(max(weekday, 0), 6)]
             return "\(day) at \(time)"
+        case "monthly": return "1st of the month at \(time)"
         default:       return "Daily at \(time)"
         }
     }

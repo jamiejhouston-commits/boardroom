@@ -47,6 +47,11 @@ DEFAULT_CONFIG = {
     # active at once (owner directives can stack). Bounds spend per tick;
     # the rotation cursor keeps it fair.
     "max_turns_per_tick": 2,
+    # The SaaS bay's real checkout: a Stripe Payment Link URL the owner
+    # creates once (dashboard → Payment links). Set → every SaaS build wires
+    # its Upgrade buttons to it; empty → builds ship an honest, clearly
+    # marked seam instead of a fake checkout.
+    "stripe_payment_link": "",
 }
 
 # What the production line builds. The owner switches this from the HQ's
@@ -214,13 +219,13 @@ DIVISION_CHARTERS = {
             "(package.json at the project root, `npm run build` verified green) "
             "or a static index.html app. After the division gate approves, the "
             "project dir is deployed to Vercel exactly as-is, so the root must "
-            "be deployable with no missing dependencies. Supabase is available "
-            "via MCP for auth and database — use it for accounts and user data "
-            "when it works; if it is unreachable or unconfigured, DEGRADE "
-            "HONESTLY to local storage and say so plainly in your summary — "
-            "never fake a backend. Design around recurring value: accounts (or "
-            "honest local profiles), persistent user data, and a clear "
-            "free-vs-paid seam a payment provider can slot into later."),
+            "be deployable with no missing dependencies. Accounts and user "
+            "data: build LOCAL-FIRST (honest local profiles + localStorage/"
+            "IndexedDB persistence) behind one clean data-layer module, so a "
+            "real backend can slot into that one seam later — NEVER fake a "
+            "backend, mock an API, or pretend data syncs when it doesn't. "
+            "Design around recurring value: persistent user data and a working "
+            "free-vs-paid seam."),
         "gate": {
             "role": "saas_gate",
             "title": "Launch Gate",
@@ -228,15 +233,17 @@ DIVISION_CHARTERS = {
                 "You are the SaaS division's Launch Gate — the specialist judge "
                 "who decides whether this product is ready to run as a live "
                 "subscription-shaped service. Beyond basic polish, judge the "
-                "SaaS fundamentals: do accounts and data actually persist "
-                "(Supabase wired, or an HONEST local fallback that admits it), "
-                "does the core value work end-to-end on a fresh visit, is there "
-                "a coherent free-vs-paid seam, and is nothing faked — a mocked "
-                "backend dressed up as real is an automatic rejection."),
+                "SaaS fundamentals: does user data actually persist across a "
+                "reload (an honest local data layer counts; a mocked backend "
+                "dressed up as real is an automatic rejection), does the core "
+                "value work end-to-end on a fresh visit, and is the "
+                "free-vs-paid seam real — paid features clearly marked and the "
+                "upgrade path wired to the owner's payment link when one is "
+                "configured, never a fake checkout that pretends to charge."),
         },
-        "deliverable_hint": ("a deployable web product with working accounts/"
-                             "data (Supabase or an honest local fallback) and a "
-                             "clear free-vs-paid seam"),
+        "deliverable_hint": ("a deployable web product with honest persistent "
+                             "user data and a real free-vs-paid seam (owner's "
+                             "payment link, or a clearly marked upgrade seam)"),
         "deploy": True,
     },
     "automations": {
@@ -327,7 +334,10 @@ DIVISION_CHARTERS = {
             "PLUS a markdown summary. Build ONLY from real inputs that exist in "
             "the artifacts dir or the company's actual state — NEVER invent, "
             "estimate, or fabricate a figure; a made-up number is worse than no "
-            "number. Every report MUST contain an \"INPUTS\" section listing "
+            "number. A fresh company-inputs.json sits in your project dir every "
+            "turn (real engine state: per-division spend, per-initiative calls, "
+            "revenue telemetry) — it is the canonical input; cite it by field. "
+            "Every report MUST contain an \"INPUTS\" section listing "
             "exactly where each figure came from (file, state field, or "
             "owner-provided value). If the real inputs don't exist, say so "
             "honestly and ship the workbook structure with the inputs marked as "
@@ -457,9 +467,33 @@ def division_charter(init: dict) -> dict:
     return DIVISION_CHARTERS.get(init.get("division") or "", {})
 
 
-def division_toolkit(init: dict) -> str:
-    """The charter toolkit block for build prompts ('' when none)."""
+def saas_payment_directive(state: dict) -> str:
+    """The SaaS bay's checkout reality, from the owner's config. A configured
+    Stripe Payment Link gets wired for real; nothing configured → the build
+    ships one honest, clearly marked seam instead of a fake checkout."""
+    link = str((state.get("config") or {}).get("stripe_payment_link") or "").strip()
+    if link:
+        return ("\nPAYMENTS: the owner's Stripe Payment Link is " + link +
+                " — wire every Upgrade/Subscribe button to open it directly.")
+    return ("\nPAYMENTS: no Stripe Payment Link is configured yet. Route the "
+            "whole upgrade flow through ONE seam (an UPGRADE_URL constant, "
+            "documented in the README as awaiting the owner's payment link) "
+            "and label the upgrade UI honestly — NEVER a fake checkout that "
+            "pretends to charge.")
+
+
+def _toolkit_text(init: dict, state: dict | None) -> str:
+    """A division's toolkit with its state-dependent lines appended ('' when
+    the initiative has no charter toolkit)."""
     toolkit = division_charter(init).get("toolkit", "")
+    if toolkit and init.get("division") == "saas" and state is not None:
+        toolkit += saas_payment_directive(state)
+    return toolkit
+
+
+def division_toolkit(init: dict, state: dict | None = None) -> str:
+    """The charter toolkit block for build prompts ('' when none)."""
+    toolkit = _toolkit_text(init, state)
     return f"\n\n{toolkit}" if toolkit else ""
 
 
@@ -467,7 +501,7 @@ def build_directive(state: dict, init: dict) -> str:
     """What a build turn targets: a division's toolkit REPLACES the generic
     production-line platform directive (a Webapps build must never be told to
     ship a SwiftUI iPhone app)."""
-    return division_charter(init).get("toolkit", "") or platform_directive(state)
+    return _toolkit_text(init, state) or platform_directive(state)
 
 
 def gate_passed(text: str) -> bool:
@@ -535,6 +569,36 @@ def divisions_summary(state: dict) -> list[dict]:
             "rejections": sum(i.get("division_rejections", 0) for i in inits),
         })
     return out
+
+
+def write_accounting_inputs(state: dict, outdir: Path) -> Path:
+    """The Accounting bay's REAL inputs, refreshed into the project dir every
+    execution turn: the engine's own division P&L, per-initiative spend, and
+    live revenue telemetry (or an honest 'not connected'). The charter forbids
+    invented figures — this file is what 'real inputs that exist in the
+    artifacts dir' concretely means, and every figure in it traces back to
+    company state the owner can inspect."""
+    config = state.get("config") or {}
+    inputs = {
+        "generated": datetime.now().isoformat(timespec="seconds"),
+        "source": "company engine state — nothing here is estimated by an agent",
+        "revenue_telemetry": (state.get("revenue_brief") or "").strip()
+                             or "not connected — no revenue figures available; "
+                                "say so in the report, never invent them",
+        "cost_per_call_usd": float(config.get("cost_per_call",
+                                              DEFAULT_CONFIG["cost_per_call"])),
+        "divisions": divisions_summary(state),
+        "initiatives": [
+            {"title": i.get("title", ""), "division": i.get("division", ""),
+             "stage": i.get("stage", ""), "calls_used": i.get("calls_used", 0),
+             "live_url": i.get("live_url", "")}
+            for i in state.get("initiatives", [])],
+    }
+    outdir = Path(outdir)
+    outdir.mkdir(parents=True, exist_ok=True)
+    path = outdir / "company-inputs.json"
+    path.write_text(json.dumps(inputs, indent=2))
+    return path
 
 
 def initiative_outdir(init: dict, artifacts_root: Path) -> Path:
@@ -921,15 +985,16 @@ def new_schedule(title: str, kind: str, text: str, cadence: str,
                  at_hour: int = 9, at_minute: int = 0, weekday: int = 0,
                  at_ts: float = 0.0) -> dict:
     """An owner automation. kind = 'directive' (pitch an idea) or 'ask'
-    (ask the company). cadence = 'hourly' | 'daily' | 'weekly' | 'once'
-    ('once' fires a single time at `at_ts` — how a scheduled meeting actually
-    convenes at its calendar time — then run_schedules disables it)."""
+    (ask the company). cadence = 'hourly' | 'daily' | 'weekly' | 'monthly' |
+    'once' ('monthly' fires on the 1st at at_hour; 'once' fires a single time
+    at `at_ts` — how a scheduled meeting actually convenes at its calendar
+    time — then run_schedules disables it)."""
     return {
         "id": secrets.token_hex(4),
         "title": title.strip() or text.strip()[:40] or "Automation",
         "kind": kind if kind in ("directive", "ask", "meeting", "board_packet") else "directive",
         "text": text.strip(),
-        "cadence": cadence if cadence in ("hourly", "daily", "weekly", "once") else "daily",
+        "cadence": cadence if cadence in ("hourly", "daily", "weekly", "monthly", "once") else "daily",
         "at_hour": max(0, min(23, int(at_hour))),
         "at_minute": max(0, min(59, int(at_minute))),
         "weekday": max(0, min(6, int(weekday))),   # Monday=0 … Sunday=6
@@ -964,6 +1029,14 @@ def schedule_last_occurrence(schedule: dict, now: float) -> float:
         occurrence -= timedelta(days=days_back)
         if occurrence > moment:
             occurrence -= timedelta(days=7)
+    elif cadence == "monthly":
+        # Fires on the 1st of the month (the books ritual). Stepping back a
+        # month = go to this month's 1st, and if that's still ahead, minus one
+        # day lands on the previous month's last day → its 1st.
+        occurrence = moment.replace(day=1, hour=hour, minute=minute,
+                                    second=0, microsecond=0)
+        if occurrence > moment:
+            occurrence = (occurrence - timedelta(days=1)).replace(day=1)
     else:  # daily
         occurrence = moment.replace(hour=hour, minute=minute, second=0, microsecond=0)
         if occurrence > moment:
@@ -1446,6 +1519,10 @@ def advance_stage(state: dict, init: dict, runner, artifacts_root: Path) -> None
     elif stage == "execution":
         outdir = initiative_outdir(init, artifacts_root)
         outdir.mkdir(parents=True, exist_ok=True)
+        if init.get("division") == "accounting":
+            # Fresh real inputs every turn — the Accuracy Gate re-computes
+            # totals from these, so they must never go stale mid-build.
+            write_accounting_inputs(state, outdir)
 
         def collect_artifacts() -> None:
             init["artifacts"] = sorted(
@@ -1509,7 +1586,7 @@ def advance_stage(state: dict, init: dict, runner, artifacts_root: Path) -> None
                     f"screens, navigation, and features it calls for). Verify your work "
                     f"actually builds and the tests pass before you report. Don't argue — "
                     f"do the work.\n\nQA review:\n{review}"
-                    f"{division_toolkit(init)}{division_iteration_feedback(init)}"))
+                    f"{division_toolkit(init, state)}{division_iteration_feedback(init)}"))
                 log_minute(init, "execution", "builder", fix)
                 collect_artifacts()
                 init["exec_phase"] = "review"

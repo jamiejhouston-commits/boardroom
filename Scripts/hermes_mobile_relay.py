@@ -2663,6 +2663,29 @@ def seed_board_packet_schedule() -> None:
         store.save(state)
 
 
+def seed_monthly_books_schedule() -> None:
+    """Default owner automation: the 1st-of-the-month books ritual — an
+    Accounting-division directive that builds the company P&L from the real
+    engine inputs (company-inputs.json). Seeded ONCE — if a 'Monthly books'
+    schedule exists (even disabled), the owner's choice stands. Fires through
+    the normal pipeline, so nothing builds before his gate-1 greenlight."""
+    store = company_module.CompanyStore(COMPANY_STATE_PATH)
+    with COMPANY_LOCK:
+        state = store.load()
+        if any(s.get("title") == "Monthly books" for s in state.get("schedules", [])):
+            return
+        state.setdefault("schedules", []).append(company_module.new_schedule(
+            "Monthly books", "directive",
+            "[Accounting division] Monthly books: produce this month's company "
+            "P&L — a real .xlsx or .csv workbook plus a markdown summary with "
+            "an INPUTS section — built ONLY from company-inputs.json in the "
+            "project dir (per-division spend, per-initiative calls, revenue "
+            "telemetry). Mark anything missing as needed from the owner; "
+            "never fill a gap with a plausible-looking number.",
+            "monthly", at_hour=9, at_minute=0))
+        store.save(state)
+
+
 def run_board_packet() -> None:
     """Sunday evening: the CFO writes the one-page weekly board report from
     REAL state, Lena files it in the vault, and the owner's phone gets a ping.
@@ -4039,12 +4062,14 @@ def main() -> None:
     except Exception as exc:  # noqa: BLE001 — discovery is best-effort
         print(f"Bonjour advertising unavailable: {exc}\n", flush=True)
 
-    # Default owner automation: the Sunday-evening board packet (once; the
-    # owner can delete/toggle it in Schedules like any other automation).
+    # Default owner automations (seeded once; the owner can delete/toggle them
+    # in Schedules like any other automation): the Sunday-evening board packet
+    # and the 1st-of-the-month Accounting books ritual.
     try:
         seed_board_packet_schedule()
+        seed_monthly_books_schedule()
     except Exception as error:  # noqa: BLE001 — a bad state file must not stop the relay
-        print(f"company - board packet seed failed: {error}", flush=True)
+        print(f"company - default schedule seed failed: {error}", flush=True)
 
     heartbeat = threading.Thread(target=company_heartbeat_loop, daemon=True)
     heartbeat.start()

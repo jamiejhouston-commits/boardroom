@@ -1011,6 +1011,18 @@ class BoardPacketTests(unittest.TestCase):
                          ("weekly", 6, 18, 0))       # Sunday 18:00
         self.assertTrue(sched["enabled"])
 
+    def test_seed_monthly_books_schedule_is_idempotent(self):
+        relay.seed_monthly_books_schedule()
+        relay.seed_monthly_books_schedule()
+        state = relay.company_module.CompanyStore(relay.COMPANY_STATE_PATH).load()
+        books = [s for s in state["schedules"] if s["title"] == "Monthly books"]
+        self.assertEqual(len(books), 1)
+        sched = books[0]
+        self.assertEqual((sched["kind"], sched["cadence"], sched["at_hour"]),
+                         ("directive", "monthly", 9))   # 1st of the month, 09:00
+        self.assertIn("[Accounting division]", sched["text"])
+        self.assertTrue(sched["enabled"])
+
     def test_run_board_packet_files_note_logs_event_and_pushes(self):
         store = relay.company_module.CompanyStore(relay.COMPANY_STATE_PATH)
         state = relay.company_module.new_state()
