@@ -65,9 +65,11 @@ struct WarRoomView: View {
                     } label: {
                         Label("See the whole company floor", systemImage: "building.2.fill")
                             .font(.subheadline.weight(.semibold))
+                            .foregroundStyle(HermesTheme.textPrimary)
                             .frame(maxWidth: .infinity)
                             .padding()
-                            .background(.mint.opacity(0.15), in: RoundedRectangle(cornerRadius: 10))
+                            .background(HermesTheme.gold.opacity(0.14), in: RoundedRectangle(cornerRadius: 10))
+                            .overlay(RoundedRectangle(cornerRadius: 10).strokeBorder(HermesTheme.hairline, lineWidth: 1))
                     }
                     .buttonStyle(.plain)
 
