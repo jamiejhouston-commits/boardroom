@@ -116,7 +116,7 @@ struct BrainLayout {
 enum GraphLayout {
     static func compute(_ graph: VaultGraph, _ s: GraphSettings) -> BrainLayout {
         guard !graph.nodes.isEmpty else { return BrainLayout(positions: [:], captions: [], clusterCount: 0) }
-        if !s.threeD { return BrainLayout(positions: solar(graph), captions: [], clusterCount: 0) }
+        let flat = !s.threeD   // 2D = the same constellations, flattened to a plane
 
         let nodes = graph.nodes
         let n = nodes.count
@@ -189,19 +189,28 @@ enum GraphLayout {
             }
         }
 
-        // Anchors spread on a fibonacci sphere; seeds jittered around them.
+        // Anchors: fibonacci sphere in 3D, sunflower disc in 2D (biggest
+        // cluster near the centre). Seeds jittered around them.
         let anchorCount = members.count
         var anchorPos = [SIMD3<Float>]()
         for k in 0..<anchorCount {
-            let t = Float(k) + 0.5
-            let phi = acos(max(min(1 - 2 * t / Float(anchorCount), 1), -1))
-            let theta = Float.pi * (1 + sqrt(5)) * t
-            anchorPos.append(SIMD3(sin(phi) * cos(theta), sin(phi) * sin(theta), cos(phi)) * 2.55)
+            if flat {
+                let t = (Float(k) + 0.5) / Float(anchorCount)
+                let a = Float.pi * (3 - sqrt(5)) * Float(k)
+                anchorPos.append(SIMD3(cos(a), sin(a), 0) * (2.7 * sqrt(t)))
+            } else {
+                let t = Float(k) + 0.5
+                let phi = acos(max(min(1 - 2 * t / Float(anchorCount), 1), -1))
+                let theta = Float.pi * (1 + sqrt(5)) * t
+                anchorPos.append(SIMD3(sin(phi) * cos(theta), sin(phi) * sin(theta), cos(phi)) * 2.55)
+            }
         }
         var pos = [SIMD3<Float>](repeating: .zero, count: n)
         for i in 0..<n {
             let spread = 0.4 + 0.09 * sqrt(Float(members[anchorOf[i]].count))
-            pos[i] = anchorPos[anchorOf[i]] + jitter(nodes[i].id) * spread
+            var seed = jitter(nodes[i].id)
+            if flat { seed.z = 0 }
+            pos[i] = anchorPos[anchorOf[i]] + seed * spread
         }
 
         // Free-space force sim: repulsion (with far cutoff), link springs,
@@ -240,10 +249,14 @@ enum GraphLayout {
             }
         }
 
-        // Fit the whole brain inside the camera's comfortable radius.
+        // Fit the whole brain inside the camera's comfortable radius —
+        // portrait width is the tight dimension, so 2D fits much smaller
+        // (pinch-zoom covers the rest).
+        // (With z = 0 seeds every force stays in-plane, so 2D needs no clamp.)
+        let fit: Float = flat ? 3.0 : 4.0
         let maxR = pos.map(simd_length).max() ?? 1
-        if maxR > 4.0 {
-            let scale = 4.0 / maxR
+        if maxR > fit {
+            let scale = fit / maxR
             for i in 0..<n { pos[i] *= scale }
         }
 
@@ -299,40 +312,6 @@ enum GraphLayout {
         var sizes = [Int: Int]()
         for l in label { sizes[l, default: 0] += 1 }
         return sizes.values.filter { $0 >= 4 }.count
-    }
-
-    /// Obsidian-style "Solar" 2D layout: the most-connected note sits at the
-    /// centre, its busiest neighbours on an inner ring, everyone else on an
-    /// outer ring — evenly spaced, no overlap.
-    static func solar(_ graph: VaultGraph) -> [String: SIMD3<Float>] {
-        let deg = degreeMap(graph)
-        let sorted = graph.nodes.sorted {
-            if $0.type == "agent", $1.type != "agent" { return true }
-            if $1.type == "agent", $0.type != "agent" { return false }
-            return (deg[$0.id] ?? 0) > (deg[$1.id] ?? 0)
-        }
-        guard let hub = sorted.first else { return [:] }
-
-        var pos = [String: SIMD3<Float>]()
-        pos[hub.id] = SIMD3(0, 0, 0)
-        let rest = Array(sorted.dropFirst())
-        let ringCounts = [min(rest.count, 8), min(max(rest.count - 8, 0), 18), max(rest.count - 26, 0)]
-        let radii: [Float] = rest.count > 70 ? [1.75, 3.3, 4.75] : [1.9, 3.45, 4.65]
-        var cursor = 0
-        for ring in 0..<ringCounts.count {
-            let count = ringCounts[ring]
-            guard count > 0 else { continue }
-            let radius = radii[ring]
-            let phase = Float(ring) * 0.31
-            for slot in 0..<count {
-                let node = rest[cursor]
-                let a = (Float(slot) / Float(count)) * 2 * .pi + phase
-                // A subtle ellipse leaves room for readable labels on iPhone.
-                pos[node.id] = SIMD3(cos(a) * radius, sin(a) * radius * 0.86, 0)
-                cursor += 1
-            }
-        }
-        return pos
     }
 
     static func degreeMap(_ graph: VaultGraph) -> [String: Int] {
@@ -405,9 +384,9 @@ enum VaultBrainScene {
             scene.fogStartDistance = 13
             scene.fogEndDistance = 46
             scene.fogColor = VaultBrainPalette.background
-            scene.rootNode.addChildNode(starfield(count: 380, radius: 20...34, alpha: 0.45, pointSize: 2.0, seed: 0x9E3779B97F4A7C15))
-            scene.rootNode.addChildNode(starfield(count: 64, radius: 18...30, alpha: 0.85, pointSize: 3.2, seed: 0xD1B54A32D192ED03))
         }
+        scene.rootNode.addChildNode(starfield(count: 380, radius: 20...34, alpha: 0.45, pointSize: 2.0, seed: 0x9E3779B97F4A7C15))
+        scene.rootNode.addChildNode(starfield(count: 64, radius: 18...30, alpha: 0.85, pointSize: 3.2, seed: 0xD1B54A32D192ED03))
 
         let spinRoot = SCNNode()
         scene.rootNode.addChildNode(spinRoot)
@@ -416,8 +395,6 @@ enum VaultBrainScene {
         let degree = GraphLayout.degreeMap(graph)
         let maxDeg = max(degree.values.max() ?? 1, 1)
         let keyIds = hubIDs(graph, degree: degree, count: settings.threeD ? 10 : 9)
-
-        if !settings.threeD { addSolarRings(to: spinRoot) }
 
         var nodesByID = [String: VaultNode](minimumCapacity: graph.nodes.count)
         for node in graph.nodes { nodesByID[node.id] = node }
@@ -520,7 +497,7 @@ enum VaultBrainScene {
 
         // Constellation captions — quiet small-caps markers over each cluster.
         var captionsNode: SCNNode?
-        if settings.threeD && !layout.captions.isEmpty {
+        if !layout.captions.isEmpty {
             let group = SCNNode()
             for caption in layout.captions where !labeledTexts.contains(caption.text.lowercased()) {
                 let node = captionNode(text: caption.text)
@@ -652,25 +629,6 @@ enum VaultBrainScene {
         material.writesToDepthBuffer = false
         geometry.firstMaterial = material
         return SCNNode(geometry: geometry)
-    }
-
-    private static func addSolarRings(to root: SCNNode) {
-        let gold = UIColor(red: 0.90, green: 0.74, blue: 0.40, alpha: 1)
-        let seaGlass = UIColor(red: 0.35, green: 0.62, blue: 0.58, alpha: 1)
-        for (index, radius) in [1.75, 3.3, 4.75, 5.35].enumerated() {
-            let torus = SCNTorus(ringRadius: CGFloat(radius),
-                                 pipeRadius: index == 0 ? 0.010 : 0.006)
-            let color = (index == 0 ? gold : seaGlass).withAlphaComponent(index == 3 ? 0.18 : 0.34)
-            let material = SCNMaterial()
-            material.diffuse.contents = color
-            material.emission.contents = color
-            material.lightingModel = .constant
-            material.transparency = color.cgColor.alpha
-            torus.firstMaterial = material
-            let ring = SCNNode(geometry: torus)
-            ring.scale.y = 0.86
-            root.addChildNode(ring)
-        }
     }
 
     static func billboardPlane(texture: UIImage, width: CGFloat, height: CGFloat,
