@@ -64,12 +64,32 @@ struct VaultGraphSceneView: UIViewRepresentable {
         private var lastSettings: GraphSettings?
         private var focusedID: String?
         private var focusGroup: SCNNode?
+        private var cachedLayout: BrainLayout?
+        private var cachedLayoutKey: LayoutKey?
+
+        /// Only the fields the force sim actually reads — colour/style edits
+        /// reuse the cached layout instead of re-running the physics.
+        private struct LayoutKey: Equatable {
+            let graph: VaultGraph
+            let threeD: Bool
+            let repel: Double
+            let link: Double
+            let distance: Double
+            let center: Double
+        }
 
         func rebuildIfNeeded(view: SCNView, graph: VaultGraph, settings: GraphSettings) {
             guard handles == nil || lastGraph != graph || lastSettings != settings else { return }
             lastGraph = graph
             lastSettings = settings
-            let built = VaultBrainScene.build(graph: graph, settings: settings)
+            let key = LayoutKey(graph: graph, threeD: settings.threeD,
+                                repel: settings.repelForce, link: settings.linkForce,
+                                distance: settings.linkDistance, center: settings.centerForce)
+            if cachedLayout == nil || cachedLayoutKey != key {
+                cachedLayout = GraphLayout.compute(graph, settings)
+                cachedLayoutKey = key
+            }
+            let built = VaultBrainScene.build(graph: graph, settings: settings, layout: cachedLayout)
             handles = built
             focusedID = nil
             focusGroup = nil
@@ -158,6 +178,7 @@ struct VaultGraphSceneView: UIViewRepresentable {
 private struct VaultNodeDetailSheet: View {
     @EnvironmentObject private var runtime: HermesRuntimeController
     let graph: VaultGraph
+    let settings: GraphSettings
     @State var node: VaultNode
 
     @State private var note: VaultNoteContent?
@@ -191,11 +212,11 @@ private struct VaultNodeDetailSheet: View {
                     HStack(spacing: 14) {
                         ZStack {
                             Circle()
-                                .fill(Color(VaultBrainPalette.familyColor(family)).opacity(0.18))
+                                .fill(Color(VaultBrainPalette.familyColor(family, settings: settings)).opacity(0.18))
                                 .frame(width: 54, height: 54)
                             Image(systemName: icon)
                                 .font(.title3.weight(.semibold))
-                                .foregroundStyle(Color(VaultBrainPalette.familyColor(family)))
+                                .foregroundStyle(Color(VaultBrainPalette.familyColor(family, settings: settings)))
                         }
                         VStack(alignment: .leading, spacing: 4) {
                             Text(node.label.isEmpty ? node.id : node.label)
@@ -247,7 +268,7 @@ private struct VaultNodeDetailSheet: View {
                             } label: {
                                 HStack(spacing: 10) {
                                     Circle()
-                                        .fill(Color(VaultBrainPalette.familyColor(VaultBrainPalette.family(neighbor))))
+                                        .fill(Color(VaultBrainPalette.familyColor(VaultBrainPalette.family(neighbor), settings: settings)))
                                         .frame(width: 8, height: 8)
                                     Text(neighbor.label.isEmpty ? neighbor.id : neighbor.label)
                                         .foregroundStyle(HermesTheme.textPrimary)
@@ -338,7 +359,7 @@ private struct VaultNodeDetailSheet: View {
 struct VaultGraphView: View {
     @EnvironmentObject private var runtime: HermesRuntimeController
     @State private var graph: VaultGraph = .empty
-    @State private var settings = GraphSettings()
+    @State private var settings = GraphSettings.load()
     @State private var loading = true
     @State private var error: String?
     @State private var showControls = false
@@ -436,6 +457,7 @@ struct VaultGraphView: View {
         .searchable(text: $searchText, placement: .navigationBarDrawer(displayMode: .automatic),
                     prompt: "Search your second brain")
         .onChange(of: searchText) { _, _ in focusedNode = nil }
+        .onChange(of: settings) { _, changed in changed.save() }
         .toolbar {
             ToolbarItem(placement: .topBarTrailing) {
                 Picker("", selection: $settings.threeD) { Text("3D").tag(true); Text("2D").tag(false) }
@@ -450,7 +472,7 @@ struct VaultGraphView: View {
         }
         .sheet(isPresented: $showControls) { controls }
         .sheet(item: $selectedNode) { node in
-            VaultNodeDetailSheet(graph: graph, node: node)
+            VaultNodeDetailSheet(graph: graph, settings: settings, node: node)
                 .presentationDetents([.medium, .large])
         }
         .task { await load() }
@@ -463,7 +485,7 @@ struct VaultGraphView: View {
             HStack(spacing: 8) {
                 ForEach(families, id: \.name) { family in
                     let hidden = hiddenFamilies.contains(family.name)
-                    let tint = Color(VaultBrainPalette.familyColor(family.name))
+                    let tint = Color(VaultBrainPalette.familyColor(family.name, settings: settings))
                     Button {
                         if hidden {
                             hiddenFamilies.remove(family.name)
@@ -511,7 +533,7 @@ struct VaultGraphView: View {
 
     private func focusCard(_ node: VaultNode) -> some View {
         let family = VaultBrainPalette.family(node)
-        let tint = Color(VaultBrainPalette.familyColor(family))
+        let tint = Color(VaultBrainPalette.familyColor(family, settings: settings))
         let degree = graph.edges.reduce(into: 0) { total, edge in
             if edge.source == node.id || edge.target == node.id { total += 1 }
         }
@@ -566,13 +588,45 @@ struct VaultGraphView: View {
     private var controls: some View {
         NavigationStack {
             Form {
-                Section("Motion") { slider("Rotation speed", $settings.rotationSpeed, 0...2) }
-                Section("Nodes & links") {
-                    slider("Node size", $settings.nodeSize, 0.2...1.0)
+                Section("Theme") {
+                    ScrollView(.horizontal, showsIndicators: false) {
+                        HStack(spacing: 10) {
+                            ForEach(VaultBrainPalette.themes, id: \.name) { theme in
+                                themeSwatch(theme)
+                            }
+                        }
+                    }
+                }
+                Section("Note colours") {
+                    ForEach(families, id: \.name) { family in
+                        ColorPicker(family.name,
+                                    selection: familyColorBinding(family.name),
+                                    supportsOpacity: false)
+                    }
+                    if !settings.familyColors.isEmpty {
+                        Button("Reset to Hermes colours") { settings.familyColors = [:] }
+                            .foregroundStyle(HermesTheme.emerald)
+                    }
+                }
+                Section("Links") {
+                    Picker("Line style", selection: $settings.linkStyle) {
+                        ForEach(LinkStyle.allCases, id: \.self) { style in
+                            Text(style.label).tag(style)
+                        }
+                    }
+                    .pickerStyle(.segmented)
+                    Toggle("Match note colours", isOn: linkMatchBinding).tint(HermesTheme.emerald)
+                    if settings.linkColorHex != nil {
+                        ColorPicker("Link colour", selection: linkColorBinding, supportsOpacity: false)
+                    }
                     slider("Link thickness", $settings.linkThickness, 0.004...0.06)
+                }
+                Section("Nodes") {
+                    slider("Node size", $settings.nodeSize, 0.2...1.0)
                     Toggle("Glow", isOn: $settings.glow).tint(HermesTheme.emerald)
                     Toggle("Paint by recency", isOn: $settings.recency).tint(HermesTheme.emerald)
                 }
+                Section("Motion") { slider("Rotation speed", $settings.rotationSpeed, 0...2) }
                 Section("Forces") {
                     slider("Center force", $settings.centerForce, 0...0.2)
                     slider("Repel force", $settings.repelForce, 0.3...4)
@@ -584,6 +638,54 @@ struct VaultGraphView: View {
             .navigationBarTitleDisplayMode(.inline)
             .toolbar { ToolbarItem(placement: .confirmationAction) { Button("Done") { showControls = false } } }
         }
+    }
+
+    private func themeSwatch(_ theme: VaultBrainPalette.BrainTheme) -> some View {
+        let active = settings.familyColors == theme.colors
+        return Button {
+            settings.familyColors = theme.colors
+        } label: {
+            VStack(spacing: 5) {
+                HStack(spacing: 3) {
+                    ForEach(["Projects", "Meetings", "Wiki", "Canvas"], id: \.self) { family in
+                        let hex = theme.colors[family] ?? VaultBrainPalette.defaultFamilyHex[family] ?? "FFFFFF"
+                        Circle()
+                            .fill(Color(UIColor(hex: hex) ?? .white))
+                            .frame(width: 11, height: 11)
+                    }
+                }
+                Text(theme.name).font(.caption2.weight(active ? .bold : .regular))
+            }
+            .padding(.horizontal, 11)
+            .padding(.vertical, 7)
+            .background(Color.primary.opacity(0.06), in: RoundedRectangle(cornerRadius: 10))
+            .overlay(RoundedRectangle(cornerRadius: 10)
+                .strokeBorder(active ? HermesTheme.emerald : .clear, lineWidth: 1.5))
+        }
+        .buttonStyle(.plain)
+    }
+
+    private func familyColorBinding(_ family: String) -> Binding<Color> {
+        Binding(
+            get: { Color(VaultBrainPalette.familyColor(family, settings: settings)) },
+            set: { settings.familyColors[family] = UIColor($0).hexRGB }
+        )
+    }
+
+    private var linkMatchBinding: Binding<Bool> {
+        Binding(
+            get: { settings.linkColorHex == nil },
+            set: { match in
+                settings.linkColorHex = match ? nil : (settings.linkColorHex ?? "DEB56B")
+            }
+        )
+    }
+
+    private var linkColorBinding: Binding<Color> {
+        Binding(
+            get: { Color(UIColor(hex: settings.linkColorHex ?? "DEB56B") ?? .white) },
+            set: { settings.linkColorHex = UIColor($0).hexRGB }
+        )
     }
 
     private func slider(_ label: String, _ value: Binding<Double>, _ range: ClosedRange<Double>) -> some View {

@@ -30,8 +30,20 @@ struct VaultEdge: Codable, Equatable {
     var target: String
 }
 
-/// Mirrors Obsidian's graph controls.
-struct GraphSettings: Equatable {
+enum LinkStyle: String, CaseIterable, Codable {
+    case straight, curved, dashed, beams
+    var label: String {
+        switch self {
+        case .straight: return "Straight"
+        case .curved: return "Curved"
+        case .dashed: return "Dashed"
+        case .beams: return "Beams"
+        }
+    }
+}
+
+/// Mirrors Obsidian's graph controls, plus the appearance studio.
+struct GraphSettings: Equatable, Codable {
     var threeD = true
     var rotationSpeed = 0.7
     var nodeSize = 0.5
@@ -41,7 +53,45 @@ struct GraphSettings: Equatable {
     var linkDistance = 3.0
     var linkThickness = 0.016
     var glow = true
-    var recency = false          // paint by how recently each note was touched
+    var recency = false                       // paint by how recently each note was touched
+    var familyColors: [String: String] = [:]  // family → hex override (empty = Hermes look)
+    var linkStyle: LinkStyle = .straight
+    var linkColorHex: String? = nil           // nil = links match their notes' colours
+
+    private static let storageKey = "vaultGraph.settings.v1"
+
+    static func load() -> GraphSettings {
+        guard let data = UserDefaults.standard.data(forKey: storageKey),
+              let saved = try? JSONDecoder().decode(GraphSettings.self, from: data) else {
+            return GraphSettings()
+        }
+        return saved
+    }
+
+    func save() {
+        if let data = try? JSONEncoder().encode(self) {
+            UserDefaults.standard.set(data, forKey: Self.storageKey)
+        }
+    }
+}
+
+extension UIColor {
+    convenience init?(hex: String) {
+        let cleaned = hex.trimmingCharacters(in: CharacterSet.alphanumerics.inverted)
+        var value: UInt64 = 0
+        guard cleaned.count == 6, Scanner(string: cleaned).scanHexInt64(&value) else { return nil }
+        self.init(red: CGFloat((value >> 16) & 0xFF) / 255,
+                  green: CGFloat((value >> 8) & 0xFF) / 255,
+                  blue: CGFloat(value & 0xFF) / 255,
+                  alpha: 1)
+    }
+
+    var hexRGB: String {
+        var r: CGFloat = 0, g: CGFloat = 0, b: CGFloat = 0, a: CGFloat = 0
+        getRed(&r, green: &g, blue: &b, alpha: &a)
+        return String(format: "%02X%02X%02X",
+                      Int(round(r * 255)), Int(round(g * 255)), Int(round(b * 255)))
+    }
 }
 
 // MARK: - The premium palette (muted navy-charcoal + gold — no neon)
@@ -70,20 +120,62 @@ enum VaultBrainPalette {
         }
     }
 
+    /// The Hermes defaults — champagne agents, burnished-gold projects,
+    /// emerald wiki, warm-cream notes, amber inbox, slate raw, violet canvas,
+    /// sea-glass boardroom, cyan-slate meetings.
+    static let defaultFamilyHex: [String: String] = [
+        "Agents": "F7E6B8", "Projects": "DEB56B", "Wiki": "70BF94",
+        "Notes": "C4BDAB", "Inbox": "E09E5C", "Raw": "8FA1C7",
+        "Canvas": "A692D9", "Boardroom": "6BA89E", "Meetings": "6B99B8",
+        "Decisions": "6BC79C",
+    ]
+
+    /// One-tap looks for the whole brain. Empty colors = the Hermes defaults.
+    struct BrainTheme {
+        let name: String
+        let colors: [String: String]
+    }
+
+    static let themes: [BrainTheme] = [
+        BrainTheme(name: "Hermes", colors: [:]),
+        BrainTheme(name: "Ember", colors: [
+            "Agents": "F2D9A0", "Projects": "D98E4A", "Wiki": "C7793F",
+            "Notes": "BFA184", "Inbox": "E0B05C", "Raw": "A6754F",
+            "Canvas": "C75F5F", "Boardroom": "B3684A", "Meetings": "8C5A3C",
+            "Decisions": "D9A05B"]),
+        BrainTheme(name: "Glacier", colors: [
+            "Agents": "E8F0F7", "Projects": "7FA8CC", "Wiki": "6BC7C7",
+            "Notes": "AEBDC9", "Inbox": "9CC7E8", "Raw": "6E86A6",
+            "Canvas": "9C8FD9", "Boardroom": "5C8FA6", "Meetings": "70A8BF",
+            "Decisions": "8FC7B8"]),
+        BrainTheme(name: "Royal", colors: [
+            "Agents": "F2E3B3", "Projects": "BF9BE0", "Wiki": "9B7FD4",
+            "Notes": "C9B8D9", "Inbox": "E0B05C", "Raw": "8F7FBF",
+            "Canvas": "D98EC7", "Boardroom": "7F6BA6", "Meetings": "6B7FB8",
+            "Decisions": "A68FD9"]),
+        BrainTheme(name: "Meadow", colors: [
+            "Agents": "F2EDC7", "Projects": "8FBF6B", "Wiki": "5CA67A",
+            "Notes": "B8C7A1", "Inbox": "D9C75F", "Raw": "7A9C6B",
+            "Canvas": "A6C78F", "Boardroom": "6BA86B", "Meetings": "86B89C",
+            "Decisions": "70C786"]),
+        BrainTheme(name: "Mono", colors: [
+            "Agents": "F2EFE8", "Projects": "D9D3C4", "Wiki": "BFB9A8",
+            "Notes": "A6A192", "Inbox": "C7C0AE", "Raw": "8F8B7F",
+            "Canvas": "D9D3C4", "Boardroom": "B3ADA0", "Meetings": "9C978A",
+            "Decisions": "C4BEB0"]),
+    ]
+
     static func familyColor(_ family: String) -> UIColor {
-        switch family {
-        case "Agents": return UIColor(red: 0.97, green: 0.90, blue: 0.72, alpha: 1)   // champagne
-        case "Projects": return UIColor(red: 0.87, green: 0.71, blue: 0.42, alpha: 1) // burnished gold
-        case "Wiki": return UIColor(red: 0.44, green: 0.75, blue: 0.58, alpha: 1)     // emerald
-        case "Notes": return UIColor(red: 0.77, green: 0.74, blue: 0.67, alpha: 1)    // warm cream
-        case "Inbox": return UIColor(red: 0.88, green: 0.62, blue: 0.36, alpha: 1)    // amber
-        case "Raw": return UIColor(red: 0.56, green: 0.63, blue: 0.78, alpha: 1)      // slate blue
-        case "Canvas": return UIColor(red: 0.65, green: 0.57, blue: 0.85, alpha: 1)   // muted violet
-        case "Boardroom": return UIColor(red: 0.42, green: 0.66, blue: 0.62, alpha: 1) // sea-glass teal
-        case "Meetings": return UIColor(red: 0.42, green: 0.60, blue: 0.72, alpha: 1) // cyan slate
-        case "Decisions": return UIColor(red: 0.42, green: 0.78, blue: 0.61, alpha: 1) // emerald
-        default: return UIColor(red: 0.70, green: 0.70, blue: 0.72, alpha: 1)
+        UIColor(hex: defaultFamilyHex[family] ?? "B3B3B8")
+            ?? UIColor(red: 0.70, green: 0.70, blue: 0.72, alpha: 1)
+    }
+
+    /// Override-aware: the user's custom colour wins, then the default.
+    static func familyColor(_ family: String, settings: GraphSettings) -> UIColor {
+        if let hex = settings.familyColors[family], let custom = UIColor(hex: hex) {
+            return custom
         }
+        return familyColor(family)
     }
 
     /// Recency paint: how warm is this memory?
@@ -101,7 +193,7 @@ enum VaultBrainPalette {
         if settings.recency, let modified = node.modified {
             return recencyColor(ageDays: max(now.timeIntervalSince1970 - modified, 0) / 86_400)
         }
-        return familyColor(family(node))
+        return familyColor(family(node), settings: settings)
     }
 }
 
@@ -355,7 +447,9 @@ enum VaultBrainScene {
     // so the other ~250 discs collapse into a handful of shared textures.
     nonisolated(unsafe) private static var textureCache = [String: UIImage]()
 
-    static func build(graph: VaultGraph, settings: GraphSettings, now: Date = Date()) -> BrainSceneHandles {
+    static func build(graph: VaultGraph, settings: GraphSettings,
+                      layout providedLayout: BrainLayout? = nil,
+                      now: Date = Date()) -> BrainSceneHandles {
         let scene = SCNScene()
         scene.background.contents = VaultBrainPalette.background
 
@@ -391,17 +485,19 @@ enum VaultBrainScene {
         let spinRoot = SCNNode()
         scene.rootNode.addChildNode(spinRoot)
 
-        let layout = GraphLayout.compute(graph, settings)
+        let layout = providedLayout ?? GraphLayout.compute(graph, settings)
         let degree = GraphLayout.degreeMap(graph)
         let maxDeg = max(degree.values.max() ?? 1, 1)
         let keyIds = hubIDs(graph, degree: degree, count: settings.threeD ? 10 : 9)
 
         var nodesByID = [String: VaultNode](minimumCapacity: graph.nodes.count)
         for node in graph.nodes { nodesByID[node.id] = node }
+        let customLink = settings.linkColorHex.flatMap { UIColor(hex: $0) }
         func colorOf(_ id: String) -> UIColor {
             guard let node = nodesByID[id] else { return VaultBrainPalette.phantom }
             return VaultBrainPalette.color(for: node, settings: settings, now: now)
         }
+        func linkColorOf(_ id: String) -> UIColor { customLink ?? colorOf(id) }
 
         // Adjacency (directed edges collapsed) — powers focus mode.
         var adjacency = [String: Set<String>]()
@@ -415,25 +511,42 @@ enum VaultBrainScene {
             adjacency[edge.target, default: []].insert(edge.source)
             let key = edge.source < edge.target ? "\(edge.source)|\(edge.target)" : "\(edge.target)|\(edge.source)"
             guard pairSeen.insert(key).inserted else { continue }
-            webSegments.append((a, b, colorOf(edge.source), colorOf(edge.target)))
+            webSegments.append((a, b, linkColorOf(edge.source), linkColorOf(edge.target)))
             if keyIds.contains(edge.source) || keyIds.contains(edge.target) {
                 emphasisPairs.append((edge, (degree[edge.source] ?? 0) + (degree[edge.target] ?? 0)))
             }
         }
 
-        // Every link, one draw call.
-        let webNode = edgeWeb(segments: webSegments, alpha: settings.threeD ? 0.22 : 0.34)
-        if let webNode { spinRoot.addChildNode(webNode) }
-
-        // The busiest connections get physical weight.
+        // Every link — one draw call for line styles; real cylinders for Beams.
+        var webNode: SCNNode?
         let emphasisNode = SCNNode()
-        for (edge, _) in emphasisPairs.sorted(by: { $0.1 > $1.1 }).prefix(60) {
-            guard let a = layout.positions[edge.source], let b = layout.positions[edge.target] else { continue }
-            let hubEnd = (degree[edge.source] ?? 0) >= (degree[edge.target] ?? 0) ? edge.source : edge.target
-            emphasisNode.addChildNode(link(from: a, to: b,
-                                           radius: CGFloat(settings.linkThickness),
-                                           color: colorOf(hubEnd),
-                                           alpha: 0.22))
+        if settings.linkStyle == .beams {
+            // ponytail: one cylinder per link (~525 here); instancing if a vault grows past ~2k links
+            let beams = SCNNode()
+            for (a, b, ca, _) in webSegments {
+                beams.addChildNode(link(from: a, to: b,
+                                        radius: CGFloat(settings.linkThickness),
+                                        color: ca,
+                                        alpha: 0.30))
+            }
+            spinRoot.addChildNode(beams)
+            webNode = beams
+        } else {
+            webNode = edgeWeb(segments: webSegments,
+                              alpha: settings.threeD ? 0.22 : 0.34,
+                              style: settings.linkStyle,
+                              flat: !settings.threeD)
+            if let webNode { spinRoot.addChildNode(webNode) }
+
+            // The busiest connections get physical weight.
+            for (edge, _) in emphasisPairs.sorted(by: { $0.1 > $1.1 }).prefix(60) {
+                guard let a = layout.positions[edge.source], let b = layout.positions[edge.target] else { continue }
+                let hubEnd = (degree[edge.source] ?? 0) >= (degree[edge.target] ?? 0) ? edge.source : edge.target
+                emphasisNode.addChildNode(link(from: a, to: b,
+                                               radius: CGFloat(settings.linkThickness),
+                                               color: linkColorOf(hubEnd),
+                                               alpha: 0.22))
+            }
         }
         spinRoot.addChildNode(emphasisNode)
 
@@ -461,7 +574,7 @@ enum VaultBrainScene {
                               phantom: phantom,
                               recent: recent,
                               rounded: node.type == "canvas",
-                              cacheKey: "\(VaultBrainPalette.family(node))|\(phantom)|\(recent)|\(node.type == "canvas")|\(settings.recency ? recencyBucket(node, now: now) : -1)")
+                              cacheKey: "\(color.hexRGB)|\(phantom)|\(recent)|\(node.type == "canvas")")
 
             let plane = billboardPlane(texture: texture, width: width, height: width,
                                        glow: settings.glow && key, writesDepth: true)
@@ -558,21 +671,56 @@ enum VaultBrainScene {
 
     // MARK: geometry
 
-    /// ALL edges in one `.line` geometry — a single draw call for the web.
+    /// ALL edges in one `.line` geometry — a single draw call for the web,
+    /// whatever the line style (curves and dashes are just more segments).
     private static func edgeWeb(segments: [(SIMD3<Float>, SIMD3<Float>, UIColor, UIColor)],
-                                alpha: CGFloat) -> SCNNode? {
+                                alpha: CGFloat, style: LinkStyle, flat: Bool) -> SCNNode? {
         guard !segments.isEmpty else { return nil }
         var vertices = [SCNVector3]()
         var colors = [Float]()
-        vertices.reserveCapacity(segments.count * 2)
-        colors.reserveCapacity(segments.count * 8)
-        for (a, b, ca, cb) in segments {
-            vertices.append(SCNVector3(CGFloat(a.x), CGFloat(a.y), CGFloat(a.z)))
-            vertices.append(SCNVector3(CGFloat(b.x), CGFloat(b.y), CGFloat(b.z)))
-            for color in [ca, cb] {
+        func push(_ p: SIMD3<Float>, _ q: SIMD3<Float>, _ cp: UIColor, _ cq: UIColor) {
+            vertices.append(SCNVector3(CGFloat(p.x), CGFloat(p.y), CGFloat(p.z)))
+            vertices.append(SCNVector3(CGFloat(q.x), CGFloat(q.y), CGFloat(q.z)))
+            for color in [cp, cq] {
                 var r: CGFloat = 1, g: CGFloat = 1, b2: CGFloat = 1, a2: CGFloat = 1
                 color.getRed(&r, green: &g, blue: &b2, alpha: &a2)
                 colors.append(contentsOf: [Float(r), Float(g), Float(b2), Float(alpha)])
+            }
+        }
+        for (a, b, ca, cb) in segments {
+            switch style {
+            case .straight, .beams:
+                push(a, b, ca, cb)
+            case .curved:
+                // Quadratic arc: 2D bows in-plane, 3D bows away from the core.
+                let mid = (a + b) / 2
+                let chord = b - a
+                let span = simd_length(chord)
+                let bow: SIMD3<Float>
+                if flat {
+                    let perp = SIMD3(-chord.y, chord.x, 0)
+                    let l = simd_length(perp)
+                    bow = l > 0.001 ? perp / l : SIMD3(0, 1, 0)
+                } else {
+                    let l = simd_length(mid)
+                    bow = l > 0.05 ? mid / l : SIMD3(0, 1, 0)
+                }
+                let control = mid + bow * (span * 0.18)
+                var previous = a
+                for step in 1...8 {
+                    let t = Float(step) / 8
+                    let point = (1 - t) * (1 - t) * a + 2 * (1 - t) * t * control + t * t * b
+                    push(previous, point, t <= 0.5 ? ca : cb, t <= 0.5 ? ca : cb)
+                    previous = point
+                }
+            case .dashed:
+                let span = simd_length(b - a)
+                let slots = max(Int(span / 0.22), 3)
+                for dash in stride(from: 0, to: slots, by: 2) {
+                    let t0 = Float(dash) / Float(slots)
+                    let t1 = Float(dash + 1) / Float(slots)
+                    push(a + (b - a) * t0, a + (b - a) * t1, ca, cb)
+                }
             }
         }
         let vertexSource = SCNGeometrySource(vertices: vertices)
