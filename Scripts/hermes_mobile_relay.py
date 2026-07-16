@@ -2254,10 +2254,40 @@ def capture_brain_dump(text: str, title: str = "") -> dict:
     return {"ok": True, "path": str(path), "id": node_id}
 
 
+WIKILINK_RE = re.compile(r"\[\[([^\]]+)\]\]")
+INLINE_TAG_RE = re.compile(r"(?:^|\s)#([A-Za-z][\w/-]{0,40})")
+
+
+def _note_meta(path: Path) -> dict:
+    """Everything the graph wants from one note in a single read: wikilink
+    targets, inline #tags (cap 6), word count, mtime. Never raises."""
+    try:
+        text = path.read_text(errors="ignore")
+    except Exception:  # noqa: BLE001 — a vault read must never break the graph
+        text = ""
+    try:
+        modified = int(path.stat().st_mtime)
+    except OSError:
+        modified = 0
+    found = (raw.split("|")[0].split("#")[0].strip()
+             for raw in WIKILINK_RE.findall(text))
+    tags: list[str] = []
+    for tag in INLINE_TAG_RE.findall(text):
+        if tag not in tags:
+            tags.append(tag)
+        if len(tags) >= 6:
+            break
+    return {"links": [t for t in found if t], "tags": tags,
+            "words": len(text.split()), "modified": modified}
+
+
 def vault_graph() -> dict:
     """Both brains as ONE graph: every Boardroom-Vault note AND every Obsidian
     note is a node, every [[wikilink]] an edge — including cross-vault links
-    (an Obsidian note naming a company note, or vice versa)."""
+    (an Obsidian note naming a company note, or vice versa). Nodes carry
+    folder / modified / words / tags so the phone can paint structure and
+    recency; unresolved link targets are marked phantom; .canvas boards are
+    nodes linked to every note they embed."""
     root = COMPANY_VAULT_ROOT
     agent_ids = {"ceo", "cfo", "cto", "marketing", "research", "builder", "qa", "lena", "gm"}
     skip = {"Home", "Decision Log"}
@@ -2282,15 +2312,6 @@ def vault_graph() -> dict:
                 break
         return s.strip().title() or name.replace("-", " ").title()
 
-    def wikilinks(md: Path) -> list[str]:
-        try:
-            text = md.read_text(errors="ignore")
-        except Exception:  # noqa: BLE001
-            return []
-        found = (raw.split("|")[0].split("#")[0].strip()
-                 for raw in re.findall(r"\[\[([^\]]+)\]\]", text))
-        return [t for t in found if t and t not in skip]
-
     company_notes = ([md for md in root.rglob("*.md") if md.stem not in skip]
                      if root.exists() else [])
     company_names = {md.stem for md in company_notes}
@@ -2303,41 +2324,92 @@ def vault_graph() -> dict:
 
     nodes: dict[str, dict] = {}
     edges: list[dict] = []
-
-    def add_company(name: str) -> str:
-        typ = kind(name, "")
-        nodes.setdefault(name, {"id": name, "label": label(name, typ == "agent"), "type": typ})
-        return name
-
-    def add_obsidian(nid: str) -> str:
-        name = nid.removeprefix("obsidian:").rsplit("/", 1)[-1]
-        nodes.setdefault(nid, {"id": nid, "label": name, "type": "obsidian"})
-        return nid
+    pending: list[tuple[str, list[str], bool]] = []   # (source id, targets, from Obsidian)
 
     for md in company_notes:
         nid = md.stem
         typ = kind(nid, md.parent.name)
-        nodes.setdefault(nid, {"id": nid, "label": label(nid, typ == "agent"), "type": typ})
-        for target in wikilinks(md):
-            # Same-vault names win; an Obsidian-only name is the cross-link.
-            if target in company_names or target not in ob_ids:
-                tid = add_company(target)
-            else:
-                tid = add_obsidian(ob_ids[target])
-            edges.append({"source": nid, "target": tid})
+        meta = _note_meta(md)
+        node = {"id": nid, "label": label(nid, typ == "agent"), "type": typ,
+                "folder": "Boardroom", "modified": meta["modified"], "words": meta["words"]}
+        if meta["tags"]:
+            node["tags"] = meta["tags"]
+        nodes.setdefault(nid, node)
+        pending.append((nid, meta["links"], False))
 
     for md in ob_notes:
-        nid = add_obsidian("obsidian:" + str(md.relative_to(ob_root).with_suffix("")))
-        for target in wikilinks(md):
-            if target in ob_ids:
-                tid = add_obsidian(ob_ids[target])
-            elif target in company_names:
-                tid = add_company(target)   # the cross-link back into the company brain
-            else:
-                tid = add_obsidian("obsidian:" + target)   # phantom, same as company links
-            edges.append({"source": nid, "target": tid})
+        rel = md.relative_to(ob_root)
+        nid = "obsidian:" + str(rel.with_suffix(""))
+        meta = _note_meta(md)
+        node = {"id": nid, "label": md.stem, "type": "obsidian",
+                "folder": rel.parts[0] if len(rel.parts) > 1 else "Notes",
+                "modified": meta["modified"], "words": meta["words"]}
+        if meta["tags"]:
+            node["tags"] = meta["tags"]
+        nodes.setdefault(nid, node)
+        pending.append((nid, meta["links"], True))
+
+    def resolve(target: str, from_obsidian: bool) -> str:
+        """A wikilink target → its node id. Same-vault names win; a name that
+        resolves to no real file mints a phantom node (Obsidian's
+        'unresolved link' look — agents stay first-class, never phantom)."""
+        if from_obsidian and target in ob_ids:
+            return ob_ids[target]
+        if target in company_names:
+            return target
+        if target in ob_ids:
+            return ob_ids[target]
+        if from_obsidian:
+            nid = "obsidian:" + target
+            nodes.setdefault(nid, {"id": nid, "label": target, "type": "obsidian",
+                                   "phantom": True})
+            return nid
+        typ = kind(target, "")
+        node = nodes.setdefault(target, {"id": target,
+                                         "label": label(target, typ == "agent"),
+                                         "type": typ})
+        if typ != "agent":
+            node.setdefault("phantom", True)
+        return target
+
+    for src, targets, from_obsidian in pending:
+        for target in targets:
+            if target in skip:
+                continue
+            edges.append({"source": src, "target": resolve(target, from_obsidian)})
+
+    # Canvas boards: each .canvas is a node linked to every real note it embeds.
+    if ob_root is not None:
+        try:
+            canvases = [c for c in ob_root.rglob("*.canvas")
+                        if not any(part.startswith(".")
+                                   for part in c.relative_to(ob_root).parts)]
+        except OSError:
+            canvases = []
+        for canvas in canvases:
+            try:
+                rel = canvas.relative_to(ob_root)
+                data = json.loads(canvas.read_text(errors="ignore") or "{}")
+                refs = ["obsidian:" + item["file"][:-3]
+                        for item in data.get("nodes", [])
+                        if isinstance(item, dict)
+                        and isinstance(item.get("file"), str)
+                        and item["file"].endswith(".md")]
+                try:
+                    modified = int(canvas.stat().st_mtime)
+                except OSError:
+                    modified = 0
+                cid = "canvas:" + str(rel.with_suffix(""))
+                nodes.setdefault(cid, {"id": cid, "label": canvas.stem, "type": "canvas",
+                                       "folder": rel.parts[0] if len(rel.parts) > 1 else "Notes",
+                                       "modified": modified})
+                edges.extend({"source": cid, "target": ref} for ref in refs if ref in nodes)
+            except Exception:  # noqa: BLE001 — a bad canvas must never break the graph
+                continue
 
     graph = {"nodes": list(nodes.values()), "edges": edges}
+    if ob_root is not None:
+        graph["vault"] = ob_root.name
     if truncated:
         graph["truncated"] = True
     return graph

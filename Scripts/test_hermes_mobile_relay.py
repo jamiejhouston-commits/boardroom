@@ -487,8 +487,14 @@ class ObsidianGraphTests(unittest.TestCase):
         self.vault = root / "vault"
         (self.vault / "Ideas").mkdir(parents=True)
         (self.vault / "Ideas" / "Growth.md").write_text(
-            "[[Roadmap]] [[2026-07-01-standup]] [[Nowhere]]")
+            "[[Roadmap]] [[2026-07-01-standup]] [[Nowhere]] #strategy #q3")
         (self.vault / "Roadmap.md").write_text("plain note")
+        (self.vault / "Board.canvas").write_text(json.dumps({
+            "nodes": [{"type": "file", "file": "Ideas/Growth.md"},
+                      {"type": "file", "file": "art.png"},
+                      {"type": "text", "text": "loose idea"}],
+            "edges": []}))
+        (self.vault / "Broken.canvas").write_text("not json{{{")
         (self.vault / ".obsidian").mkdir()
         (self.vault / ".obsidian" / "workspace.md").write_text("junk")
         (self.vault / ".trash").mkdir()
@@ -502,10 +508,45 @@ class ObsidianGraphTests(unittest.TestCase):
 
     def test_obsidian_notes_become_namespaced_nodes(self):
         nodes = {n["id"]: n for n in relay.vault_graph()["nodes"]}
-        self.assertEqual(nodes["obsidian:Ideas/Growth"],
-                         {"id": "obsidian:Ideas/Growth", "label": "Growth", "type": "obsidian"})
+        growth = nodes["obsidian:Ideas/Growth"]
+        self.assertEqual(growth["label"], "Growth")
+        self.assertEqual(growth["type"], "obsidian")
         self.assertIn("obsidian:Roadmap", nodes)
         self.assertFalse(any(".obsidian" in nid or ".trash" in nid for nid in nodes))
+
+    def test_nodes_carry_folder_recency_and_tags(self):
+        nodes = {n["id"]: n for n in relay.vault_graph()["nodes"]}
+        growth = nodes["obsidian:Ideas/Growth"]
+        self.assertEqual(growth["folder"], "Ideas")
+        self.assertEqual(growth["tags"], ["strategy", "q3"])
+        self.assertIsInstance(growth["modified"], int)
+        self.assertGreater(growth["words"], 0)
+        self.assertEqual(nodes["obsidian:Roadmap"]["folder"], "Notes")   # vault root
+        self.assertEqual(nodes["2026-07-01-standup"]["folder"], "Boardroom")
+        self.assertNotIn("phantom", growth)
+
+    def test_unresolved_links_are_phantom_agents_are_not(self):
+        nodes = {n["id"]: n for n in relay.vault_graph()["nodes"]}
+        self.assertTrue(nodes["obsidian:Nowhere"]["phantom"])
+        self.assertEqual(nodes["ceo"]["type"], "agent")
+        self.assertNotIn("phantom", nodes["ceo"])
+
+    def test_canvas_becomes_node_linked_to_embedded_notes(self):
+        graph = relay.vault_graph()
+        nodes = {n["id"]: n for n in graph["nodes"]}
+        board = nodes["canvas:Board"]
+        self.assertEqual(board["type"], "canvas")
+        self.assertEqual(board["label"], "Board")
+        self.assertIn({"source": "canvas:Board", "target": "obsidian:Ideas/Growth"},
+                      graph["edges"])
+        # png / text canvas items and the unparseable canvas are skipped, not fatal
+        self.assertNotIn("canvas:Broken", nodes)
+        self.assertFalse(any(e["target"].endswith("art") for e in graph["edges"]))
+
+    def test_graph_names_the_obsidian_vault(self):
+        self.assertEqual(relay.vault_graph()["vault"], "vault")
+        relay.OBSIDIAN_CONFIG_PATH.write_text('{"vault_path": "/nope/nowhere"}')
+        self.assertNotIn("vault", relay.vault_graph())
 
     def test_cross_vault_edges_both_directions(self):
         edges = relay.vault_graph()["edges"]
